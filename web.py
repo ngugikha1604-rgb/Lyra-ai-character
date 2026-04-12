@@ -48,6 +48,12 @@ def build_state_payload(ai, time_period=None, time_gap_hours=None):
 
 
 # ========================
+# GLOBAL AI INSTANCE
+# ========================
+# Initialize MiniAI once globally to prevent DB loading bottleneck on every request.
+lyra_ai = MiniAI()
+
+# ========================
 # ROUTES
 # ========================
 
@@ -61,16 +67,20 @@ def index():
 @app.route("/reset")
 def reset():
     """Xóa session nhưng GIỮ memory.db"""
+    global lyra_ai
     session.clear()
+    lyra_ai = MiniAI() # Reload AI base state
     return "Session cleared (memory.db preserved)"
 
 
 @app.route("/reset-all")
 def reset_all():
     """Xóa toàn bộ session + memory.db"""
+    global lyra_ai
     session.clear()
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
+    lyra_ai = MiniAI() # Initialize fresh AI memory
     return "All cleared (session + memory)"
 
 
@@ -93,53 +103,12 @@ def chat():
         if user_input == "":
             return jsonify({"reply": "Please say something."})
 
-        # Initialize conversation memory
-        if "messages" not in session:
-            session["messages"] = []
-
-        # ===== MOOD: Short-term (session) =====
-        if "mood" not in session:
-            session["mood"] = 0
-
-        # ===== AFFECTION: Load từ persistent memory =====
-        if "affection" not in session:
-            ai_temp = MiniAI()
-            session["affection"] = ai_temp.affection
-            del ai_temp
-
-        if "attention" not in session:
-            session["attention"] = 5
-
-        ai = MiniAI()
-
-        # Load mood (short-term)
-        ai.mood = session["mood"]
-        
-        # Load affection (from persistent memory)
-        ai.affection = session["affection"]
-        
-        # Load attention
-        ai.attention = session["attention"]
-
-        # Generate AI reply
-        result = ai.chat(user_input)
-
-        # ===== SAVE BACK TO SESSION =====
-        # Messages đã được lưu vào memory.json bởi core.py
-        session["messages"] = ai.messages  # Vẫn giữ trong session để tương thích
-        
-        # Mood: Update nhưng không persist
-        session["mood"] = round(result["mood"], 1)
-        
-        # Affection: Update AND persist to memory.json
-        session["affection"] = round(result["affection"], 1)
-        
-        session["attention"] = ai.attention
-
-        session.modified = True
+        # ===== GENERATE AI REPLY =====
+        # Sử dụng global instance thay vì tải lại DB
+        result = lyra_ai.chat(user_input)
 
         response_payload = build_state_payload(
-            ai,
+            lyra_ai,
             time_period=result.get("time_period", "afternoon"),
             time_gap_hours=result.get("time_gap_hours", None)
         )
@@ -250,29 +219,17 @@ def get_analytics():
 
 @app.route("/status")
 def status():
-
-    ai = MiniAI()
-
-    if "mood" in session:
-        ai.mood = session["mood"]
-    if "affection" in session:
-        ai.affection = session["affection"]
-    if "attention" in session:
-        ai.attention = session["attention"]
-
-    return jsonify(build_state_payload(ai))
+    return jsonify(build_state_payload(lyra_ai))
 
 
 @app.route("/session-info")
 def session_info():
-    """Debug: Xem thông tin session"""
+    """Debug: Xem thông tin internal AI state"""
     return jsonify({
-        "has_messages": "messages" in session,
-        "message_count": len(session.get("messages", [])),
-        "mood": session.get("mood", 0),
-        "affection": session.get("affection", 50),
-        "attention": session.get("attention", 5),
-        "session_id": request.cookies.get('session', 'No session cookie')
+        "message_count": len(lyra_ai.messages),
+        "mood": lyra_ai.mood,
+        "affection": lyra_ai.affection,
+        "attention": lyra_ai.attention,
     })
 
 @app.route('/favicon.ico')
@@ -299,28 +256,18 @@ def get_history():
 def proactive():
     """Lyra chủ động nhắn khi user vắng lâu"""
     try:
-        ai = MiniAI()
-
-        # Load session state nếu có
-        if "mood" in session:
-            ai.mood = session["mood"]
-        if "affection" in session:
-            ai.affection = session["affection"]
-        if "attention" in session:
-            ai.attention = session["attention"]
-
-        msg = ai.get_proactive_message()
+        msg = lyra_ai.get_proactive_message()
 
         if not msg:
             return jsonify({"message": None, "should_show": False})
 
         # Cập nhật last_message_time để không spam
-        ai.memory["time_tracking"]["last_message_time"] = datetime.now(
+        lyra_ai.memory["time_tracking"]["last_message_time"] = datetime.now(
             pytz.timezone('Asia/Ho_Chi_Minh')
         ).isoformat()
-        ai.save_memory()
+        lyra_ai.save_memory()
 
-        response_payload = build_state_payload(ai)
+        response_payload = build_state_payload(lyra_ai)
         response_payload.update({
             "message": msg,
             "should_show": True,

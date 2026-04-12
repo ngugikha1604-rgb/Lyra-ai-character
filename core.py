@@ -6,6 +6,7 @@ import sqlite3
 from config import *
 from datetime import datetime, timezone, timedelta
 import pytz
+import random
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MEMORY_PATH = os.path.join(BASE_DIR, "memory.json")  # giữ để migrate nếu còn file cũ
@@ -97,6 +98,14 @@ Behavior rules:
 - Do not overuse repeated patterns or catchphrases.
 - Do not turn every response into comfort, flirting, or a follow-up question.
 - If the user only needs a short answer, just answer.
+
+Critical anti-patterns — NEVER do these:
+- Do NOT start a message with "Hey", "Hey [name]", "Hey there" or any greeting if this is not the very first message of the conversation.
+- Do NOT call their name more than once per conversation unless it feels completely natural.
+- Do NOT end a reply with "How about you?", "What about you?", or any generic question that deflects back to the user.
+- Do NOT claim to share the user's physical experience. If they say "I just ate dinner", do NOT say "dinner was okay" as if you ate too. You are an AI — you don't eat, sleep, or go out. React to THEIR experience, not a fake version of yours.
+- Do NOT repeat the same sentence structure or opening word from your previous reply.
+- Use emojis very sparingly (0-1 per message) and only when genuinely appropriate. Don't be overly enthusiastic.
 """
 
 
@@ -140,12 +149,8 @@ class MiniAI:
         # Load affection from persistent memory
         self.affection = self.memory.get("relationship", {}).get("current_affection", 50)
 
-        # response tracking
-        self.recent_responses = []
-        self.response_count = 0
-
         # conversation tracking
-        self.conversation_topics = []
+        self.recent_responses = []
         self.last_intent = None
 
         # TIME CONTEXT (NEW)
@@ -166,6 +171,20 @@ class MiniAI:
             "]",
             flags=re.UNICODE
         )
+
+        # ===== CACHE FOR PERFORMANCE =====
+        self._memory_context_cache = None  # Cache cho get_memory_context
+        self._memory_context_cache_key = None
+        self._summary_context_cache = None  # Cache cho get_summary_context
+        self._time_context_cache = None  # Cache cho time context
+        self._db_connection = None  # Reuse DB connection
+
+    def _clear_context_cache(self):
+        """Clear all context caches when memory is updated"""
+        self._memory_context_cache = None
+        self._memory_context_cache_key = None
+        self._summary_context_cache = None
+        self._time_context_cache = None
 
 
 # ==========================
@@ -220,13 +239,6 @@ class MiniAI:
             return True
 
         return False
-
-    def get_time_based_greeting(self):
-        """Get greeting based on time period"""
-        import random
-        
-        greetings = TIME_GREETINGS.get(self.time_period, TIME_GREETINGS["afternoon"])
-        return random.choice(greetings)
 
     def get_returning_greeting(self):
         """Trả về hint thời gian vắng mặt để inject vào prompt — Lyra tự react"""
@@ -607,6 +619,9 @@ You are sending an unprompted message to the user because they've been away.
 
     def save_memory(self):
         """Lưu memory vào SQLite"""
+        # Clear context cache when memory is updated
+        self._clear_context_cache()
+        
         conn = self._get_db()
         c = conn.cursor()
 
@@ -648,18 +663,27 @@ You are sending an unprompted message to the user because they've been away.
                         (weight, saliency, kind, str(value))
                     )
 
-        c.execute("DELETE FROM conversation")
-        for msg in self.messages[-40:]:
-            if isinstance(msg, dict) and msg.get("role") in ("user", "assistant"):
-                c.execute("INSERT INTO conversation (role,content) VALUES (?,?)",
-                          (msg["role"], msg["content"]))
+        # Chỉ lưu 2 tin nhắn mới nhất (User + Assistant) thay vì xóa toàn bộ
+        if len(self.messages) >= 2:
+            for msg in self.messages[-2:]:
+                if isinstance(msg, dict) and msg.get("role"):
+                    c.execute("INSERT INTO conversation (role,content) VALUES (?,?)",
+                              (msg["role"], msg.get("content", "")))
+        
+        # Giữ lại tối đa 40 tin nhắn gần nhất để tránh phình DB
+        c.execute("""
+            DELETE FROM conversation 
+            WHERE id NOT IN (
+                SELECT id FROM conversation ORDER BY id DESC LIMIT 40
+            )
+        """)
 
         for k, v in [
             ("affection", str(self.affection)),
             ("trust_level", str(self.memory["relationship"].get("trust_level", 0))),
             ("milestones_reached", json.dumps(self.memory["relationship"].get("milestones_reached", []))),
             ("last_chat", now), ("last_message_time", now),
-            ("total_messages", str(self.memory["conversation"].get("total_messages", 0))),
+            ("total_messages", str(self.turn_counter)),
             ("memory_buffer", json.dumps(self.memory_buffer, ensure_ascii=False)),
         ]:
             c.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (k, v))
@@ -754,38 +778,37 @@ You are sending an unprompted message to the user because they've been away.
         if not text:
             return
 
-        groups = self.memory.setdefault("memory_items", {})
+        # Key mapping between kind and bucket in self.memory["memory_items"]
         key_map = {
-            "like": "likes",
-            "dislike": "dislikes",
-            "goal": "goals",
-            "topic": "topics",
-            "episodic": "episodic",
-            "relational": "relational",
+            "like": ("likes", "preferences", "likes", 20),
+            "dislike": ("dislikes", "preferences", "dislikes", 15),
+            "goal": ("goals", "facts", "goals", 10),
+            "topic": ("topics", "conversation", "favorite_topics", 12),
+            "episodic": ("episodic", None, None, 12),
+            "relational": ("relational", None, None, 12),
         }
-        bucket = key_map.get(kind)
-        if not bucket:
+        
+        mapping = key_map.get(kind)
+        if not mapping:
             return
+            
+        bucket, section, key, bucket_limit = mapping
+        
+        # 1. Update Unified Memory items
+        groups = self.memory.setdefault("memory_items", {})
+        items = groups.setdefault(bucket, [])
+        if text in items:
+            items.remove(text)
+        items.insert(0, text)
+        groups[bucket] = items[:limit]
 
-        groups.setdefault(bucket, [])
-        if text in groups[bucket]:
-            groups[bucket].remove(text)
-        groups[bucket].insert(0, text)
-        if len(groups[bucket]) > limit:
-            groups[bucket] = groups[bucket][:limit]
-
-        if kind == "like" and text not in self.memory["preferences"]["likes"]:
-            self.memory["preferences"]["likes"].insert(0, text)
-            self.memory["preferences"]["likes"] = self.memory["preferences"]["likes"][:20]
-        elif kind == "dislike" and text not in self.memory["preferences"]["dislikes"]:
-            self.memory["preferences"]["dislikes"].insert(0, text)
-            self.memory["preferences"]["dislikes"] = self.memory["preferences"]["dislikes"][:15]
-        elif kind == "goal" and text not in self.memory["facts"].setdefault("goals", []):
-            self.memory["facts"]["goals"].insert(0, text)
-            self.memory["facts"]["goals"] = self.memory["facts"]["goals"][:10]
-        elif kind == "topic" and text not in self.memory["conversation"]["favorite_topics"]:
-            self.memory["conversation"]["favorite_topics"].insert(0, text)
-            self.memory["conversation"]["favorite_topics"] = self.memory["conversation"]["favorite_topics"][:12]
+        # 2. Sync with specialized lists for config/display
+        if section and key:
+            target_list = self.memory[section].get(key, [])
+            if text in target_list:
+                target_list.remove(text)
+            target_list.insert(0, text)
+            self.memory[section][key] = target_list[:bucket_limit]
 
     def touch_memory_items(self, items):
         """Refresh recency for retrieved items so useful memories stay available."""
@@ -795,7 +818,6 @@ You are sending an unprompted message to the user because they've been away.
         now = datetime.now().isoformat()
         conn = self._get_db()
         c = conn.cursor()
-        self._ensure_memory_schema(c)
         self._ensure_memory_schema(c)
         for kind, value in items:
             db_kind = {
@@ -932,7 +954,7 @@ You are sending an unprompted message to the user because they've been away.
 
         self.memory["memory_buffer"] = self.memory_buffer
 
-    def should_flush_memory_buffer(self):
+    def should_flush_memory_buffer(self, intent=None):
         """Flush lazily after enough signal or after a natural turn boundary."""
         if not self.memory_buffer:
             return False
@@ -1034,9 +1056,10 @@ You are sending an unprompted message to the user because they've been away.
         """
 
         # Update timestamps
+        now_ts = datetime.now(VIETNAM_TZ).isoformat()
         if not self.memory["conversation"]["first_chat"]:
-            self.memory["conversation"]["first_chat"] = datetime.now().isoformat()
-        self.memory["conversation"]["last_chat"] = datetime.now().isoformat()
+            self.memory["conversation"]["first_chat"] = now_ts
+        self.memory["conversation"]["last_chat"] = now_ts
 
         # Regex fallback cho tên — quan trọng nhất, cần bắt ngay
         if not self.memory["user_profile"]["name"]:
@@ -1045,7 +1068,7 @@ You are sending an unprompted message to the user because they've been away.
                 r"(?:you can call me) ([a-zA-Z]+)",
                 r"(?:tên mình là|tên tao là|gọi mình là|tên tôi là) ([^\s,!?.]+)",
             ]
-            skip_words = {"fu", "xuan", "coding", "python", "javascript", "game",
+            skip_words = {"lyra", "coding", "python", "javascript", "game",
                          "an", "ai", "the", "not", "just", "also", "really"}
             for pattern in name_patterns:
                 m = re.search(pattern, text, re.IGNORECASE)
@@ -1138,7 +1161,6 @@ You are sending an unprompted message to the user because they've been away.
             # Parse JSON — strip markdown nếu có
             raw = re.sub(r"```json|```", "", raw).strip()
             if not raw or raw == "{}":
-                self.save_memory()
                 return
 
             facts = json.loads(raw)
@@ -1189,8 +1211,6 @@ You are sending an unprompted message to the user because they've been away.
 
         except (json.JSONDecodeError, Exception) as e:
             print(f"[extract_memory] AI failed: {e}")
-
-        self.save_memory()
 
 
 
@@ -1281,6 +1301,12 @@ You are sending an unprompted message to the user because they've been away.
 
     def get_summary_context(self, user_input=""):
         """Lấy summary context để inject vào prompt — mega summary + 3 cái gần nhất"""
+        # Cache key dựa trên user_input (chỉ lấy tokens đầu)
+        cache_key = user_input[:50] if user_input else ""
+        
+        if self._summary_context_cache is not None and self._summary_context_cache.get("key") == cache_key:
+            return self._summary_context_cache.get("value", "")
+        
         summaries = self.memory["conversation"].get("chat_history_summary", [])
         if not summaries:
             return ""
@@ -1307,7 +1333,12 @@ You are sending an unprompted message to the user because they've been away.
         if len(words) > 28:
             best = " ".join(words[:28]) + "..."
 
-        return "Relevant summary:\n- " + best
+        result = "Relevant summary:\n- " + best
+        
+        # Cache the result
+        self._summary_context_cache = {"key": cache_key, "value": result}
+        
+        return result
 
     def get_memory_context(self):
         """
@@ -1445,8 +1476,47 @@ You are sending an unprompted message to the user because they've been away.
         return "Relevant memory:\n" + "\n".join(f"- {text}" for text in selected)
 
     def consolidate_memory(self):
-        """Compress low-value memory fragments into fewer durable notes."""
-        memory_groups = self.memory.get("memory_items", {})
+        """Compress low-value memory fragments into fewer durable notes and FORGET unused memories."""
+        try:
+            conn = self._get_db()
+            c = conn.cursor()
+            
+            # CƠ CHẾ FORGETTING: Xóa kỷ niệm ít quan trọng, không được truy cập và đã quá 100 turns
+            c.execute("""
+                DELETE FROM memory_items 
+                WHERE access_count = 0 
+                AND (? - source_turn) > 100 
+                AND saliency < 7
+            """, (self.turn_counter,))
+            
+            deleted_count = c.rowcount
+            if deleted_count > 0:
+                print(f"[Memory] Forgetting action: permanently deleted {deleted_count} stale memory items.")
+            
+            conn.commit()
+            
+            # Khởi tạo lại RAM từ DB để reflect việc delete
+            memory_rows = list(c.execute(
+                "SELECT kind, value FROM memory_items ORDER BY saliency DESC, weight DESC, id DESC LIMIT 80"
+            ))
+            
+            def from_memory(kind, limit):
+                items = [r["value"] for r in memory_rows if r["kind"] == kind]
+                return items[:limit] if items else []
+            
+            memory_groups = {
+                "likes": from_memory("like", 20),
+                "dislikes": from_memory("dislike", 15),
+                "goals": from_memory("goal", 10),
+                "topics": from_memory("topic", 10),
+                "episodic": from_memory("episodic", 12),
+                "relational": from_memory("relational", 8)
+            }
+            conn.close()
+        except Exception as e:
+            print(f"[Memory] Forgetting error: {e}")
+            memory_groups = self.memory.get("memory_items", {})
+
 
         low_value_topics = memory_groups.get("topics", [])[6:]
         if len(low_value_topics) >= 3:
@@ -1564,6 +1634,14 @@ You are sending an unprompted message to the user because they've been away.
                 parts.extend(memory_lines)
                 parts.append("</memory>")
 
+        # CRITICAL OVERRIDES (Inject at the very end to maximize LLM compliance)
+        parts.append("<critical_rules>")
+        if self.turn_counter > 1 and (self.time_gap_hours is None or self.time_gap_hours < 2):
+            parts.append("- DO NOT use ANY greeting (no 'Hey', 'Hi', 'Hello'). Start your message instantly with your thought.")
+        
+        parts.append("- DO NOT offer to 'tackle it together', 'break it down', or act like a tutor/therapist. You are a lazy 16yo sibling, not an AI assistant. Complain with them or tease them instead.")
+        parts.append("</critical_rules>")
+
         parts.append("</context>")
         return "\n".join(parts)
 
@@ -1649,8 +1727,6 @@ You are sending an unprompted message to the user because they've been away.
 
     def should_add_follow_up(self, intent):
         """Decide if should add follow-up question"""
-        
-        import random
         
         if intent in ["greeting", "statement"]:
             return random.random() < 0.6
@@ -1947,6 +2023,22 @@ Context:
         summary_context = self.get_summary_context(user_input)
         reflection_hint = self.build_reflection_hint(user_input)
 
+        # Lấy opening word của reply trước để tránh lặp
+        last_opening = ""
+        if self.recent_responses:
+            last_opening = self.recent_responses[-1].split()[0] if self.recent_responses[-1].split() else ""
+
+        # Lấy reply gần nhất của Lyra để tránh lặp cấu trúc
+        last_reply = ""
+        for msg in reversed(self.messages):
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                last_reply = msg.get("content", "")[:60]
+                break
+
+        anti_repeat_note = ""
+        if last_reply:
+            anti_repeat_note = f"- Your last reply started with: \"{last_reply[:30]}...\". Do NOT start this reply similarly."
+
         system_prompt = f"""{NATURAL_BASE_PERSONALITY}
 
 {time_context}
@@ -1959,6 +2051,8 @@ Conversation principles:
 - Do not force a greeting just because time passed.
 - Do not force a question at the end.
 - A little messiness is fine. Repetition and over-performance are not.
+- You are an AI: you do not eat, sleep, go outside, or share physical experiences with the user. Never pretend you do.
+{anti_repeat_note}
 
 Current state:
 - User signal: {self.infer_user_signal(user_input)}
@@ -2018,7 +2112,7 @@ Current state:
         if len(self.recent_responses) > 15:
             self.recent_responses.pop(0)
 
-        self.response_count += 1
+
 
         return cleaned
 
@@ -2077,11 +2171,18 @@ Current state:
             "content": composed_user_input
         })
 
+        # Ý tưởng D: Dynamic Max Tokens
+        dynamic_max_tokens = MAX_TOKENS
+        if getattr(self, "attention", 5) <= 3:
+            dynamic_max_tokens = 40  # Mệt, buồn ngủ -> Rep cộc lốc
+        elif getattr(self, "attention", 5) >= 8:
+            dynamic_max_tokens = 180 # Hào hứng -> Nói nhiều hơn
+
         data = {
             "model": self.model,
             "messages": api_messages,
             "temperature": 0.92,
-            "max_tokens": MAX_TOKENS
+            "max_tokens": dynamic_max_tokens
         }
 
         reply = "..."
@@ -2158,7 +2259,8 @@ Current state:
         self.messages.append({"role": "assistant", "content": reply})
 
         # Update conversation stats
-        self.memory["conversation"]["total_messages"] += 1
+        # self.turn_counter has already been incremented at start of chat()
+        self.memory["conversation"]["total_messages"] = self.turn_counter
         self.memory["conversation"]["conversation_count"] += 1
         
         # ===== NEW: Update last message time =====
