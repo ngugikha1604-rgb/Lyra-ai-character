@@ -37,13 +37,20 @@ def get_db():
     return conn
 
 
-def build_state_payload(ai, time_period=None, time_gap_hours=None):
+def build_state_payload(ai, result=None):
+    # result contains: {reply, monologue, emotion, action, mood, affection, time_period, time_gap_hours}
+    if result is None:
+        result = {}
+
     return {
         "affection": int(round(ai.affection)),
         "mood": int(round(ai.mood)),
-        "emotion": ai.emotion_from_state(),
-        "time_period": time_period or getattr(ai, "time_period", "afternoon"),
-        "time_gap_hours": time_gap_hours if time_gap_hours is not None else getattr(ai, "time_gap_hours", None),
+        "emotion": result.get("emotion") or ai.emotion_from_state(),
+        "action": result.get("action") or "NONE",
+        "monologue": result.get("monologue") or "",
+        "reply": result.get("reply") or "",
+        "time_period": result.get("time_period") or getattr(ai, "time_period", "afternoon"),
+        "time_gap_hours": result.get("time_gap_hours") if result.get("time_gap_hours") is not None else getattr(ai, "time_gap_hours", None),
     }
 
 
@@ -107,12 +114,7 @@ def chat():
         # Sử dụng global instance thay vì tải lại DB
         result = lyra_ai.chat(user_input)
 
-        response_payload = build_state_payload(
-            lyra_ai,
-            time_period=result.get("time_period", "afternoon"),
-            time_gap_hours=result.get("time_gap_hours", None)
-        )
-        response_payload["reply"] = result["reply"]
+        response_payload = build_state_payload(lyra_ai, result=result)
 
         return jsonify(response_payload)
 

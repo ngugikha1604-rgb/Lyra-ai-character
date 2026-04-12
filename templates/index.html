@@ -580,6 +580,40 @@ font-size: 12px;
 color: #d0d0ff;
 }
 
+
+/* ==================== MONOLOGUE OVERLAY ==================== */
+.monologue-overlay {
+position: absolute;
+top: 15%;
+width: 80%;
+left: 10%;
+display: flex;
+justify-content: center;
+z-index: 20;
+pointer-events: none;
+perspective: 1000px;
+}
+.monologue-text {
+background: rgba(0, 0, 0, 0.6);
+backdrop-filter: blur(8px);
+border: 1px solid rgba(0, 245, 255, 0.3);
+color: #00f5ff;
+padding: 15px 25px;
+border-radius: 20px;
+font-style: italic;
+font-size: 14px;
+text-align: center;
+box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+opacity: 0;
+transform: translateY(20px) rotateX(-20deg);
+transition: all 0.6s cubic-bezier(0.23, 1, 0.32, 1);
+max-width: 400px;
+}
+.monologue-text.active {
+opacity: 1;
+transform: translateY(0) rotateX(0deg);
+}
+
 .emotion-tag.active {
 background: rgba(0, 245, 255, 0.2);
 border-color: rgba(0, 245, 255, 0.4);
@@ -612,6 +646,11 @@ color: #00f5ff;
 <div class="model-section">
 <!-- Option 5: Emotion Filter Overlay -->
 <div id="emotionFilterOverlay"></div>
+<!-- Monologue Layer -->
+<div class="monologue-overlay" id="monologueOverlay">
+  <div class="monologue-text" id="monologueText"></div>
+</div>
+
 
 <canvas id="live2dCanvas"></canvas>
 <div class="emotion-display">
@@ -768,7 +807,77 @@ reactToEmotion(data.emotion);
 }
 }
 
+if (data.action && data.action !== "NONE") {
+triggerAction(data.action);
+}
+
+if (data.monologue) {
+showMonologue(data.monologue);
+}
+
 updateTimeDisplay(data.time_period, data.time_gap_hours);
+}
+
+function showMonologue(text) {
+const container = document.getElementById("monologueText");
+container.innerText = text;
+container.classList.remove("active");
+
+// Trigger reflow for animation
+void container.offsetWidth;
+
+container.classList.add("active");
+
+// Auto hide after 5 seconds
+if (window.monologueTimeout) clearTimeout(window.monologueTimeout);
+window.monologueTimeout = setTimeout(() => {
+container.classList.remove("active");
+}, 6000);
+}
+
+function triggerAction(action) {
+if (!model) return;
+console.log("Triggering Action:", action);
+
+switch(action.toUpperCase()) {
+case "WAVE":
+  // Example: Use ParamArmLAngle or a motion if available
+  // For simplicity, we use generic parameters that exist in most models
+  setParam("ParamArmLAngle", 30, 0.5);
+  setTimeout(() => setParam("ParamArmLAngle", 0, 0.5), 1000);
+  break;
+case "NOD":
+  const currentY = model.internalModel.coreModel.getParameterValueById("ParamAngleY");
+  setParam("ParamAngleY", 20, 0.3);
+  setTimeout(() => setParam("ParamAngleY", -10, 0.3), 300);
+  setTimeout(() => setParam("ParamAngleY", currentY, 0.3), 600);
+  break;
+case "SHAKE_HEAD":
+  setParam("ParamAngleX", 25, 0.2);
+  setTimeout(() => setParam("ParamAngleX", -25, 0.2), 200);
+  setTimeout(() => setParam("ParamAngleX", 25, 0.2), 400);
+  setTimeout(() => setParam("ParamAngleX", 0, 0.2), 600);
+  break;
+case "LAUGH":
+  setParam("ParamMouthOpenY", 1.0, 0.1);
+  setParam("ParamEyeLSmile", 1.0, 0.2);
+  setParam("ParamEyeRSmile", 1.0, 0.2);
+  setTimeout(() => {
+    setParam("ParamMouthOpenY", 0, 0.5);
+    reactToEmotion(currentEmotion); // Reset to base emotion
+  }, 1500);
+  break;
+case "SHY":
+  setParam("ParamBrowLY", -0.5, 0.5);
+  setParam("ParamBrowRY", -0.5, 0.5);
+  setParam("ParamEyeBallY", -0.4, 0.5);
+  break;
+case "SURPRISED":
+  setParam("ParamEyeLOpen", 1.2, 0.1);
+  setParam("ParamEyeROpen", 1.2, 0.1);
+  setParam("ParamMouthOpenY", 0.8, 0.1);
+  break;
+}
 }
 
 async function initializeChatState() {

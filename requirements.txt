@@ -4,3 +4,5 @@ pytz
 flask
 flask-session
 python-dotenv
+sentence-transformers
+numpy

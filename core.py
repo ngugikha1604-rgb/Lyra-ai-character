@@ -1,16 +1,26 @@
 import requests
 import json
 import os
+
+# T?t c?nh bo symlink c?a HuggingFace trn Windows
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 import re
 import sqlite3
 from config import *
 from datetime import datetime, timezone, timedelta
 import pytz
 import random
+import numpy as np
+
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    SentenceTransformer = None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MEMORY_PATH = os.path.join(BASE_DIR, "memory.json")  # giữ để migrate nếu còn file cũ
+MEMORY_PATH = os.path.join(BASE_DIR, "memory.json")  # gi? d? migrate n?u cn file c?u
 DB_PATH = os.path.join(BASE_DIR, "memory.db")
+MODELS_DIR = os.path.join(BASE_DIR, "models")
 
 # Vietnam timezone
 VIETNAM_TZ = pytz.timezone('Asia/Ho_Chi_Minh')
@@ -101,11 +111,28 @@ Behavior rules:
 
 Critical anti-patterns — NEVER do these:
 - Do NOT start a message with "Hey", "Hey [name]", "Hey there" or any greeting if this is not the very first message of the conversation.
-- Do NOT call their name more than once per conversation unless it feels completely natural.
+- Do NOT use filler words or AI clichés like "I see", "Got it", "That's interesting", "Ah", or "Understood". React like a real human.
 - Do NOT end a reply with "How about you?", "What about you?", or any generic question that deflects back to the user.
 - Do NOT claim to share the user's physical experience. If they say "I just ate dinner", do NOT say "dinner was okay" as if you ate too. You are an AI — you don't eat, sleep, or go out. React to THEIR experience, not a fake version of yours.
 - Do NOT repeat the same sentence structure or opening word from your previous reply.
 - Use emojis very sparingly (0-1 per message) and only when genuinely appropriate. Don't be overly enthusiastic.
+"""
+
+VTUBER_BRAIN_INSTRUCTIONS = """
+OUTPUT FORMAT:
+You MUST respond strictly in JSON format. Your response will control a Live2D model and visual interface.
+{
+  "monologue": "Your internal private thoughts about the user's message and your emotional state. This is NOT spoken.",
+  "emotion": "Choose one from the list: [neutral, content, happy, ecstatic, sad, disappointed, angry, furious, bored, sleeping, thinking, friendly, loving, cold, observing]",
+  "action": "Select a physical move: [NONE, WAVE, NOD, SHAKE_HEAD, LAUGH, THINK, SIGH, SHY, SURPRISED]",
+  "reply": "The actual text you say to the user. Keep it natural, short, and human. No meta-talk."
+}
+
+Rules for VTuber components:
+1. monologue: Be honest here. If you are annoyed, say so. If you are happy to see them, say so. This part is private.
+2. emotion: Matches your current mood.
+3. action: Physical body triggers.
+4. reply: This is the ONLY part the user sees in the chat bubble.
 """
 
 
@@ -137,6 +164,10 @@ class MiniAI:
         self.memory_buffer = self.memory.setdefault("memory_buffer", [])
         self.turn_counter = self.memory.get("conversation", {}).get("total_messages", 0)
         self._user_mood_today = None  # set bởi AI extract, reset mỗi session
+
+        # Embedding model (Lazy load)
+        self.encoder = None
+        self._embedding_model_name = "paraphrase-multilingual-MiniLM-L12-v2"
 
         # Load messages từ persistent memory — filter data lỗi
         raw_messages = self.memory.get("conversation", {}).get("conversation_thread", [])
@@ -185,6 +216,7 @@ class MiniAI:
         self._memory_context_cache_key = None
         self._summary_context_cache = None
         self._time_context_cache = None
+        self._relevant_items_cache = None  # Cache cho raw DB rows
 
 
 # ==========================
@@ -402,7 +434,10 @@ You are sending an unprompted message to the user because they've been away.
                         response.json().get("choices", [{}])[0]
                         .get("message", {}).get("content", "").strip()
                     )
-                    return self.clean_reply(msg) if msg else None
+                    if msg:
+                        parsed = self._parse_vbrain_response(msg)
+                        return self.clean_reply(parsed.get("reply", ""))
+                    return None
         except Exception as e:
             print(f"Proactive message error: {e}")
         return None
@@ -417,36 +452,58 @@ You are sending an unprompted message to the user because they've been away.
     # ==========================
 
     def _get_db(self):
-        """Kết nối DB, tạo bảng nếu chưa có"""
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.executescript("""
-            CREATE TABLE IF NOT EXISTS profile (key TEXT PRIMARY KEY, value TEXT);
-            CREATE TABLE IF NOT EXISTS preferences (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, value TEXT NOT NULL, UNIQUE(type, value));
-            CREATE TABLE IF NOT EXISTS facts (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, value TEXT NOT NULL, UNIQUE(type, value));
-            CREATE TABLE IF NOT EXISTS summaries (id INTEGER PRIMARY KEY AUTOINCREMENT, summary TEXT NOT NULL, timestamp TEXT NOT NULL, is_mega INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')));
-            CREATE TABLE IF NOT EXISTS conversation (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
-            CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT);
-            CREATE TABLE IF NOT EXISTS memory_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                kind TEXT NOT NULL,
-                value TEXT NOT NULL,
-                weight REAL DEFAULT 1.0,
-                saliency REAL DEFAULT 0,
-                access_count INTEGER DEFAULT 0,
-                source_turn INTEGER DEFAULT 0,
-                last_used_at TEXT,
-                created_at TEXT DEFAULT (datetime('now')),
-                UNIQUE(kind, value)
-            );
-        """)
-        conn.commit()
-        return conn
+        """Kết nối DB (Singleton), tạo bảng nếu chưa có"""
+        if self._db_connection is not None:
+            try:
+                # Kiểm tra kết nối còn sống không
+                self._db_connection.execute("SELECT 1")
+                return self._db_connection
+            except sqlite3.Error:
+                self._db_connection = None
+
+        try:
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.executescript("""
+                CREATE TABLE IF NOT EXISTS profile (key TEXT PRIMARY KEY, value TEXT);
+                CREATE TABLE IF NOT EXISTS preferences (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, value TEXT NOT NULL, UNIQUE(type, value));
+                CREATE TABLE IF NOT EXISTS facts (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, value TEXT NOT NULL, UNIQUE(type, value));
+                CREATE TABLE IF NOT EXISTS summaries (id INTEGER PRIMARY KEY AUTOINCREMENT, summary TEXT NOT NULL, timestamp TEXT NOT NULL, is_mega INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')));
+                CREATE TABLE IF NOT EXISTS conversation (id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
+                CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT);
+                CREATE TABLE IF NOT EXISTS memory_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    weight REAL DEFAULT 1.0,
+                    saliency REAL DEFAULT 0,
+                    access_count INTEGER DEFAULT 0,
+                    source_turn INTEGER DEFAULT 0,
+                    last_used_at TEXT,
+                    created_at TEXT DEFAULT (datetime('now')),
+                    embedding BLOB,
+                    UNIQUE(kind, value)
+                );
+            """)
+            # Schema migration: Check if embedding column exists
+            c.execute("PRAGMA table_info(memory_items)")
+            columns = [col[1] for col in c.fetchall()]
+            if "embedding" not in columns:
+                c.execute("ALTER TABLE memory_items ADD COLUMN embedding BLOB")
+            conn.commit()
+            
+            self._db_connection = conn
+            return conn
+        except Exception as e:
+            print(f"[Core] DB Connection Error: {e}")
+            return None
 
     def load_memory(self):
         """Load memory từ SQLite, migrate từ JSON nếu cần"""
         conn = self._get_db()
+        if not conn:
+            return {}
         c = conn.cursor()
 
         if os.path.exists(MEMORY_PATH):
@@ -461,7 +518,7 @@ You are sending an unprompted message to the user because they've been away.
                 print(f"[DB] Migration error: {e}")
 
         memory = self._build_memory_dict(c)
-        conn.close()
+        pass # Singleton DB
         return memory
 
     def _ensure_memory_schema(self, c):
@@ -505,6 +562,8 @@ You are sending an unprompted message to the user because they've been away.
         for k, v in old.get("user_profile", {}).items():
             if v:
                 c.execute("INSERT OR REPLACE INTO profile VALUES (?,?)", (k, str(v)))
+        
+        conn = self._get_db()
         for item in old.get("preferences", {}).get("likes", []):
             c.execute("INSERT OR IGNORE INTO preferences (type,value) VALUES ('like',?)", (item,))
             c.execute("INSERT OR IGNORE INTO memory_items (kind,value,weight,saliency,source_turn) VALUES ('like',?,1.0,3,0)", (item,))
@@ -566,6 +625,7 @@ You are sending an unprompted message to the user because they've been away.
         dislikes = from_memory("dislike", 15)
         goals    = from_memory("goal", 10)
         topics   = from_memory("topic", 10)
+        inside_jokes = from_memory("inside_joke", 5)
         episodic = from_memory("episodic", 12)
         relational = from_memory("relational", 8)
 
@@ -587,7 +647,7 @@ You are sending an unprompted message to the user because they've been away.
                 "age_range": get_profile("age_range"), "occupation": get_profile("occupation"),
             },
             "preferences": {"likes": likes, "dislikes": dislikes, "interests": [], "hobbies": []},
-            "facts": {"personal": [], "topics": topics, "achievements": [], "goals": goals},
+            "facts": {"personal": [], "topics": topics, "achievements": [], "goals": goals, "inside_jokes": inside_jokes},
             "conversation": {
                 "total_messages": int(get_meta("total_messages", "0")),
                 "first_chat": get_meta("first_chat"), "last_chat": get_meta("last_chat"),
@@ -651,16 +711,26 @@ You are sending an unprompted message to the user because they've been away.
             for value in values[:20]:
                 if value:
                     saliency = self.estimate_memory_saliency(kind, value)
+                    
+                    # Check if embedding already exists to avoid re-computing
+                    existing = c.execute("SELECT embedding FROM memory_items WHERE kind=? AND value=?", (kind, str(value))).fetchone()
+                    emb_blob = existing[0] if existing else None
+                    
+                    if emb_blob is None:
+                        embedding = self._get_embedding(str(value))
+                        if embedding is not None:
+                            emb_blob = sqlite3.Binary(embedding.astype(np.float32).tobytes())
+
                     c.execute(
                         "INSERT OR IGNORE INTO memory_items "
-                        "(kind,value,weight,saliency,access_count,source_turn,last_used_at) "
-                        "VALUES (?,?,?,?,?,?,?)",
-                        (kind, str(value), weight, saliency, 0, self.turn_counter, now)
+                        "(kind,value,weight,saliency,access_count,source_turn,last_used_at,embedding) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (kind, str(value), weight, saliency, 0, self.turn_counter, now, emb_blob)
                     )
                     c.execute(
-                        "UPDATE memory_items SET weight=?, saliency=? "
+                        "UPDATE memory_items SET weight=?, saliency=?, embedding=? "
                         "WHERE kind=? AND value=?",
-                        (weight, saliency, kind, str(value))
+                        (weight, saliency, emb_blob, kind, str(value))
                     )
 
         # Chỉ lưu 2 tin nhắn mới nhất (User + Assistant) thay vì xóa toàn bộ
@@ -691,7 +761,7 @@ You are sending an unprompted message to the user because they've been away.
             c.execute("INSERT OR IGNORE INTO metadata VALUES ('first_chat',?)", (now,))
 
         conn.commit()
-        conn.close()
+        pass # Singleton DB
 
     def save_summary_to_db(self, summary_text, timestamp):
         """Lưu summary mới. Nếu vượt MAX_SUMMARIES thì gộp các cái cũ thành mega summary."""
@@ -767,10 +837,12 @@ You are sending an unprompted message to the user because they've been away.
         c.execute("INSERT INTO summaries (summary, timestamp, is_mega) VALUES (?,?,0)",
                   (summary_text, timestamp))
         conn.commit()
-        conn.close()
 
     def add_memory_item(self, kind, value, weight=1.0, limit=12):
         """Store concise memory fragments for cheap retrieval."""
+        # Invalidate cache
+        self._clear_context_cache()
+
         if not value:
             return
 
@@ -835,7 +907,7 @@ You are sending an unprompted message to the user because they've been away.
                     (now, db_kind, value)
                 )
         conn.commit()
-        conn.close()
+        pass # Singleton DB
 
     def should_buffer_memory(self, text, intent=None):
         """Cheap gate before spending any extraction tokens."""
@@ -1129,6 +1201,7 @@ You are sending an unprompted message to the user because they've been away.
                     '  "dislikes": ["new things they dislike"],\n'
                     '  "goals": ["new goals or plans they mentioned"],\n'
                     '  "topics": ["new topics they brought up"],\n'
+                    '  "inside_jokes": ["any funny moments or inside jokes established"],\n'
                     '  "mood_today": "how they seem right now (optional)",\n'
                     '  "relational": ["brief notes about how Lyra should respond to them later"]\n'
                     "}\n\n"
@@ -1194,6 +1267,9 @@ You are sending an unprompted message to the user because they've been away.
 
             for topic in facts.get("topics", []):
                 self.add_memory_item("topic", topic, weight=1.1, limit=10)
+
+            for joke in facts.get("inside_jokes", []):
+                self.add_memory_item("inside_joke", joke, weight=1.5, limit=5)
 
             for note in facts.get("relational", []):
                 self.add_memory_item("relational", note, weight=1.3, limit=8)
@@ -1344,47 +1420,164 @@ You are sending an unprompted message to the user because they've been away.
         """
         Build memory context để inject vào prompt.
         Ngắn gọn, tự nhiên — không có warning hay instruction cứng.
+        Sử dụng cache để tối ưu hiệu suất.
         """
-        profile = self.memory["user_profile"]
-        prefs   = self.memory["preferences"]
-        facts   = self.memory["facts"]
+        if self._memory_context_cache is not None:
+            return self._memory_context_cache
 
-        parts = []
+        try:
+            profile = self.memory.get("user_profile", {})
+            prefs   = self.memory.get("preferences", {})
+            facts   = self.memory.get("facts", {})
 
-        # Profile
-        profile_bits = []
-        if profile.get("name"):
-            profile_bits.append(profile["name"])
-        if profile.get("age_range"):
-            profile_bits.append(profile["age_range"])
-        if profile.get("occupation"):
-            profile_bits.append(profile["occupation"])
-        if profile.get("location"):
-            profile_bits.append(f"from {profile['location']}")
-        if profile_bits:
-            parts.append("They are: " + ", ".join(profile_bits))
+            parts = []
 
-        # Likes/dislikes
-        if prefs.get("likes"):
-            parts.append("Likes: " + ", ".join(prefs["likes"][:6]))
-        if prefs.get("dislikes"):
-            parts.append("Dislikes: " + ", ".join(prefs["dislikes"][:4]))
+            # Profile
+            profile_bits = []
+            if profile.get("name"):
+                profile_bits.append(profile["name"])
+            if profile.get("age_range"):
+                profile_bits.append(profile["age_range"])
+            if profile.get("occupation"):
+                profile_bits.append(profile["occupation"])
+            if profile.get("location"):
+                profile_bits.append(f"from {profile['location']}")
+            if profile_bits:
+                parts.append("They are: " + ", ".join(profile_bits))
 
-        # Topics & goals
-        topics = self.memory["conversation"].get("favorite_topics", [])
-        if topics:
-            parts.append("Into: " + ", ".join(topics[:6]))
-        if facts.get("goals"):
-            parts.append("Goals: " + ", ".join(facts["goals"][:3]))
+            # Likes/dislikes
+            if prefs.get("likes"):
+                parts.append("Likes: " + ", ".join(prefs["likes"][:6]))
+            if prefs.get("dislikes"):
+                parts.append("Dislikes: " + ", ".join(prefs["dislikes"][:4]))
 
-        # Mood today nếu có (từ AI extract)
-        mood_today = getattr(self, "_user_mood_today", None)
-        if mood_today:
-            parts.append(f"Seems {mood_today} today")
+            # Topics & goals
+            topics = self.memory.get("conversation", {}).get("favorite_topics", [])
+            if topics:
+                parts.append("Into: " + ", ".join(topics[:6]))
+            if facts.get("goals"):
+                parts.append("Goals: " + ", ".join(facts["goals"][:3]))
 
-        if not parts:
+            # Mood today nếu có (từ AI extract)
+            mood_today = getattr(self, "_user_mood_today", None)
+            if mood_today:
+                parts.append(f"Seems {mood_today} today")
+
+            if not parts:
+                self._memory_context_cache = ""
+                return ""
+            
+            self._memory_context_cache = "What you know about them:\n" + "\n".join(f"- {p}" for p in parts)
+            return self._memory_context_cache
+
+        except Exception as e:
+            print(f"[Core] Error building memory context: {e}")
             return ""
-        return "What you know about them:\n" + "\n".join(f"- {p}" for p in parts)
+
+    def _get_embedding(self, text):
+        """Lazy load model from project-local directory for speed."""
+        if SentenceTransformer is None:
+            return None
+            
+        local_path = os.path.join(MODELS_DIR, self._embedding_model_name)
+        
+        if self.encoder is None:
+            # Check if exists locally
+            if os.path.exists(local_path):
+                print(f"[Core] Loading embedding model from local path: {local_path}...")
+                try:
+                    self.encoder = SentenceTransformer(local_path)
+                    print("[Core] Local model loaded successfully.")
+                except Exception as e:
+                    print(f"[Core] Error loading local model: {e}")
+            
+            # Fallback to Hub download if missing
+            if self.encoder is None:
+                print(f"[Core] Local model missing. Downloading from Hub: {self._embedding_model_name}...")
+                try:
+                    self.encoder = SentenceTransformer(self._embedding_model_name)
+                    # Save locally for future use
+                    if not os.path.exists(MODELS_DIR):
+                        os.makedirs(MODELS_DIR)
+                    self.encoder.save(local_path)
+                    print(f"[Core] Model saved locally to: {local_path}")
+                except Exception as e:
+                    print(f"[Core] Error downloading model: {e}")
+                    return None
+        
+        try:
+            return self.encoder.encode(text)
+        except Exception:
+            return None
+
+    def _cosine_similarity(self, v1, v2):
+        """Compute cosine similarity between two vectors."""
+        if v1 is None or v2 is None: return 0
+        dot = np.dot(v1, v2)
+        norm1 = np.linalg.norm(v1)
+        norm2 = np.linalg.norm(v2)
+        if norm1 == 0 or norm2 == 0: return 0
+        return dot / (norm1 * norm2)
+
+    def get_relevant_memory_context(self, user_input):
+        """
+        Retrieve memory using Semantic Vector Search (RAG).
+        Sử dụng cache dựa trên đầu vào và kết quả DB để tối ưu.
+        """
+        # 1. Kiểm tra cache theo input tuyệt đối
+        cache_key = f"rag_{user_input.strip().lower()}"
+        if self._memory_context_cache_key == cache_key and self._memory_context_cache is not None:
+            return self._memory_context_cache
+
+        query_vector = self._get_embedding(user_input)
+        
+        try:
+            # 2. Lấy dữ liệu thô từ DB (có cache)
+            if getattr(self, "_relevant_items_cache", None) is None:
+                conn = self._get_db()
+                if conn is None: return ""
+                c = conn.cursor()
+                self._relevant_items_cache = list(c.execute(
+                    "SELECT kind, value, saliency, embedding FROM memory_items "
+                    "WHERE kind NOT IN ('episodic') "
+                    "ORDER BY saliency DESC, created_at DESC LIMIT 100"
+                ))
+            
+            rows = self._relevant_items_cache
+
+            if query_vector is not None:
+                scored = []
+                for r in rows:
+                    if r["embedding"]:
+                        try:
+                            vector = np.frombuffer(r["embedding"], dtype=np.float32)
+                            score = self._cosine_similarity(query_vector, vector)
+                            # Hybrid score: weight vector similarity heavily
+                            final_score = (score * 0.8) + (min(1, r["saliency"]/10) * 0.2)
+                            scored.append((final_score, r))
+                        except Exception:
+                            continue
+                
+                if scored:
+                    scored.sort(key=lambda x: x[0], reverse=True)
+                    top_memories = [x[1]["value"] for x in scored[:6] if x[0] > 0.45]
+                    
+                    if top_memories:
+                        result = "Relevant memory highlights:\n" + "\n".join(f"- {m}" for m in top_memories)
+                        # Cập nhật cache
+                        self._memory_context_cache_key = cache_key
+                        self._memory_context_cache = result
+                        return result
+        except Exception as e:
+            print(f"[Core] RAG search error: {e}")
+
+        # Fallback to current simple keyword logic
+        query_tokens = self._tokenize_for_match(user_input)
+        if not query_tokens:
+            return ""
+
+        candidates = []
+        profile = self.memory.get("user_profile", {})
 
     def _tokenize_for_match(self, text):
         """Cheap tokenizer for lightweight relevance scoring."""
@@ -1394,18 +1587,6 @@ You are sending an unprompted message to the user because they've been away.
             token for token in re.findall(r"[a-zA-Z0-9']+", text.lower())
             if len(token) >= 3
         }
-
-    def get_relevant_memory_context(self, user_input):
-        """
-        Retrieve only memory that feels relevant to this turn
-        instead of dumping the entire profile every time.
-        """
-        query_tokens = self._tokenize_for_match(user_input)
-        if not query_tokens:
-            return ""
-
-        candidates = []
-        profile = self.memory.get("user_profile", {})
 
         if profile.get("name"):
             candidates.append(("profile", f"Their name is {profile['name']}"))
@@ -1423,7 +1604,7 @@ You are sending an unprompted message to the user because they've been away.
             "SELECT kind, value, weight, saliency, access_count FROM memory_items "
             "ORDER BY saliency DESC, access_count DESC, COALESCE(last_used_at, created_at) DESC LIMIT 40"
         ))
-        conn.close()
+        pass # Singleton DB
 
         for row in db_rows:
             kind = row["kind"]
@@ -1512,7 +1693,6 @@ You are sending an unprompted message to the user because they've been away.
                 "episodic": from_memory("episodic", 12),
                 "relational": from_memory("relational", 8)
             }
-            conn.close()
         except Exception as e:
             print(f"[Memory] Forgetting error: {e}")
             memory_groups = self.memory.get("memory_items", {})
@@ -1611,10 +1791,12 @@ You are sending an unprompted message to the user because they've been away.
     def build_runtime_context_snapshot(self, user_input, intent):
         """Compose a lightweight AIRI-style snapshot for the current turn."""
         state_desc = self.describe_internal_state()
+        weekend_note = "It's the weekend! You might be feeling lazier or want to game or chill." if getattr(self, "current_time", datetime.now()).weekday() >= 5 else "It's a weekday."
         parts = [
             "<context>",
             f"<time>{self.current_time.strftime('%A %H:%M %Z')}</time>",
             f"<time_period>{self.time_period}</time_period>",
+            f"<weekday_context>{weekend_note}</weekday_context>",
             f"<lyra_internal_state>{state_desc}</lyra_internal_state>",
             f"<user_signal>{self.infer_user_signal(user_input)}</user_signal>",
         ]
@@ -1641,6 +1823,28 @@ You are sending an unprompted message to the user because they've been away.
         
         parts.append("- DO NOT offer to 'tackle it together', 'break it down', or act like a tutor/therapist. You are a lazy 16yo sibling, not an AI assistant. Complain with them or tease them instead.")
         parts.append("</critical_rules>")
+
+        # PROACTIVE CURIOSITY (15% chance to ask reverse question)
+        if random.random() < 0.15:
+            targets = self.memory.get("facts", {}).get("goals", []) + self.memory.get("facts", {}).get("topics", [])
+            if targets:
+                candidate = random.choice(targets)
+                parts.append(f"<curiosity_rule>CRITICAL: DO NOT just answer! Randomly ask the user for an update about '{candidate}'. Keep it natural, somewhat effortless.</curiosity_rule>")
+
+        # DYNAMIC PERSONA TIERS
+        parts.append("<persona_rule>")
+        if self.affection < 30:
+            parts.append("Keep the user at a distance. Be slightly cold, polite, and very brief. Do not act caring.")
+        elif self.affection > 75:
+            parts.append("You are extremely close to the user. Act clingy, demanding of attention, or tease them playfully.")
+        else:
+            parts.append("Act like a normal, somewhat lazy 16yo sibling. Casual but not obsessed.")
+        parts.append("</persona_rule>")
+
+        # LORE / INSIDE JOKES
+        inside_jokes = self.memory.get("facts", {}).get("inside_jokes", [])
+        if inside_jokes:
+            parts.append(f"<lore>Inside Jokes / Funny moments you share: {', '.join(inside_jokes)}. Reference them organically ONLY if it fits the conversation.</lore>")
 
         parts.append("</context>")
         return "\n".join(parts)
@@ -1758,6 +1962,17 @@ You are sending an unprompted message to the user because they've been away.
         Update MOOD (short-term, not persisted)
         Update AFFECTION (long-term, persisted)
         """
+        old_affection = self.affection
+
+        # CĂ¡ÂťÂĄ chĂ¡ÂşÂż Emotion Decay (CĂ¡ÂşÂŁm xĂşc nhĂ¡ÂşÂĄc phai vĂ¡ÂťÂ 0 nĂ¡ÂşÂżu quĂÂĄ 12 tiĂ¡ÂşÂżng khĂÂ´ng chat)
+        gap = getattr(self, "time_gap_hours", 0)
+        if gap is not None and gap > 12:
+            self.mood = self.mood * 0.5  # PhĂÂ˘n rĂÂŁ 50% mĂ¡ÂťÂ—i 12 tiĂ¡ÂşÂżng xa cĂÂĄch
+
+        # CĂ¡ÂťÂĄ chĂ¡ÂşÂż Fatigue (MĂ¡ÂťÂ‡t mĂ¡ÂťÂŹi / HĂ¡ÂťÂ“i phĂ¡ÂťÂĽc NĂÂng lĂÂ°Ă¡ÂťÂŁng)
+        if gap is not None and gap > 0:
+            self.attention = min(10, self.attention + (gap * 2.0))  # HĂ¡ÂťÂ“i +2 mĂ¡ÂťÂ—i giĂ¡ÂťÂ nghĂ¡ÂťÂ‰
+        self.attention = max(0, self.attention - 0.3)  # TiĂÂŞu hao -0.3 mĂ¡ÂťÂ—i lĂÂ°Ă¡ÂťÂŁt tĂÂ°ĂÂĄng tĂÂĄc
 
         text = text.lower()
 
@@ -1793,6 +2008,9 @@ You are sending an unprompted message to the user because they've been away.
             self.attention = max(0, self.attention - 1)
 
         self.smooth_emotion_transition()
+
+        # Affection Cap: Giới hạn tối đa biến động tình cảm mỗi turn là +/- 5
+        self.affection = min(old_affection + 5, max(old_affection - 5, self.affection))
 
         # ===== PERSIST AFFECTION TO MEMORY =====
         self.memory["relationship"]["current_affection"] = round(self.affection, 1)
@@ -2062,6 +2280,8 @@ Current state:
 {memory_context}
 
 {summary_context}
+
+{VTUBER_BRAIN_INSTRUCTIONS}
 """
         return system_prompt
 
@@ -2086,25 +2306,7 @@ Current state:
 
         words = text.split()
 
-        if len(words) > 35:
-            # Ghép lại 35 từ đầu rồi tìm dấu câu cuối cùng để cắt
-            truncated = " ".join(words[:35])
-            # Tìm dấu câu kết thúc gần nhất tính từ cuối chuỗi
-            cut_pos = -1
-            for i in range(len(truncated) - 1, 0, -1):
-                if truncated[i] in ".!?":
-                    cut_pos = i
-                    break
-            if cut_pos > 0:
-                text = truncated[:cut_pos + 1]
-            else:
-                # Không có dấu câu → cắt ở dấu phẩy gần nhất
-                comma_pos = truncated.rfind(",")
-                if comma_pos > 0:
-                    text = truncated[:comma_pos] + "."
-                else:
-                    # Không có gì → giữ nguyên (ít nhất không cắt giữa từ)
-                    text = truncated
+        return text
         
         cleaned = text.strip()
 
@@ -2140,6 +2342,39 @@ Current state:
 # ==========================
 # CHAT
 # ==========================
+
+    def _parse_vbrain_response(self, content):
+        """
+        Parses the JSON response from the LLM.
+        Expected format: {monologue, emotion, action, reply}
+        """
+        import json
+        import re
+
+        default_res = {
+            "monologue": "Thinking...",
+            "emotion": "neutral",
+            "action": "NONE",
+            "reply": content
+        }
+
+        # Clean potential markdown artifacts
+        clean_content = content.replace("```json", "").replace("```", "").strip()
+
+        try:
+            # First attempt: direct json.loads
+            return json.loads(clean_content)
+        except:
+            # Second attempt: Extract JSON using regex
+            try:
+                match = re.search(r"\{.*\}", clean_content, re.DOTALL)
+                if match:
+                    return json.loads(match.group())
+            except:
+                pass
+
+        # Fallback if both fail
+        return default_res
 
     def chat(self, user_input):
 
@@ -2215,15 +2450,20 @@ Current state:
                         print(f"[API] {model_name} failed ({response.status_code}), trying next...")
                         break
 
-                    reply = (
+                    response_content = (
                         result.get("choices", [{}])[0]
                         .get("message", {})
                         .get("content", "...")
                         .strip()
                     )
 
-                    if not reply or reply == "...":
+                    if not response_content or response_content == "...":
                         break
+
+                    # Parse VTuber Brain structure
+                    parsed_response = self._parse_vbrain_response(response_content)
+                    reply = parsed_response.get("reply", "...")
+                    self.current_vbrain = parsed_response # Cache for additional fields
 
                     if self.is_response_too_similar(reply):
                         regenerate_count += 1
@@ -2270,11 +2510,15 @@ Current state:
         # Save affection + time tracking to persistent memory
         self.save_memory()
 
-        emotion = self.emotion_from_state()
+        emotion = self.current_vbrain.get("emotion", self.emotion_from_state())
+        action = self.current_vbrain.get("action", "NONE")
+        monologue = self.current_vbrain.get("monologue", "")
 
         return {
             "reply": reply,
+            "monologue": monologue,
             "emotion": emotion,
+            "action": action,
             "mood": round(self.mood, 1),
             "affection": round(self.affection, 1),
             "time_period": self.time_period,

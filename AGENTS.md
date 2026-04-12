@@ -14,7 +14,7 @@ Lyra is not a generic chatbot. She has:
 
 Core goal:
 
-> Build a **real-feeling AI companion**, not a task assistant.
+> Build a **real-feeling AI companion**, with the ultimate long-term goal of evolving into a fully autonomous **VTuber persona**.
 
 ---
 
@@ -57,6 +57,7 @@ Key features:
 * Memory buffer (lazy extraction → save cost)
 * Auto summarization (compress old chats)
 * Retrieval based on relevance (not dump all memory)
+* **Memory Forgetting**: Stale SQLite memory items (`saliency < 7`, `access_count = 0`) are permanently deleted after 100 turns to save context length.
 
 ---
 
@@ -96,6 +97,9 @@ Effects:
 * Changes tone of responses
 * Influences behavior (playful vs calm)
 * Persisted partially (affection)
+* **Fatigue System**: `attention` drains per chat (-0.3) and recovers during silence (+2.0/hr). Low attention triggers tired, short responses.
+* **Emotion Decay**: Long periods of silence (>12h) decay `mood` by 50% towards 0 (neutral).
+* **Affection Cap**: Caps relationship spikes at +/- 5 per turn for natural progression.
 
 ---
 
@@ -139,6 +143,16 @@ Goal:
 
   * Recent context
   * Compressed long-term memory
+
+---
+
+### 8. Psychological Tweaks & Dynamic Persona
+
+Advanced features implemented to make Lyra "human":
+* **Weekend Context**: Time-aware prompts dynamically switch her to a "lazy/gaming" vibe on weekends.
+* **Proactive Curiosity**: 15% random chance to override her response and force her to proactively ask the user about past `goals` or `topics`.
+* **Dynamic Persona Tiers**: Prompt injections override behavior based on affection (<30: cold/distant, 30-75: teasing/normal, >75: clingy/demanding).
+* **Dynamic Auto-Tokens**: Modifies the `max_tokens` API param dynamically. If she's tired (`attention < 3`), it locks to 40 max tokens (short, cold texts). If energized, it expands to 180 tokens.
 
 ---
 
