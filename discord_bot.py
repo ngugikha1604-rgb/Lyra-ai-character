@@ -63,6 +63,7 @@ async def proactive_loop():
                     # Cập nhật last_message_time để không spam
                     now = datetime.now(pytz.timezone('Asia/Ho_Chi_Minh')).isoformat()
                     ai.memory["time_tracking"]["last_message_time"] = now
+                    ai.memory._is_dirty = True
                     await loop.run_in_executor(None, ai.save_memory)
                     print(f"[Proactive] Sent to user {user_id}: {msg[:60]}")
 

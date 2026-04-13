@@ -3,7 +3,7 @@ from core import MiniAI
 
 def main():
     print("========================================")
-    print("🔮 Lyra AI - Terminal Debug Mode 🔮")
+    print("Lyra AI - Terminal Debug Mode")
     print("Type 'exit' or 'quit' to stop.")
     print("========================================\n")
 
@@ -35,9 +35,13 @@ def main():
             # Gọi hàm chat của MiniAI giống cách web.py gọi
             result = ai.chat(user_input)
             
-            print("\nLyra:", result.get("reply", "[No reply]"))
+            reply = result.get("reply", "[No reply]")
+            try:
+                print("\nLyra:", reply)
+            except UnicodeEncodeError:
+                print("\nLyra (encoded):", reply.encode('ascii', 'ignore').decode('ascii'))
             print("-" * 40)
-            print(f"Emotion: {result.get('emotion')}")
+            print(f"Emotion: {result.get('emotion')} | Intent: {result.get('intent')}")
             print(f"Mood: {result.get('mood')} | Affection: {result.get('affection')}")
             print(f"Time Gap: {result.get('time_gap_hours')} | Period: {result.get('time_period')}")
             print("-" * 40)

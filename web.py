@@ -58,7 +58,9 @@ def build_state_payload(ai, result=None):
 # GLOBAL AI INSTANCE
 # ========================
 # Initialize MiniAI once globally to prevent DB loading bottleneck on every request.
+print("Initializing Lyra AI (this may take a few seconds to load models)...")
 lyra_ai = MiniAI()
+print("Lyra AI initialized and ready.")
 
 # ========================
 # ROUTES
@@ -267,6 +269,7 @@ def proactive():
         lyra_ai.memory["time_tracking"]["last_message_time"] = datetime.now(
             pytz.timezone('Asia/Ho_Chi_Minh')
         ).isoformat()
+        lyra_ai.memory._is_dirty = True
         lyra_ai.save_memory()
 
         response_payload = build_state_payload(lyra_ai)
