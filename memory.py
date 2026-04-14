@@ -409,7 +409,7 @@ class MemorySystem:
                 "total_messages": int(get_meta("total_messages", "0")),
                 "first_chat": get_meta("first_chat"),
                 "last_chat": get_meta("last_chat"),
-                "conversation_count": 0,
+                "conversation_count": int(get_meta("conversation_count", "0")),
                 "favorite_topics": topics,
                 "chat_history_summary": all_summaries,
                 "conversation_thread": messages,
@@ -663,6 +663,7 @@ class MemorySystem:
                 ("last_chat", now),
                 ("last_message_time", now),
                 ("total_messages", str(self.turn_counter)),
+                ("conversation_count", str(self.memory["conversation"].get("conversation_count", 0))),
                 ("memory_buffer", json.dumps(self.memory_buffer, ensure_ascii=False)),
             ]:
                 c.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (k, v))

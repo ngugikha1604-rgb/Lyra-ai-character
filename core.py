@@ -28,6 +28,7 @@ from prompts import (
     PERSONA_TIERS,
     MILESTONE_MSGS,
     AFFECTION_MILESTONES,
+    TRANSLATE_PROMPT,
 )
 
 from time_utils import (
@@ -66,25 +67,24 @@ class MiniAI:
             "action": "NONE",
             "reply": "",
         }
-        self.messages = []
-        self.recent_responses = []
-        self.last_intent = None
-        self._user_mood_today = None
 
         self.emotion = EmotionEngine()
         self.memory = MemorySystem(max_summaries=MAX_SUMMARIES)
         self.memory.load()
 
-        self.turn_counter = self.memory.turn_counter
+        # Khởi tạo messages từ lịch sử đã lưu trong memory sau khi memory đã load xong
+        self.messages = self.memory.memory.get("conversation", {}).get("conversation_thread", [])
+        self.recent_responses = []
+        self.last_intent = None
+        self._user_mood_today = None
+
         self.emotion.affection = self.memory.memory.get("relationship", {}).get(
             "current_affection", 50
         )
 
         self.current_time = get_vietnam_time()
         self.time_period = get_time_period(self.current_time.hour)
-        self.last_message_time = self.memory.memory.get("time_tracking", {}).get(
-            "last_message_time"
-        )
+        self.last_message_time = self.memory.memory.get("time_tracking", {}).get("last_message_time")
         self.time_gap_hours = calculate_time_gap(
             self.last_message_time, self.current_time
         )
@@ -105,6 +105,15 @@ class MiniAI:
 
         print("[Core] Pre-loading embedding model...")
         self.memory._get_embedding("init")
+
+    @property
+    def turn_counter(self):
+        """Đồng bộ turn_counter với MemorySystem để lưu DB chính xác"""
+        return self.memory.turn_counter
+
+    @turn_counter.setter
+    def turn_counter(self, value):
+        self.memory.turn_counter = value
 
     def _call_model(self, messages, temperature=0.8, max_tokens=200):
         """Unified method to call either Ollama or OpenRouter"""
@@ -188,29 +197,7 @@ class MiniAI:
         return None
 
     def _translate_response(self, text):
-        """Translate English response to Vietnamese using LLM"""
-        if not TRANSLATE_ENABLED:
-            return text
-
-        if not text or len(text.strip()) < 2:
-            return text
-
-        translate_prompt = f"""Translate the following text from English to Vietnamese.
-Keep the same tone, emotion, and personality.
-Only translate, do not add explanations.
-
-Text: {text}
-
-Translation:"""
-
-        messages = [{"role": "user", "content": translate_prompt}]
-
-        max_t = max(len(text) * 2, 50)
-        translated = self._call_model(messages, temperature=0.3, max_tokens=max_t)
-
-        if translated:
-            return translated.strip()
-
+        """No longer needed - Lyra replies in Vietnamese directly"""
         return text
 
     def _should_search(self, user_input):
@@ -410,6 +397,13 @@ Translation:"""
 
         self.messages.append({"role": "user", "content": user_input})
         self.messages.append({"role": "assistant", "content": original_reply})
+        
+        # Đồng bộ vào conversation_thread để memory.py có thể thấy và lưu
+        if "conversation_thread" not in self.memory.memory["conversation"]:
+            self.memory.memory["conversation"]["conversation_thread"] = []
+        
+        self.memory.memory["conversation"]["conversation_thread"].append({"role": "user", "content": user_input})
+        self.memory.memory["conversation"]["conversation_thread"].append({"role": "assistant", "content": original_reply})
 
         self.memory.memory["conversation"]["total_messages"] = self.turn_counter
         self.memory.memory["conversation"]["conversation_count"] += 1
@@ -419,6 +413,7 @@ Translation:"""
         self.memory.memory["time_tracking"]["time_gap_hours"] = self.time_gap_hours or 0
         self.memory.memory["relationship"]["current_affection"] = self.emotion.affection
 
+        self.memory._is_dirty = True
         self.memory.save()
 
         emotion = self.current_vbrain.get("emotion", self.emotion.emotion_from_state())
@@ -961,7 +956,8 @@ Translation:"""
 {time_context}
 
 Conversation principles:
-- Always respond in English, regardless of the user's language.
+- TRẢ LỜI BẰNG TIẾNG VIỆT. Không trả lời bằng tiếng Anh hay bất kỳ ngôn ngữ nào khác.
+- Người dùng có thể viết tiếng Việt hoặc tiếng Anh, nhưng bạn LUÔN trả lời bằng tiếng Việt.
 - Treat the latest user message as the main thing that matters.
 - Use memory only when it is genuinely relevant.
 - Let warmth, teasing, distance, or softness emerge from the moment.
@@ -1238,4 +1234,5 @@ Current state:
 
     def save_memory(self):
         """Save memory to database"""
+        self.memory._is_dirty = True
         self.memory.save()
