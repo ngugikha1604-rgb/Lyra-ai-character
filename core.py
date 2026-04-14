@@ -7,6 +7,7 @@ import random
 import requests
 import re
 from datetime import datetime
+from duckduckgo_search import DDGS
 
 from config import *
 from config import USE_OLLAMA
@@ -108,7 +109,7 @@ class MiniAI:
     def _call_model(self, messages, temperature=0.8, max_tokens=200):
         """Unified method to call either Ollama or OpenRouter"""
         models_to_try = [self.model] + FALLBACK_MODELS
-        
+
         for model_name in models_to_try:
             for attempt in range(2):
                 try:
@@ -141,8 +142,9 @@ class MiniAI:
                         timeout = self.timeout
 
                     import time
+
                     start_time = time.time()
-                    
+
                     response = requests.post(
                         BASE_URL,
                         headers=headers,
@@ -150,14 +152,16 @@ class MiniAI:
                         timeout=timeout,
                         verify=False,
                     )
-                    
+
                     duration = time.time() - start_time
                     result = response.json()
-                    
+
                     if response.status_code != 200:
-                        print(f"[API] {model_name} failed ({response.status_code}) in {duration:.1f}s: {result}")
+                        print(
+                            f"[API] {model_name} failed ({response.status_code}) in {duration:.1f}s: {result}"
+                        )
                         break
-                    
+
                     print(f"[API] {model_name} responded in {duration:.1f}s")
 
                     if USE_OLLAMA:
@@ -169,18 +173,148 @@ class MiniAI:
                             .get("content", "")
                             .strip()
                         )
-                    
+
                     if content:
                         return content
-                        
+
                 except Exception as e:
-                    print(f"[API] Error calling {model_name} (attempt {attempt+1}): {e}")
-            
-            if USE_OLLAMA: # Don't try fallbacks for Ollama if not configured
+                    print(
+                        f"[API] Error calling {model_name} (attempt {attempt + 1}): {e}"
+                    )
+
+            if USE_OLLAMA:  # Don't try fallbacks for Ollama if not configured
                 break
 
         return None
 
+    def _translate_response(self, text):
+        """Translate English response to Vietnamese using LLM"""
+        if not TRANSLATE_ENABLED:
+            return text
+
+        if not text or len(text.strip()) < 2:
+            return text
+
+        translate_prompt = f"""Translate the following text from English to Vietnamese.
+Keep the same tone, emotion, and personality.
+Only translate, do not add explanations.
+
+Text: {text}
+
+Translation:"""
+
+        messages = [{"role": "user", "content": translate_prompt}]
+
+        max_t = max(len(text) * 2, 50)
+        translated = self._call_model(messages, temperature=0.3, max_tokens=max_t)
+
+        if translated:
+            return translated.strip()
+
+        return text
+
+    def _should_search(self, user_input):
+        """Determine if we need to search for information"""
+        if not SEARCH_ENABLED:
+            return False, None
+
+        user_lower = user_input.lower()
+
+        question_patterns = [
+            "what is",
+            "who is",
+            "when",
+            "where",
+            "why",
+            "how",
+            "what's",
+            "who's",
+            "find",
+            "search",
+            "tìm",
+            "kiếm",
+            "là gì",
+            "ai là",
+            "ở đâu",
+            "khi nào",
+            "tại sao",
+            "latest",
+            "recent",
+            "news",
+            "mới nhất",
+            "tin tức",
+            "weather",
+            "thời tiết",
+            "price",
+            "giá",
+            "costs",
+            "stock",
+            "crypto",
+            "bitcoin",
+            "currency",
+        ]
+
+        needs_info = any(p in user_lower for p in question_patterns)
+
+        knowledge_patterns = [
+            "i don't know",
+            "i'm not sure",
+            "not sure",
+            "maybe",
+            "could be",
+            "might",
+            "probably",
+            "i think",
+            "i believe",
+            "as far as i know",
+        ]
+
+        knows = any(p in user_lower for p in knowledge_patterns)
+
+        personal_patterns = [
+            "my",
+            "i'm",
+            "i am",
+            "we",
+            "us",
+            "our",
+            "tôi",
+            "mình",
+            "chúng tôi",
+        ]
+
+        is_personal = any(p in user_lower for p in personal_patterns)
+
+        if is_personal or knows:
+            return False, None
+
+        if needs_info:
+            return True, user_input
+
+        return False, None
+
+    def _search_web(self, query, max_results=3):
+        """Search DuckDuckGo and return results"""
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=max_results))
+
+            if not results:
+                return None
+
+            formatted = []
+            for r in results:
+                title = r.get("title", "")
+                body = r.get("body", "")
+                href = r.get("href", "")
+                if title and body:
+                    formatted.append(f"**{title}**\n{body[:200]}...\nSource: {href}")
+
+            return "\n\n".join(formatted) if formatted else None
+
+        except Exception as e:
+            print(f"[Search] Error: {e}")
+            return None
 
     @property
     def attention(self):
@@ -221,7 +355,18 @@ class MiniAI:
 
         self.last_intent = intent
 
-        system_prompt = self.build_prompt(intent, user_input)
+        search_context = ""
+        should_search, search_query = self._should_search(user_input)
+        if should_search and search_query:
+            print(f"[Search] Query: {search_query}")
+            search_results = self._search_web(search_query)
+            if search_results:
+                search_context = (
+                    f"\n\n[SEARCH RESULTS]\n{search_results}\n[/SEARCH RESULTS]\n"
+                )
+                print(f"[Search] Found results")
+
+        system_prompt = self.build_prompt(intent, user_input, search_context)
         composed = self.compose_user_message(user_input, intent)
 
         api_messages = [{"role": "system", "content": system_prompt}]
@@ -233,11 +378,9 @@ class MiniAI:
         dynamic_max_tokens = self.emotion.get_dynamic_max_tokens()
 
         content = self._call_model(
-            api_messages, 
-            temperature=0.8, 
-            max_tokens=dynamic_max_tokens
+            api_messages, temperature=0.8, max_tokens=dynamic_max_tokens
         )
-        
+
         if content:
             parsed = parse_vbrain_response(content)
             reply = parsed.get("reply", "...")
@@ -246,6 +389,9 @@ class MiniAI:
             reply = "..."
 
         reply = self.clean_reply(reply)
+
+        original_reply = reply
+        reply = self._translate_response(reply)
 
         milestone = self.check_milestone()
         if milestone:
@@ -263,7 +409,7 @@ class MiniAI:
             )
 
         self.messages.append({"role": "user", "content": user_input})
-        self.messages.append({"role": "assistant", "content": reply})
+        self.messages.append({"role": "assistant", "content": original_reply})
 
         self.memory.memory["conversation"]["total_messages"] = self.turn_counter
         self.memory.memory["conversation"]["conversation_count"] += 1
@@ -281,6 +427,7 @@ class MiniAI:
 
         return {
             "reply": reply,
+            "original_reply": original_reply,
             "monologue": monologue,
             "emotion": emotion,
             "action": action,
@@ -294,23 +441,50 @@ class MiniAI:
     def detect_intent(self, text):
         text_lower = text.lower()
 
+        # Introduction detection (EN + VN)
         intro_patterns = [
-            (r"(my name is|i'm called|call me|i am [a-z]+|i'm [a-z]+)", "introduction")
+            r"(my name is|i'm called|call me|i am [a-z]+|i'm [a-z]+)",
+            r"(tên (em|anh|tôi|mình) là|tên (em|anh|tôi|mình)|gọi (em|anh|tôi|mình) là)",
         ]
-        for pattern, intent in intro_patterns:
+        for pattern in intro_patterns:
             if re.search(pattern, text_lower):
                 return "introduction"
 
-        greeting_words = ["hi", "hello", "hey", "greetings", "sup"]
+        # Greeting detection (EN + VN)
+        greeting_words = ["hi", "hello", "hey", "sup", "chào", "hé lô", "alo"]
         if any(word in text_lower for word in greeting_words):
             return "greeting"
 
-        if text.endswith("?") or any(
-            word in text_lower.split()
-            for word in ["what", "how", "why", "when", "where", "who"]
+        # VN suggestive particle (nhé, nha, đi) => suggestion
+        if re.search(r"\b(nhé|nha|đi)\b", text_lower) and not text.strip().endswith(
+            "?"
         ):
+            return "suggestion"
+
+        # VN confirmation particle (nhỉ, hở, phải không) + standard EN question
+        is_question = text.strip().endswith("?")
+        has_question_word = any(
+            word in text_lower.split()
+            for word in [
+                "what",
+                "how",
+                "why",
+                "when",
+                "where",
+                "who",
+                "gì",
+                "sao",
+                "tại sao",
+                "bao giờ",
+            ]
+        )
+        has_vn_confirm = re.search(
+            r"\b(nhỉ|hở|phải không|không nhỉ|đúng không)\b", text_lower
+        )
+        if is_question or has_question_word or has_vn_confirm:
             return "question"
 
+        # Compliment detection
         if any(
             word in text_lower
             for word in [
@@ -319,12 +493,17 @@ class MiniAI:
                 "beautiful",
                 "awesome",
                 "great",
-                "wonderful",
                 "nice",
+                "thích",
+                "tuyệt",
+                "đẹp",
+                "ngoan",
+                "giỏi",
             ]
         ):
             return "compliment"
 
+        # Complaint detection
         if any(
             word in text_lower
             for word in [
@@ -335,22 +514,31 @@ class MiniAI:
                 "stupid",
                 "useless",
                 "angry",
+                "ghét",
+                "tệ",
+                "dở",
+                "ngu",
+                "bực",
+                "chán",
             ]
         ):
             return "complaint"
 
-        if any(phrase in text_lower for phrase in ["can you", "could you"]) or any(
-            word in text_lower.split() for word in ["please", "help"]
-        ):
+        # Request detection
+        if any(
+            phrase in text_lower
+            for phrase in ["can you", "could you", "giúp", "làm ơn"]
+        ) or any(word in text_lower.split() for word in ["please", "help"]):
             return "request"
 
+        # Choice detection
         choice_keywords = [
             r"\b(or|hay|hoặc)\b",
             r"nào (nhỉ|đây|hơn)",
-            r"(cái nào|bên nào|chọn gì)",
+            r"(cái nào|bên nào|chọn gì|chọn cái|nên chọn)",
         ]
         if any(re.search(kw, text_lower) for kw in choice_keywords) and (
-            text.endswith("?")
+            text.strip().endswith("?")
             or any(w in text_lower for w in ["nhỉ", "đây", "nào", "gì"])
         ):
             return "choice"
@@ -360,6 +548,13 @@ class MiniAI:
     def detect_user_mood(self, text):
         text_lower = text.lower()
 
+        # VN sarcasm/irritation particles: short messages with "đấy", "cơ", "mà"
+        if len(text.strip()) < 40 and re.search(
+            r"\b(đấy|cơ mà|thế mà|mà thôi)\b", text_lower
+        ):
+            if any(w in text_lower for w in ["gì", "đâu", "sao", "không", "chẳng"]):
+                return "frustrated"
+
         stress_words = [
             "stressed",
             "tired",
@@ -368,6 +563,11 @@ class MiniAI:
             "can't sleep",
             "can't focus",
             "so much work",
+            "mệt",
+            "kiệt sức",
+            "áp lực",
+            "đuối",
+            "stress",
         ]
         if any(w in text_lower for w in stress_words):
             return "stressed"
@@ -381,6 +581,11 @@ class MiniAI:
             "unhappy",
             "heartbroken",
             "hurt",
+            "buồn",
+            "cô đơn",
+            "khóc",
+            "nhớ",
+            "thất vọng",
         ]
         if any(w in text_lower for w in sad_words):
             return "sad"
@@ -394,11 +599,24 @@ class MiniAI:
             "yay",
             "woohoo",
             "finally",
+            "vui",
+            "tuyệt",
+            "sướng",
+            "phấn khích",
+            "quá",
         ]
         if any(w in text_lower for w in excited_words):
             return "excited"
 
-        bored_words = ["bored", "nothing to do", "boring", "slow day", "so bored"]
+        bored_words = [
+            "bored",
+            "nothing to do",
+            "boring",
+            "slow day",
+            "so bored",
+            "chán",
+            "nhạt",
+        ]
         if any(w in text_lower for w in bored_words):
             return "bored"
 
@@ -410,6 +628,11 @@ class MiniAI:
             "ugh",
             "argh",
             "so annoying",
+            "bực",
+            "tức",
+            "ghét",
+            "khó chịu",
+            "tức quá",
         ]
         if any(w in text_lower for w in angry_words):
             return "frustrated"
@@ -422,9 +645,17 @@ class MiniAI:
             "fear",
             "anxiety",
             "panic",
+            "lo",
+            "sợ",
+            "hồi hộp",
+            "căng thẳng",
         ]
         if any(w in text_lower for w in anxious_words):
             return "anxious"
+
+        # Politeness signal: ends with Vietnamese honorific particle
+        if text_lower.strip().endswith("ạ"):
+            return "polite"
 
         if text.count("...") >= 2:
             return "down_or_tired"
@@ -432,16 +663,6 @@ class MiniAI:
             return "excited"
         if text.isupper() and len(text) > 5:
             return "frustrated"
-
-        if len(text.strip()) <= 5 and text_lower not in [
-            "hi",
-            "hey",
-            "ok",
-            "yes",
-            "no",
-            "lol",
-        ]:
-            return "disengaged"
 
         return None
 
@@ -517,7 +738,9 @@ class MiniAI:
         ]
 
         try:
-            raw = self._call_model(extract_prompt, temperature=0.1, max_tokens=200) or ""
+            raw = (
+                self._call_model(extract_prompt, temperature=0.1, max_tokens=200) or ""
+            )
             raw = re.sub(r"```json|```", "", raw).strip()
             if not raw or raw == "{}":
                 return
@@ -591,7 +814,10 @@ class MiniAI:
         ]
 
         try:
-            summary = self._call_model(summarize_prompt, temperature=0.4, max_tokens=120) or ""
+            summary = (
+                self._call_model(summarize_prompt, temperature=0.4, max_tokens=120)
+                or ""
+            )
             summary = summary.strip()
 
             if summary:
@@ -652,7 +878,7 @@ class MiniAI:
                         },
                     ],
                     temperature=0.3,
-                    max_tokens=200
+                    max_tokens=200,
                 )
             except Exception as e:
                 print(f"[DB] Mega summary error: {e}")
@@ -675,7 +901,7 @@ class MiniAI:
             )
             conn.commit()
 
-    def build_prompt(self, intent, user_input):
+    def build_prompt(self, intent, user_input, search_context=""):
         memory_context = self.memory.get_context(
             user_input
         ) or self.memory.get_relevant_context(user_input)
@@ -714,15 +940,30 @@ class MiniAI:
                 last_reply = msg.get("content", "")[:60]
                 break
 
+        # Pattern-based anti-repetition: block repeated sentence starters
+        recent_patterns = set()
+        for msg in self.messages[-6:]:
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                # Extract the first 3 words as a pattern signature
+                words = content.strip().split()[:3]
+                if words:
+                    recent_patterns.add(" ".join(words).lower())
+
         anti_repeat_note = ""
         if last_reply:
             anti_repeat_note = f'- Your last reply started with: "{last_reply[:30]}...". Do NOT start this reply similarly.'
+        if recent_patterns:
+            anti_repeat_note += f"\n- Avoid starting with any of these patterns used recently: {list(recent_patterns)}."
 
         system_prompt = f"""{NATURAL_BASE_PERSONALITY}
 
 {time_context}
 
 Conversation principles:
+- Respond in the SAME LANGUAGE as the user writes in.
+- If user writes in English, reply in English.
+- If user writes in Vietnamese (tiếng Việt), reply in Vietnamese (tiếng Việt).
 - Treat the latest user message as the main thing that matters.
 - Use memory only when it is genuinely relevant.
 - Let warmth, teasing, distance, or softness emerge from the moment.
@@ -731,7 +972,7 @@ Conversation principles:
 - Do not force a question at the end.
 - BE CONCISE: Stop immediately after 1-2 short sentences. No rambling, no over-explaining, no filler.
 - A little messiness is fine. Repetition and over-performance are not.
-- You are an AI: you do not eat, sleep, go outside, or share physical experiences with the user. Never pretend you do.
+- You are an AI: you do not eat, sleep, or share physical experiences with the user. Never pretend you do.
 {anti_repeat_note}
 
 Current state:
@@ -740,6 +981,7 @@ Current state:
 {("- " + self.get_reflection_hint(user_input)) if self.get_reflection_hint(user_input) else ""}
 
 {memory_context}
+{search_context}
 
 {VTUBER_BRAIN_INSTRUCTIONS}
 """
@@ -798,12 +1040,17 @@ Current state:
                 )
 
         parts.append("<persona_rule>")
-        if self.emotion.affection < 30:
+        aff = self.emotion.affection
+        if aff < 20:
             parts.append(PERSONA_TIERS["distant"])
-        elif self.emotion.affection > 75:
-            parts.append(PERSONA_TIERS["clingy"])
-        else:
+        elif aff < 45:
+            parts.append(PERSONA_TIERS["acquaintance"])
+        elif aff < 70:
             parts.append(PERSONA_TIERS["normal"])
+        elif aff < 90:
+            parts.append(PERSONA_TIERS["trusted"])
+        else:
+            parts.append(PERSONA_TIERS["clingy"])
         parts.append("</persona_rule>")
 
         inside_jokes = self.memory.memory.get("facts", {}).get("inside_jokes", [])
