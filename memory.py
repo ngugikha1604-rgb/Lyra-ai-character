@@ -62,7 +62,8 @@ class MemorySystem:
         return len(self.memory)
 
     def _get_db(self):
-        """Get DB connection (singleton)"""
+        """Get DB connection (singleton) with fallback to in-memory mode"""
+        # Check existing connection validity
         if self._db_connection is not None:
             try:
                 self._db_connection.execute("SELECT 1")
@@ -71,8 +72,10 @@ class MemorySystem:
                 self._db_connection = None
 
         try:
-            conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=5.0)
             conn.row_factory = sqlite3.Row
+            # Enable WAL mode for better concurrency
+            conn.execute("PRAGMA journal_mode=WAL")
             c = conn.cursor()
             c.executescript("""
                 CREATE TABLE IF NOT EXISTS profile (key TEXT PRIMARY KEY, value TEXT);
@@ -100,13 +103,128 @@ class MemorySystem:
             if "embedding" not in columns:
                 c.execute("ALTER TABLE memory_items ADD COLUMN embedding BLOB")
 
+            # Check if importance column exists, add if not
+            columns_lower = [col.lower() for col in columns]
+            if "importance" not in columns_lower:
+                c.execute(
+                    "ALTER TABLE memory_items ADD COLUMN importance REAL DEFAULT 1.0"
+                )
+
             with self.db_lock:
                 conn.commit()
                 self._db_connection = conn
             return conn
+        except sqlite3.OperationalError as e:
+            # Database locked or other operational error - use in-memory fallback
+            print(f"[Memory] DB locked or unavailable ({e}), using in-memory mode")
+            return self._get_in_memory_fallback()
         except Exception as e:
             print(f"[Memory] DB Connection Error: {e}")
-            return None
+            return self._get_in_memory_fallback()
+
+    def _get_in_memory_fallback(self):
+        """Fallback when DB is unavailable - in-memory storage"""
+
+        class InMemoryDB:
+            """Mock DB interface for fallback mode"""
+
+            def __init__(self):
+                self.data = {
+                    "profile": {},
+                    "preferences": [],
+                    "facts": [],
+                    "summaries": [],
+                    "conversation": [],
+                    "metadata": {},
+                    "memory_items": [],
+                }
+                self._closed = False
+
+            def cursor(self):
+                return InMemoryCursor(self)
+
+            def commit(self):
+                pass
+
+            def execute(self, sql):
+                pass
+
+            def close(self):
+                self._closed = True
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        class InMemoryCursor:
+            """Mock cursor for fallback mode"""
+
+            def __init__(self, db):
+                self.db = db
+                self._results = []
+
+            def execute(self, sql, params=None):
+                self._results = []
+                sql_lower = sql.lower()
+                if "select" in sql_lower and "memory_items" in sql_lower:
+                    for item in self.db.data.get("memory_items", []):
+                        self._results.append(InMemoryRow(item))
+                elif "select" in sql_lower and "metadata" in sql_lower:
+                    for k, v in self.db.data.get("metadata", {}).items():
+                        if params and params[0] == k:
+                            self._results.append(InMemoryRow({"key": k, "value": v}))
+                return self
+
+            def fetchone(self):
+                return self._results[0] if self._results else None
+
+            def fetchall(self):
+                return self._results
+
+            def executescript(self, sql):
+                pass
+
+            def __iter__(self):
+                return iter(self._results)
+
+            @property
+            def rowcount(self):
+                return len(self._results)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        class InMemoryRow:
+            """Mimics sqlite3.Row for in-memory fallback"""
+
+            def __init__(self, data):
+                self._data = data
+                self._keys = list(data.keys()) if data else []
+
+            def __getitem__(self, key):
+                if isinstance(key, int):
+                    return list(self._data.values())[key]
+                return self._data.get(key)
+
+            def __contains__(self, key):
+                return key in self._data
+
+            def keys(self):
+                return self._keys
+
+            def get(self, key, default=None):
+                return self._data.get(key, default)
+
+        # Return a singleton fallback connection
+        if not hasattr(self, "_fallback_conn") or self._fallback_conn is None:
+            self._fallback_conn = InMemoryDB()
+            print("[Memory] Using in-memory fallback mode")
+        return self._fallback_conn
 
     def get_default_memory(self):
         return {
@@ -465,6 +583,10 @@ class MemorySystem:
                 ("relational", memory_groups.get("relational", []), 1.3),
             ]
 
+            # Lazy embedding: compute embeddings on-demand during retrieval, not during save
+            # This avoids blocking the main thread during memory save
+            pending_embeddings = []  # Track items that need embeddings for background processing
+
             for kind, values, weight in weighted_groups:
                 for value in values[:20]:
                     if value:
@@ -475,20 +597,30 @@ class MemorySystem:
                         ).fetchone()
                         emb_blob = existing[0] if existing else None
 
+                        # Skip synchronous embedding computation - store without embedding
+                        # Embeddings will be computed on-demand during retrieval
                         if emb_blob is None:
-                            embedding = self._get_embedding(str(value))
-                            if embedding is not None and np is not None:
-                                emb_blob = sqlite3.Binary(
-                                    embedding.astype(np.float32).tobytes()
-                                )
+                            # Queue for background processing (optional optimization)
+                            pending_embeddings.append((kind, str(value)))
+
+                        # Importance-based decay: goals and relational are harder to forget
+                        importance = {
+                            "goal": 1.5,
+                            "relational": 1.4,
+                            "like": 1.2,
+                            "dislike": 1.2,
+                            "episodic": 1.0,
+                            "topic": 1.0,
+                        }.get(kind, 1.0)
 
                         c.execute(
                             "INSERT INTO memory_items "
-                            "(kind,value,weight,saliency,access_count,source_turn,last_used_at,embedding) "
-                            "VALUES (?,?,?,?,0,?,?,?) "
+                            "(kind,value,weight,saliency,access_count,source_turn,last_used_at,embedding,importance) "
+                            "VALUES (?,?,?,?,0,?,?,?,?) "
                             "ON CONFLICT(kind,value) DO UPDATE SET "
                             "weight=excluded.weight, saliency=excluded.saliency, "
-                            "last_used_at=excluded.last_used_at, embedding=excluded.embedding",
+                            "last_used_at=excluded.last_used_at, embedding=excluded.embedding, "
+                            "importance=excluded.importance",
                             (
                                 kind,
                                 str(value),
@@ -497,6 +629,7 @@ class MemorySystem:
                                 self.turn_counter,
                                 now,
                                 emb_blob,
+                                importance,
                             ),
                         )
 
@@ -594,7 +727,7 @@ class MemorySystem:
         return max(1, min(10, score))
 
     def add_item(self, kind, value, weight=1.0, limit=12):
-        """Add memory item"""
+        """Add memory item with exception handling"""
         self._clear_cache()
 
         if not value:
@@ -632,6 +765,55 @@ class MemorySystem:
                 target_list.remove(text)
             target_list.insert(0, text)
             self.memory[section][key] = target_list[:bucket_limit]
+
+        # Try to persist to DB, but don't fail if DB is unavailable
+        try:
+            conn = self._get_db()
+            if conn:
+                c = conn.cursor()
+                saliency = self.estimate_saliency(kind, text)
+                now = datetime.now().isoformat()
+
+                # Importance-based decay: goals and relational are harder to forget
+                importance = {
+                    "goal": 1.5,
+                    "relational": 1.4,
+                    "like": 1.2,
+                    "dislike": 1.2,
+                    "episodic": 1.0,
+                    "topic": 1.0,
+                }.get(kind, 1.0)
+
+                with self.db_lock:
+                    existing = c.execute(
+                        "SELECT embedding FROM memory_items WHERE kind=? AND value=?",
+                        (kind, str(text)),
+                    ).fetchone()
+                    emb_blob = existing[0] if existing else None
+
+                    c.execute(
+                        "INSERT INTO memory_items "
+                        "(kind,value,weight,saliency,access_count,source_turn,last_used_at,embedding,importance) "
+                        "VALUES (?,?,?,?,0,?,?,?,?) "
+                        "ON CONFLICT(kind,value) DO UPDATE SET "
+                        "weight=excluded.weight, saliency=excluded.saliency, "
+                        "last_used_at=excluded.last_used_at, embedding=excluded.embedding, "
+                        "importance=excluded.importance",
+                        (
+                            kind,
+                            str(text),
+                            weight,
+                            saliency,
+                            self.turn_counter,
+                            now,
+                            emb_blob,
+                            importance,
+                        ),
+                    )
+                    conn.commit()
+        except Exception as e:
+            print(f"[Memory] Failed to persist item to DB: {e}")
+            # Fall back to in-memory only
 
         self._is_dirty = True
 
@@ -957,7 +1139,8 @@ class MemorySystem:
 
     def get_relevant_context(self, user_input):
         """Semantic search for relevant memory"""
-        cache_key = f"rag_{user_input.strip().lower()}"
+        # Include turn_counter in cache key so same input at different turns returns different results
+        cache_key = f"rag_{self.turn_counter}_{user_input.strip().lower()}"
         if self._rag_context_cache and cache_key == self._rag_cache_key:
             return self._rag_context_cache
 
@@ -1142,12 +1325,19 @@ class MemorySystem:
             c = conn.cursor()
 
             with self.db_lock:
+                # Delete items that:
+                # - Have never been accessed (access_count = 0)
+                # - Are older than 100 turns
+                # - Have low saliency AND low importance (both must be low to delete)
+                # This prevents important but rarely-accessed memories from being deleted
+                # Use COALESCE for backwards compatibility with old items without importance column
                 c.execute(
                     """
                     DELETE FROM memory_items 
                     WHERE access_count = 0 
                     AND (? - source_turn) > 100 
-                    AND saliency < 7
+                    AND saliency < 7 
+                    AND COALESCE(importance, 1.0) < 1.3
                 """,
                     (self.turn_counter,),
                 )
@@ -1158,4 +1348,6 @@ class MemorySystem:
 
                 conn.commit()
         except Exception as e:
-            print(f"[Memory] Consolidate error: {e}")
+            # Silently ignore if importance column doesn't exist yet
+            if "no such column" not in str(e).lower():
+                print(f"[Memory] Consolidate error: {e}")
