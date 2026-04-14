@@ -228,9 +228,9 @@ class EmotionEngine:
         return " ".join(bias_instructions)
 
     def get_dynamic_max_tokens(self):
-        """Get dynamic max tokens based on attention"""
+        """Get dynamic max tokens based on attention - Optimized for short texting"""
         if self.attention <= 3:
-            return 40
+            return 35
         if self.attention >= 8:
-            return 200
-        return 150
+            return 100
+        return 70

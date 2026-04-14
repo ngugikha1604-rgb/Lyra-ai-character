@@ -422,6 +422,7 @@ class MemorySystem:
         c = conn.cursor()
         try:
             from time_utils import get_vietnam_time
+
             now = get_vietnam_time().isoformat()
         except Exception:
             now = datetime.now().isoformat()
@@ -933,6 +934,25 @@ class MemorySystem:
 
         except Exception as e:
             print(f"[Memory] Error building context: {e}")
+            return ""
+
+    def get_focused_context(self, user_input=""):
+        """Get only 2-3 most relevant memory items - simplified for natural conversation"""
+        try:
+            profile = self.memory.get("user_profile", {})
+            episodic = self.memory.get("facts", {}).get("episodic", [])[:2]
+
+            parts = []
+
+            if profile.get("name"):
+                parts.append(f"Name: {profile['name']}")
+
+            if episodic:
+                parts.append(f"Recent: {episodic[0][:60]}")
+
+            return "\n".join(parts) if parts else ""
+        except Exception as e:
+            print(f"[Memory] get_focused_context error: {e}")
             return ""
 
     def get_relevant_context(self, user_input):

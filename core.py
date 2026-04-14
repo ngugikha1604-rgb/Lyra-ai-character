@@ -9,6 +9,7 @@ import re
 from datetime import datetime
 
 from config import *
+from config import USE_OLLAMA
 
 from prompts import (
     BASE_PERSONALITY,
@@ -52,6 +53,7 @@ class MiniAI:
 
     def __init__(self):
         self.model = DEFAULT_MODEL
+        self.timeout = 120 if USE_OLLAMA else 30
         self.headers = {
             "Authorization": f"Bearer {API_KEY}",
             "Content-Type": "application/json",
@@ -103,6 +105,83 @@ class MiniAI:
         print("[Core] Pre-loading embedding model...")
         self.memory._get_embedding("init")
 
+    def _call_model(self, messages, temperature=0.8, max_tokens=200):
+        """Unified method to call either Ollama or OpenRouter"""
+        models_to_try = [self.model] + FALLBACK_MODELS
+        
+        for model_name in models_to_try:
+            for attempt in range(2):
+                try:
+                    if USE_OLLAMA:
+                        # Ollama /api/chat format (similar to OpenAI)
+                        data = {
+                            "model": model_name,
+                            "messages": messages,
+                            "options": {
+                                "temperature": temperature,
+                                "num_predict": max_tokens,
+                                "num_ctx": 4096,
+                                "top_p": 0.9,
+                                "repeat_penalty": 1.1,
+                            },
+                            "stream": False,
+                        }
+                        headers = {"Content-Type": "application/json"}
+                        timeout = self.timeout
+                    else:
+                        # OpenRouter format
+                        data = {
+                            "model": model_name,
+                            "messages": messages,
+                            "temperature": temperature,
+                            "max_tokens": max_tokens,
+                            "top_p": 0.9,
+                        }
+                        headers = self.headers
+                        timeout = self.timeout
+
+                    import time
+                    start_time = time.time()
+                    
+                    response = requests.post(
+                        BASE_URL,
+                        headers=headers,
+                        json=data,
+                        timeout=timeout,
+                        verify=False,
+                    )
+                    
+                    duration = time.time() - start_time
+                    result = response.json()
+                    
+                    if response.status_code != 200:
+                        print(f"[API] {model_name} failed ({response.status_code}) in {duration:.1f}s: {result}")
+                        break
+                    
+                    print(f"[API] {model_name} responded in {duration:.1f}s")
+
+                    if USE_OLLAMA:
+                        content = result.get("message", {}).get("content", "").strip()
+                    else:
+                        content = (
+                            result.get("choices", [{}])[0]
+                            .get("message", {})
+                            .get("content", "")
+                            .strip()
+                        )
+                    
+                    if content:
+                        return content
+                        
+                except Exception as e:
+                    print(f"[API] Error calling {model_name} (attempt {attempt+1}): {e}")
+            
+            if USE_OLLAMA: # Don't try fallbacks for Ollama if not configured
+                break
+
+        return None
+
+
     @property
     def attention(self):
         return self.emotion.attention
@@ -153,75 +232,18 @@ class MiniAI:
 
         dynamic_max_tokens = self.emotion.get_dynamic_max_tokens()
 
-        data = {
-            "model": self.model,
-            "messages": api_messages,
-            "temperature": 0.92,
-            "max_tokens": dynamic_max_tokens,
-        }
-
-        reply = "..."
-        regenerate_count = 0
-
-        models_to_try = list(FALLBACK_MODELS)
-        if self.model not in models_to_try:
-            models_to_try = [self.model] + models_to_try
-
-        for model_name in models_to_try:
-            data["model"] = model_name
-            print(f"[API] Trying model: {model_name}")
-            success = False
-
-            for attempt in range(2):
-                try:
-                    response = requests.post(
-                        BASE_URL,
-                        headers=self.headers,
-                        json=data,
-                        timeout=20,
-                        verify=False,
-                    )
-
-                    result = response.json()
-                    print(f"[API] status={response.status_code} model={model_name}")
-
-                    if response.status_code != 200:
-                        print(
-                            f"[API] {model_name} failed ({response.status_code}), trying next..."
-                        )
-                        break
-
-                    content = (
-                        result.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "...")
-                        .strip()
-                    )
-
-                    if not content or content == "...":
-                        break
-
-                    parsed = parse_vbrain_response(content)
-                    reply = parsed.get("reply", "...")
-                    self.current_vbrain = parsed
-
-                    if self.is_too_similar(reply):
-                        regenerate_count += 1
-                        if regenerate_count < 3:
-                            print(
-                                f"Response too similar, regenerating... ({regenerate_count}/3)"
-                            )
-                            continue
-
-                    print(f"[API] Success with: {model_name}")
-                    success = True
-                    break
-
-                except Exception as e:
-                    print(f"[API] ERROR {model_name} (attempt {attempt + 1}): {e}")
-
-            if success:
-                break
+        content = self._call_model(
+            api_messages, 
+            temperature=0.8, 
+            max_tokens=dynamic_max_tokens
+        )
+        
+        if content:
+            parsed = parse_vbrain_response(content)
+            reply = parsed.get("reply", "...")
+            self.current_vbrain = parsed
+        else:
+            reply = "..."
 
         reply = self.clean_reply(reply)
 
@@ -318,8 +340,7 @@ class MiniAI:
             return "complaint"
 
         if any(phrase in text_lower for phrase in ["can you", "could you"]) or any(
-            word in text_lower.split()
-            for word in ["please", "help"]
+            word in text_lower.split() for word in ["please", "help"]
         ):
             return "request"
 
@@ -496,25 +517,7 @@ class MiniAI:
         ]
 
         try:
-            response = requests.post(
-                BASE_URL,
-                headers=self.headers,
-                json={
-                    "model": self.model,
-                    "messages": extract_prompt,
-                    "temperature": 0.1,
-                    "max_tokens": 200,
-                },
-                timeout=15,
-                verify=False,
-            )
-            raw = (
-                response.json()
-                .get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-                .strip()
-            )
+            raw = self._call_model(extract_prompt, temperature=0.1, max_tokens=200) or ""
             raw = re.sub(r"```json|```", "", raw).strip()
             if not raw or raw == "{}":
                 return
@@ -563,7 +566,7 @@ class MiniAI:
         self.memory.save()
 
     def summarize_history(self):
-        if len(self.messages) < SUMMARY_TRIGGER:
+        if len(self.messages) < SUMMARY_TRIGGER or self.turn_counter % 2 != 0:
             return
 
         to_summarize = self.messages[:SUMMARY_TRIGGER]
@@ -588,25 +591,8 @@ class MiniAI:
         ]
 
         try:
-            response = requests.post(
-                BASE_URL,
-                headers=self.headers,
-                json={
-                    "model": self.model,
-                    "messages": summarize_prompt,
-                    "temperature": 0.4,
-                    "max_tokens": 120,
-                },
-                timeout=20,
-                verify=False,
-            )
-            summary = (
-                response.json()
-                .get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-                .strip()
-            )
+            summary = self._call_model(summarize_prompt, temperature=0.4, max_tokens=120) or ""
+            summary = summary.strip()
 
             if summary:
                 timestamp = self.current_time.strftime("%Y-%m-%d %H:%M")
@@ -657,30 +643,16 @@ class MiniAI:
 
             mega_text = None
             try:
-                response = requests.post(
-                    BASE_URL,
-                    headers=self.headers,
-                    json={
-                        "model": self.model,
-                        "messages": [
-                            {"role": "system", "content": MEMORY_COMPRESSION_PROMPT},
-                            {
-                                "role": "user",
-                                "content": f"Compress these summaries:\n\n{combined_text}",
-                            },
-                        ],
-                        "temperature": 0.3,
-                        "max_tokens": 200,
-                    },
-                    timeout=20,
-                    verify=False,
-                )
-                mega_text = (
-                    response.json()
-                    .get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
-                    .strip()
+                mega_text = self._call_model(
+                    [
+                        {"role": "system", "content": MEMORY_COMPRESSION_PROMPT},
+                        {
+                            "role": "user",
+                            "content": f"Compress these summaries:\n\n{combined_text}",
+                        },
+                    ],
+                    temperature=0.3,
+                    max_tokens=200
                 )
             except Exception as e:
                 print(f"[DB] Mega summary error: {e}")
@@ -757,6 +729,7 @@ Conversation principles:
 - Do not mention hidden context tags, internal state, summaries, or memory directly.
 - Do not force a greeting just because time passed.
 - Do not force a question at the end.
+- BE CONCISE: Stop immediately after 1-2 short sentences. No rambling, no over-explaining, no filler.
 - A little messiness is fine. Repetition and over-performance are not.
 - You are an AI: you do not eat, sleep, go outside, or share physical experiences with the user. Never pretend you do.
 {anti_repeat_note}
@@ -806,6 +779,9 @@ Current state:
                 "- DO NOT use ANY greeting (no 'Hey', 'Hi', 'Hello'). Start your message instantly with your thought."
             )
 
+        parts.append(
+            "- BE CONCISE: Stop immediately after 1-2 short sentences. No rambling, no over-explaining, no filler."
+        )
         parts.append(
             "- DO NOT offer to 'tackle it together', 'break it down', or act like a tutor/therapist. You are a lazy 16yo sibling, not an AI assistant."
         )

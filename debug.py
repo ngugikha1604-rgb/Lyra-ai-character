@@ -1,14 +1,34 @@
 import sys
+import requests
 from core import MiniAI
+from config import BASE_URL, USE_OLLAMA, DEFAULT_MODEL
 
 def main():
     print("========================================")
     print("Lyra AI - Terminal Debug Mode")
+    print("Mode:", "OLLAMA" if USE_OLLAMA else "OPENROUTER")
+    print("Model:", DEFAULT_MODEL)
     print("Type 'exit' or 'quit' to stop.")
     print("========================================\n")
 
+    # 1. Connection Check
+    if USE_OLLAMA:
+        print(f"[Check] Verifying Ollama at {BASE_URL}...")
+        try:
+            # Check if Ollama is running (slash command works for some, but /api/tags is safer)
+            tags_url = BASE_URL.replace("/api/chat", "/api/tags")
+            res = requests.get(tags_url, timeout=5)
+            if res.status_code == 200:
+                print("✓ Ollama is online.")
+            else:
+                print(f"! Ollama returned status {res.status_code}. Check if it is running correctly.")
+        except Exception as e:
+            print(f"! Could not connect to Ollama: {e}")
+            print("  Make sure Ollama is started and reachable at localhost:11434")
+
     try:
-        # Khởi tạo AI engine
+        # 2. Khởi tạo AI engine
+        print("[System] Loading Lyra AI...")
         ai = MiniAI()
         
         print(f"[System] AI Loaded. Current Mood: {ai.mood}, Affection: {ai.affection}")
@@ -17,8 +37,11 @@ def main():
             
     except Exception as e:
         print(f"[ERROR] Failed to initialize MiniAI: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
+    # 3. Chat Loop
     while True:
         try:
             user_input = input("\nYou: ")
@@ -32,14 +55,20 @@ def main():
 
             print("Lyra is thinking...")
             
-            # Gọi hàm chat của MiniAI giống cách web.py gọi
+            # Gọi hàm chat của MiniAI
             result = ai.chat(user_input)
             
             reply = result.get("reply", "[No reply]")
+            monologue = result.get("monologue", "")
+            
+            if monologue:
+                print(f"\n[Monologue]: {monologue}")
+                
             try:
-                print("\nLyra:", reply)
+                print(f"\nLyra: {reply}")
             except UnicodeEncodeError:
-                print("\nLyra (encoded):", reply.encode('ascii', 'ignore').decode('ascii'))
+                print(f"\nLyra (encoded): {reply.encode('ascii', 'ignore').decode('ascii')}")
+                
             print("-" * 40)
             print(f"Emotion: {result.get('emotion')} | Intent: {result.get('intent')}")
             print(f"Mood: {result.get('mood')} | Affection: {result.get('affection')}")

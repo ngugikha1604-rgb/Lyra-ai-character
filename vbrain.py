@@ -10,7 +10,7 @@ def parse_vbrain_response(content):
     Expected format: {monologue, emotion, action, reply}
     """
     default_res = {
-        "monologue": "Thinking...",
+        "monologue": "",
         "emotion": "neutral",
         "action": "NONE",
         "reply": content,
@@ -18,15 +18,24 @@ def parse_vbrain_response(content):
 
     clean_content = content.replace("```json", "").replace("```", "").strip()
 
+    if not clean_content:
+        return default_res
+
     try:
-        return json.loads(clean_content)
+        parsed = json.loads(clean_content)
+        if "reply" in parsed:
+            return {**default_res, **parsed}
     except Exception:
-        try:
-            match = re.search(r"\{.*\}", clean_content, re.DOTALL)
-            if match:
-                return json.loads(match.group())
-        except Exception:
-            pass
+        pass
+
+    try:
+        match = re.search(r"\{.*\}", clean_content, re.DOTALL)
+        if match:
+            parsed = json.loads(match.group())
+            if "reply" in parsed:
+                return {**default_res, **parsed}
+    except Exception:
+        pass
 
     return default_res
 
