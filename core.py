@@ -10,7 +10,7 @@ from datetime import datetime
 from duckduckgo_search import DDGS
 
 from config import *
-from config import USE_OLLAMA
+from config import USE_OLLAMA, CHAT_MODEL, CHAT_BASE_URL, TRANSLATE_MODEL, TRANSLATE_BASE_URL, GROQ_API_KEY
 
 from prompts import (
     BASE_PERSONALITY,
@@ -46,6 +46,7 @@ from time_utils import (
 from emotion import EmotionEngine
 from memory import MemorySystem
 from vbrain import parse_vbrain_response
+from conversation_state import ConversationStateDetector
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -54,10 +55,13 @@ class MiniAI:
     """Main AI engine for Lyra"""
 
     def __init__(self):
-        self.model = DEFAULT_MODEL
-        self.timeout = 120 if USE_OLLAMA else 30
-        self.headers = {
-            "Authorization": f"Bearer {API_KEY}",
+        self.model = CHAT_MODEL
+        self.timeout = 120  # local Ollama có thể chậm hơn
+        # Chat headers (Ollama không cần auth, nhưng giữ để không break)
+        self.headers = {"Content-Type": "application/json"}
+        # Translate headers (Groq)
+        self._translate_headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json",
         }
 
@@ -70,6 +74,7 @@ class MiniAI:
 
         self.emotion = EmotionEngine()
         self.memory = MemorySystem(max_summaries=MAX_SUMMARIES)
+        self.conv_state = ConversationStateDetector(window=10)
         self.memory.load()
 
         # Khởi tạo messages từ lịch sử đã lưu trong memory sau khi memory đã load xong
@@ -116,88 +121,114 @@ class MiniAI:
         self.memory.turn_counter = value
 
     def _call_model(self, messages, temperature=0.8, max_tokens=200):
-        """Unified method to call either Ollama or OpenRouter"""
-        models_to_try = [self.model] + FALLBACK_MODELS
+        """Call local Ollama chat model (subsect/riko-qwen4b-q4)"""
+        return self._call_chat_model(messages, temperature=temperature, max_tokens=max_tokens)
 
-        for model_name in models_to_try:
-            for attempt in range(2):
-                try:
-                    if USE_OLLAMA:
-                        # Ollama /api/chat format (similar to OpenAI)
-                        data = {
-                            "model": model_name,
-                            "messages": messages,
-                            "options": {
-                                "temperature": temperature,
-                                "num_predict": max_tokens,
-                                "num_ctx": 4096,
-                                "top_p": 0.9,
-                                "repeat_penalty": 1.1,
-                            },
-                            "stream": False,
-                        }
-                        headers = {"Content-Type": "application/json"}
-                        timeout = self.timeout
-                    else:
-                        # OpenRouter format
-                        data = {
-                            "model": model_name,
-                            "messages": messages,
-                            "temperature": temperature,
-                            "max_tokens": max_tokens,
-                            "top_p": 0.9,
-                        }
-                        headers = self.headers
-                        timeout = self.timeout
+    def _call_chat_model(self, messages, temperature=0.8, max_tokens=200):
+        """Call local Ollama for main chat generation"""
+        for attempt in range(2):
+            try:
+                data = {
+                    "model": CHAT_MODEL,
+                    "messages": messages,
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": max_tokens,
+                        "num_ctx": 4096,
+                        "top_p": 0.9,
+                        "repeat_penalty": 1.1,
+                    },
+                    "stream": False,
+                }
 
-                    import time
+                import time
+                start_time = time.time()
 
-                    start_time = time.time()
+                response = requests.post(
+                    CHAT_BASE_URL,
+                    headers={"Content-Type": "application/json"},
+                    json=data,
+                    timeout=self.timeout,
+                    verify=False,
+                )
 
-                    response = requests.post(
-                        BASE_URL,
-                        headers=headers,
-                        json=data,
-                        timeout=timeout,
-                        verify=False,
-                    )
+                duration = time.time() - start_time
+                result = response.json()
 
-                    duration = time.time() - start_time
-                    result = response.json()
+                if response.status_code != 200:
+                    print(f"[Chat] Ollama failed ({response.status_code}) in {duration:.1f}s: {result}")
+                    break
 
-                    if response.status_code != 200:
-                        print(
-                            f"[API] {model_name} failed ({response.status_code}) in {duration:.1f}s: {result}"
-                        )
-                        break
+                print(f"[Chat] Ollama responded in {duration:.1f}s")
+                content = result.get("message", {}).get("content", "").strip()
+                if content:
+                    return content
 
-                    print(f"[API] {model_name} responded in {duration:.1f}s")
+            except Exception as e:
+                print(f"[Chat] Ollama error (attempt {attempt + 1}): {e}")
 
-                    if USE_OLLAMA:
-                        content = result.get("message", {}).get("content", "").strip()
-                    else:
-                        content = (
-                            result.get("choices", [{}])[0]
-                            .get("message", {})
-                            .get("content", "")
-                            .strip()
-                        )
+        return None
 
-                    if content:
-                        return content
+    def _call_translate_model(self, messages, temperature=0.4, max_tokens=150):
+        """Call Groq llama3 for translate / text polishing"""
+        for attempt in range(2):
+            try:
+                data = {
+                    "model": TRANSLATE_MODEL,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "top_p": 0.9,
+                }
 
-                except Exception as e:
-                    print(
-                        f"[API] Error calling {model_name} (attempt {attempt + 1}): {e}"
-                    )
+                import time
+                start_time = time.time()
 
-            if USE_OLLAMA:  # Don't try fallbacks for Ollama if not configured
-                break
+                response = requests.post(
+                    TRANSLATE_BASE_URL,
+                    headers=self._translate_headers,
+                    json=data,
+                    timeout=15,
+                    verify=False,
+                )
+
+                duration = time.time() - start_time
+                result = response.json()
+
+                if response.status_code != 200:
+                    print(f"[Translate] Groq failed ({response.status_code}) in {duration:.1f}s: {result}")
+                    break
+
+                print(f"[Translate] Groq responded in {duration:.1f}s")
+                content = (
+                    result.get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                    .strip()
+                )
+                if content:
+                    return content
+
+            except Exception as e:
+                print(f"[Translate] Groq error (attempt {attempt + 1}): {e}")
 
         return None
 
     def _translate_response(self, text):
-        """No longer needed - Lyra replies in Vietnamese directly"""
+        """Polish Lyra's reply into natural Vietnamese using Groq llama3"""
+        if not text or text == "...":
+            return text
+        try:
+            prompt = TRANSLATE_PROMPT.format(text=text)
+            result = self._call_translate_model(
+                [{"role": "user", "content": prompt}],
+                temperature=0.4,
+                max_tokens=150,
+            )
+            if result and result.strip():
+                return result.strip()
+        except Exception as e:
+            print(f"[Translate] Error: {e}")
         return text
 
     def _should_search(self, user_input):
@@ -336,6 +367,9 @@ class MiniAI:
         self.extract_memory(user_input, intent)
         self.emotion.update(user_input, self.time_gap_hours)
 
+        # Update conversation state (after emotion so we have fresh mood/attention)
+        self.conv_state.update(user_input, self.messages)
+
         self.summarize_history()
         if self.turn_counter % 20 == 0:
             self.memory.consolidate()
@@ -363,9 +397,12 @@ class MiniAI:
         api_messages.append({"role": "user", "content": composed})
 
         dynamic_max_tokens = self.emotion.get_dynamic_max_tokens()
+        dynamic_temperature = self.conv_state.get_temperature(
+            self.emotion.mood, self.emotion.attention
+        )
 
         content = self._call_model(
-            api_messages, temperature=0.8, max_tokens=dynamic_max_tokens
+            api_messages, temperature=dynamic_temperature, max_tokens=dynamic_max_tokens
         )
 
         if content:
@@ -431,6 +468,7 @@ class MiniAI:
             "time_period": self.time_period,
             "time_gap_hours": self.time_gap_hours,
             "intent": intent,
+            "conv_state": self.conv_state.state,
         }
 
     def detect_intent(self, text):
@@ -959,6 +997,11 @@ class MiniAI:
         # Stream context từ ViewerTracker (Giai đoạn 3) — chỉ có khi gọi từ /stream-chat
         stream_context = getattr(self, "stream_context", "") or ""
 
+        # Conversation state & rhythm hints
+        state_hint  = self.conv_state.get_state_hint()
+        rhythm_hint = self.conv_state.get_rhythm_hint()
+        conv_hints  = "\n".join(filter(None, [state_hint, rhythm_hint]))
+
         system_prompt = f"""{NATURAL_BASE_PERSONALITY}
 
 {time_context}
@@ -976,6 +1019,7 @@ Conversation principles:
 - A little messiness is fine. Repetition and over-performance are not.
 - You are an AI: you do not eat, sleep, or share physical experiences with the user. Never pretend you do.
 {anti_repeat_note}
+{conv_hints}
 
 Current state:
 - User signal: {self.infer_user_signal(user_input)}
