@@ -12,7 +12,7 @@ import sqlite3
 import threading
 import requests
 import pytz
-from config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
+from config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, FLASK_SECRET_KEY
 from dotenv import load_dotenv
 import google_auth_oauthlib.flow
 
@@ -26,7 +26,7 @@ load_dotenv()
 os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24))
+app.secret_key = FLASK_SECRET_KEY
 
 # ========================
 # SESSION CONFIGURATION
@@ -711,18 +711,30 @@ def stream_events():
 # Auth routes for YouTube API access (OAuth 2.0 flow)
 @app.route('/authorize')
 def authorize():
-    # Khởi tạo luồng xác thực
+    import secrets
+    import hashlib
+    import base64
+
     flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
         CLIENT_SECRETS_FILE, scopes=SCOPES)
-    
-    # URL mà Google sẽ gửi mã về (phải khớp với console)
     flow.redirect_uri = url_for('oauth2callback', _external=True)
+
+    # Tự tạo PKCE code_verifier + code_challenge (Google yêu cầu)
+    code_verifier = secrets.token_urlsafe(64)
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode()).digest()
+    ).rstrip(b'=').decode()
 
     authorization_url, state = flow.authorization_url(
         access_type='offline',
-        include_granted_scopes='true')
+        include_granted_scopes='true',
+        prompt='consent',
+        code_challenge=code_challenge,
+        code_challenge_method='S256',
+    )
 
     session['state'] = state
+    session['code_verifier'] = code_verifier
     return redirect(authorization_url)
 
 @app.route('/oauth2callback')
@@ -732,11 +744,13 @@ def oauth2callback():
         CLIENT_SECRETS_FILE, scopes=SCOPES, state=state)
     flow.redirect_uri = url_for('oauth2callback', _external=True)
 
-    # Đổi mã lấy token
-    authorization_response = request.url
-    flow.fetch_token(authorization_response=authorization_response)
+    code_verifier = session.pop('code_verifier', None)
+    fetch_kwargs = {'authorization_response': request.url}
+    if code_verifier:
+        fetch_kwargs['code_verifier'] = code_verifier
 
-    # Lưu credentials vào session hoặc DB để dùng sau này
+    flow.fetch_token(**fetch_kwargs)
+
     credentials = flow.credentials
     session['credentials'] = {
         'token': credentials.token,
@@ -744,7 +758,7 @@ def oauth2callback():
         'token_uri': credentials.token_uri,
         'client_id': credentials.client_id,
         'client_secret': credentials.client_secret,
-        'scopes': credentials.scopes
+        'scopes': list(credentials.scopes) if credentials.scopes else [],
     }
     return "Xác thực thành công! Lyra đã có quyền truy cập YouTube."
 

@@ -147,6 +147,8 @@ class YouTubeChatPoller:
             return
 
         try:
+            import google.auth.transport.requests as google_requests
+            authed_session = google_requests.Request()
             youtube = build("youtube", "v3", credentials=self._credentials)
         except Exception as e:
             print(f"[YouTube] Failed to build API client: {e}")
@@ -155,6 +157,10 @@ class YouTubeChatPoller:
 
         while not self._stop_event.is_set():
             try:
+                # Auto-refresh token nếu hết hạn
+                if self._credentials.expired and self._credentials.refresh_token:
+                    self._credentials.refresh(authed_session)
+                    print("[YouTube] Token refreshed")
                 self._fetch_messages(youtube)
             except Exception as e:
                 print(f"[YouTube] Poll error: {e}")
