@@ -662,6 +662,11 @@ class MiniAI:
         return None
 
     def extract_memory(self, text, intent):
+        # Giai đoạn 4: Skip extraction nếu viewer không đủ quen (set từ web.py)
+        if getattr(self, "skip_memory_extraction", False):
+            self.skip_memory_extraction = False
+            return
+
         now_ts = datetime.now().isoformat()
         convo = self.memory.memory.setdefault("conversation", {})
         if not convo.get("first_chat"):
@@ -951,6 +956,9 @@ class MiniAI:
         if recent_patterns:
             anti_repeat_note += f"\n- Avoid starting with any of these patterns used recently: {list(recent_patterns)}."
 
+        # Stream context từ ViewerTracker (Giai đoạn 3) — chỉ có khi gọi từ /stream-chat
+        stream_context = getattr(self, "stream_context", "") or ""
+
         system_prompt = f"""{NATURAL_BASE_PERSONALITY}
 
 {time_context}
@@ -976,9 +984,12 @@ Current state:
 
 {memory_context}
 {search_context}
+{stream_context}
 
 {VTUBER_BRAIN_INSTRUCTIONS}
 """
+        # Reset sau mỗi turn để không leak context sang /chat thường
+        self.stream_context = ""
         return system_prompt
 
     def compose_user_message(self, user_input, intent):
