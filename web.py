@@ -22,7 +22,11 @@ SCOPES = ['https://www.googleapis.com/auth/youtube.force-ssl']
 
 load_dotenv()
 
+# Cho phép OAuth qua HTTP khi dev local (không dùng trên production)
+os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24))
 
 # ========================
 # SESSION CONFIGURATION
@@ -751,4 +755,4 @@ def oauth2callback():
 if __name__ == "__main__":
     print("Starting Lyra AI Server...")
     print("Sessions will be saved to: ./flask_sessions")
-    app.run(debug=True)
+    app.run(debug=True, use_reloader=False)
