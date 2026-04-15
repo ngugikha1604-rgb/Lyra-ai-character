@@ -56,7 +56,7 @@ class MiniAI:
 
     def __init__(self):
         self.model = CHAT_MODEL
-        self.timeout = 120  # local Ollama có thể chậm hơn
+        self.timeout = 45  # Ollama local — balance giữa tốc độ và đủ thời gian generate
         # Chat headers (Ollama không cần auth, nhưng giữ để không break)
         self.headers = {"Content-Type": "application/json"}
         # Translate headers (Groq)
@@ -125,7 +125,7 @@ class MiniAI:
         return self._call_chat_model(messages, temperature=temperature, max_tokens=max_tokens)
 
     def _call_chat_model(self, messages, temperature=0.8, max_tokens=200):
-        """Call local Ollama for main chat generation"""
+        """Call local Ollama for main chat generation, fallback to Groq if unavailable"""
         for attempt in range(2):
             try:
                 data = {
@@ -167,7 +167,9 @@ class MiniAI:
             except Exception as e:
                 print(f"[Chat] Ollama error (attempt {attempt + 1}): {e}")
 
-        return None
+        # Fallback to Groq
+        print("[Chat] Falling back to Groq...")
+        return self._call_translate_model(messages, temperature=temperature, max_tokens=max_tokens)
 
     def _call_translate_model(self, messages, temperature=0.4, max_tokens=150):
         """Call Groq llama3 for translate / text polishing"""
@@ -215,20 +217,7 @@ class MiniAI:
         return None
 
     def _translate_response(self, text):
-        """Polish Lyra's reply into natural Vietnamese using Groq llama3"""
-        if not text or text == "...":
-            return text
-        try:
-            prompt = TRANSLATE_PROMPT.format(text=text)
-            result = self._call_translate_model(
-                [{"role": "user", "content": prompt}],
-                temperature=0.4,
-                max_tokens=150,
-            )
-            if result and result.strip():
-                return result.strip()
-        except Exception as e:
-            print(f"[Translate] Error: {e}")
+        """No-op — translation removed, Groq is used as fallback for chat instead"""
         return text
 
     def _should_search(self, user_input):
