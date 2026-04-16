@@ -22,7 +22,13 @@ except ImportError:
 POLL_INTERVAL_SECONDS = 4       # Poll YouTube API mỗi N giây
 SLOW_MODE_COOLDOWN = 12         # Lyra chờ ít nhất N giây giữa 2 reply
 MAX_QUEUE_SIZE = 20             # Tối đa N message trong queue (tránh backlog)
-MENTION_KEYWORDS = ["lyra", "lira", "lyra?", "@lyra"]  # Trigger mention
+MENTION_KEYWORDS = ["lyra", "lira", "@lyra"]  # Trigger mention — checked with word boundary
+
+# ── Mention check helper ───────────────────────────────────────────────────────
+_MENTION_RE = re.compile(
+    r"(?<![a-zA-Z0-9_])(lyra|lira)(?![a-zA-Z0-9_])|@lyra",
+    re.IGNORECASE,
+)
 
 # Priority score — message có score cao hơn được xử lý trước
 PRIORITY_MENTION = 10
@@ -275,8 +281,8 @@ class YouTubeChatPoller:
         score = PRIORITY_NORMAL
         msg_lower = message.lower()
 
-        # Mention Lyra → ưu tiên cao nhất
-        if any(kw in msg_lower for kw in MENTION_KEYWORDS):
+        # Mention Lyra → ưu tiên cao nhất (word boundary check, không match "lyrabot" etc.)
+        if _MENTION_RE.search(msg_lower):
             score = PRIORITY_MENTION
             return score
 

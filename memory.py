@@ -97,6 +97,15 @@ class MemorySystem:
                     embedding BLOB,
                     UNIQUE(kind, value)
                 );
+                CREATE TABLE IF NOT EXISTS stream_milestones (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    achieved_at TEXT NOT NULL,
+                    stream_title TEXT DEFAULT '',
+                    peak_viewers INTEGER DEFAULT 0,
+                    UNIQUE(event_type)
+                );
             """)
             c.execute("PRAGMA table_info(memory_items)")
             columns = [col[1] for col in c.fetchall()]
@@ -1352,3 +1361,65 @@ class MemorySystem:
             # Silently ignore if importance column doesn't exist yet
             if "no such column" not in str(e).lower():
                 print(f"[Memory] Consolidate error: {e}")
+
+    def check_stream_milestone(self, event_type: str, description: str, stream_title: str = "", peak_viewers: int = 0) -> bool:
+        """
+        Lưu stream milestone nếu chưa có.
+        Trả về True nếu đây là milestone mới (lần đầu đạt được).
+        event_type: 'debut', 'viewers_100', 'viewers_500', 'stream_10', v.v.
+        """
+        try:
+            conn = self._get_db()
+            if not conn:
+                return False
+
+            c = conn.cursor()
+            now = datetime.now().isoformat()
+
+            with self.db_lock:
+                existing = c.execute(
+                    "SELECT id FROM stream_milestones WHERE event_type=?", (event_type,)
+                ).fetchone()
+
+                if existing:
+                    return False  # Đã đạt rồi
+
+                c.execute(
+                    "INSERT INTO stream_milestones (event_type, description, achieved_at, stream_title, peak_viewers) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (event_type, description, now, stream_title, peak_viewers),
+                )
+                conn.commit()
+                print(f"[Memory] New stream milestone: {event_type} — {description}")
+                return True
+
+        except Exception as e:
+            print(f"[Memory] check_stream_milestone error: {e}")
+            return False
+
+    def get_stream_milestones(self, limit: int = 5) -> list:
+        """Lấy các stream milestones gần nhất để inject vào stream prompt."""
+        try:
+            conn = self._get_db()
+            if not conn:
+                return []
+
+            c = conn.cursor()
+            rows = c.execute(
+                "SELECT event_type, description, achieved_at, stream_title FROM stream_milestones "
+                "ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+
+            return [
+                {
+                    "event_type": r["event_type"],
+                    "description": r["description"],
+                    "achieved_at": r["achieved_at"],
+                    "stream_title": r["stream_title"],
+                }
+                for r in rows
+            ]
+        except Exception as e:
+            print(f"[Memory] get_stream_milestones error: {e}")
+            return []

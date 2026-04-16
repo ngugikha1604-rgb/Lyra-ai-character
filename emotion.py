@@ -41,7 +41,10 @@ class EmotionEngine:
         old_affection = self.affection
 
         if time_gap_hours is not None and time_gap_hours > 12:
-            self.mood = self.mood * 0.5
+            # Scale decay theo thời gian: 12h → 50%, 24h → 75%, 48h+ → ~94%
+            # Dùng công thức: decay = 1 - 0.5^(hours/12)
+            decay = 1.0 - (0.5 ** (time_gap_hours / 12.0))
+            self.mood = self.mood * (1.0 - decay)
 
         if time_gap_hours is not None and time_gap_hours > 0:
             self.attention = min(10, self.attention + (time_gap_hours * 2.0))

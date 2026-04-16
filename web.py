@@ -51,7 +51,7 @@ DB_PATH = "memory.db"
 # Đọc từ config.py — chỉnh STREAM_TITLE, STREAM_GAME, STREAM_GOALS, STREAM_NOTES trước khi stream.
 
 def _build_stream_content_context() -> str:
-    """Tạo string inject vào prompt từ stream content trong config.py"""
+    """Tạo string inject vào prompt từ stream content trong config.py + stream milestones"""
     if not any([STREAM_TITLE, STREAM_GAME, STREAM_GOALS, STREAM_NOTES]):
         return ""
     lines = ["[STREAM CONTEXT]"]
@@ -64,6 +64,16 @@ def _build_stream_content_context() -> str:
         lines.append(f"Mục tiêu: {', '.join(goals)}")
     if STREAM_NOTES:
         lines.append(f"Ghi chú: {STREAM_NOTES}")
+
+    # Inject stream milestones để Lyra có thể reference tự nhiên
+    try:
+        milestones = lyra_ai.memory.get_stream_milestones(limit=3)
+        if milestones:
+            milestone_strs = [f"{m['description']} ({m['achieved_at'][:10]})" for m in milestones]
+            lines.append(f"Kỷ niệm stream: {' | '.join(milestone_strs)}")
+    except Exception:
+        pass
+
     lines.append("[/STREAM CONTEXT]")
     return "\n".join(lines)
 
@@ -358,7 +368,7 @@ def _trigger_stream_summary(channel_id: str, platform: str):
 
             prompt_content += "\nTóm tắt ngắn (1-2 câu) chat đang nói về gì và vibe của kênh lúc này."
 
-            summary = lyra_ai._call_model(
+            summary = lyra_ai._call_light_model(
                 [
                     {"role": "system", "content": "Bạn là assistant tóm tắt livestream chat. Trả lời bằng tiếng Việt, ngắn gọn."},
                     {"role": "user", "content": prompt_content},
@@ -575,6 +585,10 @@ _priority_queues: dict = {
 _new_viewer_pool: list = []   # pool để random pick
 _pool_lock = threading.Lock()
 
+# Track regular viewers đã được chào trong session này — tránh chào lại
+_greeted_viewers_this_session: set = set()
+_greeted_lock = threading.Lock()
+
 # Cooldown giữa các TTS response (giây)
 REPLY_COOLDOWN = STREAM_REPLY_COOLDOWN
 _last_reply_time: float = 0.0
@@ -724,6 +738,24 @@ def _handle_stream_event(chat_event: dict):
         if content_ctx:
             stream_ctx = f"{content_ctx}\n{stream_ctx}" if stream_ctx else content_ctx
 
+        # ── IDEA-01: Regular viewer arrival hint ──────────────────────────────
+        # Nếu đây là tin đầu tiên của regular viewer trong session → inject hint chào
+        if tier == "regular_viewer" and viewer_info.get("message_count", 0) == 1:
+            with _greeted_lock:
+                already_greeted = sender_id in _greeted_viewers_this_session
+                if not already_greeted:
+                    _greeted_viewers_this_session.add(sender_id)
+
+            if not already_greeted:
+                from prompts import REGULAR_VIEWER_ARRIVAL_HINT
+                regular_data_local = chat_event.get("_regular_data") or {}
+                arrival_hint = REGULAR_VIEWER_ARRIVAL_HINT.format(
+                    viewer_name=sender_name,
+                    total_streams=regular_data_local.get("total_streams", 1),
+                    affection=regular_data_local.get("affection", 35),
+                )
+                stream_ctx = f"{stream_ctx}\n{arrival_hint}" if stream_ctx else arrival_hint
+
         if not chat_analyzer.should_extract_memory(viewer_info):
             lyra_ai._thread_local.skip_memory_extraction = True
 
@@ -833,6 +865,28 @@ def stream_start():
             return jsonify({"error": "Provide live_chat_id or video_id"}), 400
 
         result = yt_poller.start(credentials, live_chat_id)
+
+        # ── IDEA-02: Stream greeting ───────────────────────────────────────────
+        # Generate câu chào mở màn và broadcast qua SSE
+        def _send_greeting():
+            try:
+                greeting = lyra_ai.generate_stream_event_reply("greeting")
+                if greeting:
+                    _sse_broadcast({
+                        "type": "stream_event",
+                        "event": "stream_start",
+                        "reply": greeting,
+                        "emotion": "happy",
+                        "action": "WAVE",
+                        "sender_name": "Lyra",
+                        "source_type": "system",
+                    })
+                    print(f"[Stream] Greeting: {greeting}")
+            except Exception as e:
+                print(f"[Stream] Greeting error: {e}")
+
+        threading.Thread(target=_send_greeting, daemon=True).start()
+
         return jsonify(result)
 
     except Exception as e:
@@ -847,7 +901,65 @@ def stream_stop():
     platform   = data.get("platform", "youtube")
     channel_id = data.get("channel_id", "default")
 
+    # ── IDEA-02: Stream farewell ───────────────────────────────────────────────
+    # Lấy summary + top viewers trước khi stop
+    try:
+        recent_summaries = chat_analyzer.get_recent_summaries(channel_id, platform, limit=1)
+        summary_text = recent_summaries[0]["summary"] if recent_summaries else ""
+        top_viewers_list = viewer_tracker.get_top_viewers(platform=platform, channel_id=channel_id, limit=3)
+        top_names = ", ".join(v["viewer_name"] for v in top_viewers_list) if top_viewers_list else "mọi người"
+
+        farewell = lyra_ai.generate_stream_event_reply("farewell", {
+            "summary": summary_text,
+            "top_viewers": top_names,
+            "duration": "",
+        })
+        if farewell:
+            _sse_broadcast({
+                "type": "stream_event",
+                "event": "stream_stop",
+                "reply": farewell,
+                "emotion": "friendly",
+                "action": "WAVE",
+                "sender_name": "Lyra",
+                "source_type": "system",
+            })
+            print(f"[Stream] Farewell: {farewell}")
+    except Exception as e:
+        print(f"[Stream] Farewell error: {e}")
+
     promoted = viewer_tracker.promote_regular_viewers(platform=platform, channel_id=channel_id)
+
+    # Reset greeted set cho session tiếp theo
+    with _greeted_lock:
+        _greeted_viewers_this_session.clear()
+
+    # ── IDEA-03: Check stream milestones ──────────────────────────────────────
+    try:
+        stream_count_row = None
+        import sqlite3 as _sqlite3
+        conn_m = _sqlite3.connect("memory.db")
+        conn_m.row_factory = _sqlite3.Row
+        c_m = conn_m.cursor()
+        total_streams_row = c_m.execute("SELECT COUNT(*) FROM stream_milestones WHERE event_type LIKE 'stream_%'").fetchone()
+        stream_num = (total_streams_row[0] if total_streams_row else 0) + 1
+        conn_m.close()
+
+        from config import STREAM_TITLE
+        # Debut (lần đầu tiên)
+        lyra_ai.memory.check_stream_milestone(
+            "debut", f"Buổi stream đầu tiên của Lyra!", stream_title=STREAM_TITLE
+        )
+        # Mốc số lượng stream
+        for milestone_n in [10, 25, 50, 100]:
+            if stream_num >= milestone_n:
+                lyra_ai.memory.check_stream_milestone(
+                    f"stream_{milestone_n}",
+                    f"Đã stream {milestone_n} buổi!",
+                    stream_title=STREAM_TITLE,
+                )
+    except Exception as e:
+        print(f"[Stream] Milestone check error: {e}")
 
     result = yt_poller.stop()
     result["promoted_viewers"] = promoted

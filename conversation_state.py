@@ -15,15 +15,18 @@ STATE_GOODBYE    = "goodbye"
 
 # ─── Closing / Goodbye signals ────────────────────────────────────────────────
 _CLOSING_PATTERNS = re.compile(
-    r"\b(bye|goodbye|tạm biệt|chào nhé|thôi ngủ|đi ngủ|ngủ rồi|ok thôi|"
+    r"\b(bye|goodbye|chào nhé|thôi ngủ|đi ngủ|ngủ rồi|ok thôi|"
     r"thôi nha|thôi nhé|hẹn sau|later|gotta go|gtg|cya|see ya|"
-    r"ok đó|oke đó|oke thôi|ok rồi|xong rồi|done|finished)\b",
+    r"ok đó|oke đó|oke thôi|ok rồi|xong rồi|done|finished|"
+    r"tắt máy|đi rồi|đi đây|thôi đi|ra ngoài rồi|bận rồi|"
+    r"oke bye|ok bye|thôi nhé mình đi|mình đi đây)\b",
     re.IGNORECASE,
 )
 
 _GOODBYE_PATTERNS = re.compile(
-    r"\b(bye+|goodnight|good night|ngủ ngon|chúc ngủ ngon|tạm biệt nhé|"
-    r"hẹn gặp lại|see you|ciao)\b",
+    r"\b(bye+|goodnight|good night|ngủ ngon|chúc ngủ ngon|"
+    r"tạm biệt|tạm biệt nhé|hẹn gặp lại|see you|ciao|"
+    r"bái bai|baibai|bai bai|chào tạm biệt|hẹn hôm sau)\b",
     re.IGNORECASE,
 )
 

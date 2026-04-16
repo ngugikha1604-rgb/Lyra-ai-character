@@ -11,6 +11,7 @@ from duckduckgo_search import DDGS
 
 from config import *
 from config import USE_OLLAMA, CHAT_MODEL, CHAT_BASE_URL, TRANSLATE_MODEL, TRANSLATE_BASE_URL, GROQ_API_KEY
+from config import LIGHT_MODEL, LIGHT_BASE_URL
 
 from prompts import (
     BASE_PERSONALITY,
@@ -29,6 +30,13 @@ from prompts import (
     MILESTONE_MSGS,
     AFFECTION_MILESTONES,
     TRANSLATE_PROMPT,
+    STREAM_VIEWER_PERSONALITY,
+    THOUGHT_CHAIN_SYSTEM,
+    STREAM_EVENT_SYSTEM,
+    STREAM_GREETING_PROMPT,
+    STREAM_FAREWELL_PROMPT,
+    PROACTIVE_STREAM_PROMPT,
+    REGULAR_VIEWER_ARRIVAL_HINT,
 )
 
 from time_utils import (
@@ -121,6 +129,55 @@ class MiniAI:
     def turn_counter(self, value):
         self.memory.turn_counter = value
 
+    def _call_light_model(self, messages, temperature=0.3, max_tokens=200):
+        """
+        Call Ollama light model cho tác vụ phụ (memory extract, summarize, stream summary).
+        Không qua Groq — tiết kiệm quota. Timeout ngắn hơn (20s).
+        Fallback về _call_model nếu light model không available.
+        """
+        model = LIGHT_MODEL or CHAT_MODEL
+        url = LIGHT_BASE_URL or CHAT_BASE_URL
+
+        if not model:
+            return self._call_model(messages, temperature=temperature, max_tokens=max_tokens)
+
+        import time
+        try:
+            data = {
+                "model": model,
+                "messages": messages,
+                "options": {
+                    "temperature": temperature,
+                    "num_predict": max_tokens,
+                    "num_ctx": 2048,
+                    "top_p": 0.9,
+                },
+                "stream": False,
+            }
+            start = time.time()
+            response = requests.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                json=data,
+                timeout=20,
+                verify=False,
+            )
+            duration = time.time() - start
+
+            if response.status_code != 200:
+                print(f"[Light] Ollama failed ({response.status_code}) in {duration:.1f}s, falling back")
+                return self._call_model(messages, temperature=temperature, max_tokens=max_tokens)
+
+            content = response.json().get("message", {}).get("content", "").strip()
+            if content:
+                print(f"[Light] Responded in {duration:.1f}s")
+                return content
+
+        except Exception as e:
+            print(f"[Light] Error: {e}, falling back to main model")
+
+        return self._call_model(messages, temperature=temperature, max_tokens=max_tokens)
+
     def _call_model(self, messages, temperature=0.8, max_tokens=200):
         """Call local Ollama chat model (subsect/riko-qwen4b-q4)"""
         return self._call_chat_model(messages, temperature=temperature, max_tokens=max_tokens)
@@ -179,7 +236,10 @@ class MiniAI:
 
     def _call_translate_model(self, messages, temperature=0.4, max_tokens=150):
         """Call Groq llama3 — primary chat model + translate/polish fallback"""
-        for attempt in range(2):
+        import time
+        backoff = 2.0  # giây, tăng gấp đôi mỗi lần retry 429
+
+        for attempt in range(3):
             try:
                 data = {
                     "model": TRANSLATE_MODEL,
@@ -189,7 +249,6 @@ class MiniAI:
                     "top_p": 0.9,
                 }
 
-                import time
                 start_time = time.time()
 
                 response = requests.post(
@@ -201,6 +260,16 @@ class MiniAI:
                 )
 
                 duration = time.time() - start_time
+
+                # Rate limit — exponential backoff, không fallback ngay
+                if response.status_code == 429:
+                    retry_after = float(response.headers.get("retry-after", backoff))
+                    wait = max(retry_after, backoff)
+                    print(f"[Groq] Rate limited (429). Waiting {wait:.1f}s before retry {attempt + 1}/3...")
+                    time.sleep(wait)
+                    backoff = min(backoff * 2, 30.0)  # cap ở 30s
+                    continue
+
                 result = response.json()
 
                 if response.status_code != 200:
@@ -430,6 +499,42 @@ class MiniAI:
             self.current_vbrain = parsed
         else:
             reply = "..."
+
+        # ── Thought chaining (~7% chance) ─────────────────────────────────────
+        # Dùng monologue từ lần gọi đầu làm "suy nghĩ trước" → gọi lại để phát triển
+        # Chỉ áp dụng khi owner chat, có monologue thực sự, và response không quá ngắn
+        monologue = parsed.get("monologue", "") if content else ""
+        if (
+            source_type == "owner"
+            and monologue
+            and len(monologue.strip()) > 20
+            and random.random() < 0.07
+        ):
+            # Dùng THOUGHT_CHAIN_SYSTEM làm system prompt riêng — Lyra biết rõ đây là thought chain
+            chain_messages = [
+                {"role": "system", "content": THOUGHT_CHAIN_SYSTEM},
+                {"role": "user", "content": composed},
+                {"role": "assistant", "content": content},
+                {
+                    "role": "user",
+                    "content": (
+                        f"[Suy nghĩ nội tâm của bạn vừa rồi: \"{monologue.strip()}\"]\n"
+                        f"Phát triển từ suy nghĩ đó. Đừng lặp lại — tiếp tục tự nhiên hơn."
+                    ),
+                },
+            ]
+            chained = self._call_model(
+                chain_messages,
+                temperature=min(dynamic_temperature + 0.05, 1.10),
+                max_tokens=dynamic_max_tokens,
+            )
+            if chained:
+                chained_parsed = parse_vbrain_response(chained)
+                if chained_parsed.get("reply", "").strip():
+                    parsed = chained_parsed
+                    reply = parsed.get("reply", reply)
+                    self.current_vbrain = parsed
+                    print("[Core] Thought chain applied")
 
         reply = self.clean_reply(reply)
 
@@ -802,7 +907,7 @@ class MiniAI:
 
         try:
             raw = (
-                self._call_model(extract_prompt, temperature=0.1, max_tokens=200) or ""
+                self._call_light_model(extract_prompt, temperature=0.1, max_tokens=200) or ""
             )
             raw = re.sub(r"```json|```", "", raw).strip()
             if not raw or raw == "{}":
@@ -878,7 +983,7 @@ class MiniAI:
 
         try:
             summary = (
-                self._call_model(summarize_prompt, temperature=0.4, max_tokens=120)
+                self._call_light_model(summarize_prompt, temperature=0.4, max_tokens=120)
                 or ""
             )
             summary = summary.strip()
@@ -932,7 +1037,7 @@ class MiniAI:
 
             mega_text = None
             try:
-                mega_text = self._call_model(
+                mega_text = self._call_light_model(
                     [
                         {"role": "system", "content": MEMORY_COMPRESSION_PROMPT},
                         {
@@ -1004,6 +1109,14 @@ class MiniAI:
         ) or self.memory.get_relevant_context(user_input)
         time_context = get_time_context(self.current_time, self.time_period)
 
+        # Chọn base personality theo source_type
+        # Viewer/stream dùng STREAM_VIEWER_PERSONALITY — aware đang stream, không intimate
+        # Owner dùng NATURAL_BASE_PERSONALITY — private 1-1
+        if source_type == "owner":
+            base_personality = NATURAL_BASE_PERSONALITY
+        else:
+            base_personality = STREAM_VIEWER_PERSONALITY
+
         relationship_hint = (
             RELATIONSHIP_HINTS["very_close"]
             if self.emotion.affection > 70
@@ -1064,7 +1177,7 @@ class MiniAI:
         # Source type context — phân biệt owner vs viewer
         source_context = self._build_source_context(source_type, viewer_data)
 
-        system_prompt = f"""{NATURAL_BASE_PERSONALITY}
+        system_prompt = f"""{base_personality}
 
 {time_context}
 
@@ -1345,3 +1458,68 @@ Current state:
         """Save memory to database"""
         self.memory._is_dirty = True
         self.memory.save()
+
+    def generate_stream_event_reply(self, event_type: str, context: dict = None) -> str:
+        """
+        Generate Lyra's reaction to a stream event (not a viewer message).
+        event_type: 'greeting' | 'farewell' | 'milestone' | 'regular_arrival' | 'silence_fill'
+        context: dict với các key tùy event_type
+        """
+        ctx = context or {}
+
+        if event_type == "greeting":
+            from config import STREAM_TITLE, STREAM_GAME, STREAM_GOALS, STREAM_NOTES
+            goals_str = ", ".join(STREAM_GOALS) if STREAM_GOALS else "chưa có mục tiêu cụ thể"
+            prompt_text = STREAM_GREETING_PROMPT.format(
+                title=STREAM_TITLE or "stream hôm nay",
+                game=STREAM_GAME or "chưa rõ",
+                goals=goals_str,
+                notes=STREAM_NOTES or "",
+            )
+            messages = [
+                {"role": "system", "content": STREAM_EVENT_SYSTEM},
+                {"role": "user", "content": prompt_text},
+            ]
+
+        elif event_type == "farewell":
+            summary = ctx.get("summary", "")
+            top_viewers = ctx.get("top_viewers", "mọi người")
+            duration = ctx.get("duration", "")
+            prompt_text = STREAM_FAREWELL_PROMPT.format(
+                summary=summary or "stream vui vẻ",
+                top_viewers=top_viewers,
+                duration=duration or "một lúc",
+            )
+            messages = [
+                {"role": "system", "content": STREAM_EVENT_SYSTEM},
+                {"role": "user", "content": prompt_text},
+            ]
+
+        elif event_type == "milestone":
+            milestone_desc = ctx.get("description", "đạt milestone mới")
+            messages = [
+                {"role": "system", "content": STREAM_EVENT_SYSTEM},
+                {"role": "user", "content": f"Stream event: {milestone_desc}. React ngắn gọn, tự nhiên."},
+            ]
+
+        elif event_type == "silence_fill":
+            from config import STREAM_GAME
+            activity = ctx.get("current_activity", "đang chơi game")
+            prompt_text = PROACTIVE_STREAM_PROMPT.format(
+                current_activity=activity,
+                game=STREAM_GAME or "game",
+            )
+            messages = [
+                {"role": "system", "content": STREAM_EVENT_SYSTEM},
+                {"role": "user", "content": prompt_text},
+            ]
+
+        else:
+            return ""
+
+        try:
+            reply = self._call_model(messages, temperature=0.9, max_tokens=60)
+            return self.clean_reply(reply or "")
+        except Exception as e:
+            print(f"[Stream Event] generate error: {e}")
+            return ""
