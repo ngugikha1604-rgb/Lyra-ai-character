@@ -12,7 +12,9 @@ import sqlite3
 import threading
 import requests
 import pytz
-from config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, FLASK_SECRET_KEY
+from config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, FLASK_SECRET_KEY, FPT_API_KEY, FPT_TTS_URL, FPT_TTS_VOICE
+from config import STREAM_TITLE, STREAM_GAME, STREAM_GOALS, STREAM_NOTES
+from config import STREAM_REPLY_COOLDOWN, STREAM_NEW_VIEWER_INTERVAL, STREAM_REGULAR_MIN_MESSAGES
 from dotenv import load_dotenv
 import google_auth_oauthlib.flow
 
@@ -42,6 +44,28 @@ os.makedirs("./flask_sessions", exist_ok=True)
 Session(app)
 
 DB_PATH = "memory.db"
+
+# ========================
+# STREAM CONTENT CONTEXT
+# ========================
+# Đọc từ config.py — chỉnh STREAM_TITLE, STREAM_GAME, STREAM_GOALS, STREAM_NOTES trước khi stream.
+
+def _build_stream_content_context() -> str:
+    """Tạo string inject vào prompt từ stream content trong config.py"""
+    if not any([STREAM_TITLE, STREAM_GAME, STREAM_GOALS, STREAM_NOTES]):
+        return ""
+    lines = ["[STREAM CONTEXT]"]
+    if STREAM_TITLE:
+        lines.append(f"Hôm nay stream: {STREAM_TITLE}")
+    if STREAM_GAME:
+        lines.append(f"Game/Nội dung: {STREAM_GAME}")
+    if STREAM_GOALS:
+        goals = STREAM_GOALS if isinstance(STREAM_GOALS, list) else [STREAM_GOALS]
+        lines.append(f"Mục tiêu: {', '.join(goals)}")
+    if STREAM_NOTES:
+        lines.append(f"Ghi chú: {STREAM_NOTES}")
+    lines.append("[/STREAM CONTEXT]")
+    return "\n".join(lines)
 
 
 def get_db():
@@ -133,8 +157,8 @@ def chat():
             return jsonify({"reply": "Please say something."})
 
         # ===== GENERATE AI REPLY =====
-        # Sử dụng global instance thay vì tải lại DB
-        result = lyra_ai.chat(user_input)
+        # Owner chat qua web — source_type = "owner", full memory
+        result = lyra_ai.chat(user_input, source_type="owner")
 
         response_payload = build_state_payload(lyra_ai, result=result)
 
@@ -164,48 +188,51 @@ def chat():
 
 @app.route("/speak", methods=["POST"])
 def speak():
-    """Gọi ElevenLabs TTS và trả về audio"""
+    """FPT AI TTS — trả về audio mp3"""
     try:
         data = request.get_json()
-
         if not data or "text" not in data:
             return jsonify({"error": "No text provided"}), 400
 
         text = data["text"].strip()
-
         if not text:
             return jsonify({"error": "Empty text"}), 400
 
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
-
-        headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
-
-        payload = {
-            "text": text,
-            "model_id": "eleven_multilingual_v2",
-            "voice_settings": {
-                "stability": 0.5,
-                "similarity_boost": 0.8,
-                "style": 0.3,
-                "use_speaker_boost": True,
-            },
-        }
-
         response = requests.post(
-            url, headers=headers, json=payload, timeout=20, verify=False
+            FPT_TTS_URL,
+            data=text.encode("utf-8"),
+            headers={
+                "api-key": FPT_API_KEY,
+                "voice": FPT_TTS_VOICE,
+                "speed": "",
+                "Content-Type": "application/octet-stream",
+            },
+            timeout=15,
         )
 
         if response.status_code != 200:
-            print(f"ElevenLabs error: {response.status_code} - {response.text}")
+            print(f"[TTS] FPT error: {response.status_code} - {response.text}")
             return jsonify({"error": "TTS failed", "detail": response.text}), 500
 
-        audio_buffer = io.BytesIO(response.content)
-        audio_buffer.seek(0)
+        # FPT trả về JSON có field "async" chứa URL mp3
+        result = response.json()
+        audio_url = result.get("async")
+        if not audio_url:
+            return jsonify({"error": "No audio URL returned", "detail": result}), 500
 
-        return send_file(audio_buffer, mimetype="audio/mpeg", as_attachment=False)
+        # Fetch file mp3 từ URL đó rồi stream về client
+        audio_res = requests.get(audio_url, timeout=15)
+        if audio_res.status_code != 200:
+            return jsonify({"error": "Failed to fetch audio file"}), 500
+
+        return send_file(
+            io.BytesIO(audio_res.content),
+            mimetype="audio/mpeg",
+            as_attachment=False,
+        )
 
     except Exception:
-        print("TTS ERROR OCCURRED")
+        print("[TTS] ERROR")
         traceback.print_exc()
         return jsonify({"error": "TTS internal error"}), 500
 
@@ -419,18 +446,38 @@ def stream_chat():
         stream_ctx = viewer_tracker.get_stream_context(sender_id, sender_name, platform, channel_id, viewer_info)
         if style_hints:
             stream_ctx = f"{stream_ctx}\n{style_hints}" if stream_ctx else style_hints
+        content_ctx = _build_stream_content_context()
+        if content_ctx:
+            stream_ctx = f"{content_ctx}\n{stream_ctx}" if stream_ctx else content_ctx
         lyra_ai.stream_context = stream_ctx
 
-        # Giai đoạn 4: Selective memory extraction — chỉ extract viewer quen
         if not chat_analyzer.should_extract_memory(viewer_info):
-            lyra_ai.skip_memory_extraction = True
+            lyra_ai._thread_local.skip_memory_extraction = True
 
-        result = lyra_ai.chat(composed_input)
+        # Xác định source_type và viewer_data
+        regular = viewer_tracker.is_regular_viewer(sender_id, platform)
+        is_donor = data.get("is_donor", False)
+        if is_donor:
+            source_type_val = "donor"
+            viewer_data = {
+                "viewer_name": sender_name,
+                "affection": regular["affection"] if regular else 40,
+                "amount": data.get("donate_amount", ""),
+            }
+        elif regular:
+            source_type_val = "regular_viewer"
+            viewer_data = {
+                "viewer_name": sender_name,
+                "affection": regular["affection"],
+                "total_streams": regular["total_streams"],
+            }
+        else:
+            source_type_val = "new_viewer"
+            viewer_data = {"viewer_name": sender_name}
 
-        # Reset flag sau chat()
-        lyra_ai.skip_memory_extraction = False
+        result = lyra_ai.chat(composed_input, source_type=source_type_val, viewer_data=viewer_data, stream_context=stream_ctx)
 
-        # Giai đoạn 4: Stream summary định kỳ (mỗi STREAM_SUMMARY_INTERVAL messages)
+        # Giai đoạn 4: Stream summary định kỳ
         if chat_analyzer.should_summarize():
             _trigger_stream_summary(channel_id, platform)
 
@@ -442,6 +489,7 @@ def stream_chat():
                 "channel_id": channel_id,
                 "platform": platform,
                 "role": role,
+                "source_type": source_type_val,
                 "viewer_message_count": viewer_info.get("message_count", 1),
                 "viewer_affinity": viewer_info.get("affinity_score", 1.0),
                 "viewer_rank": viewer_rank,
@@ -511,37 +559,140 @@ def proactive():
 # YOUTUBE STREAM CONTROL
 # ========================
 
+import queue as _queue
+import time as _time
+
+# Priority Queue cho stream events
+# Tier 0: owner (STT từ web) — xử lý ngay, bypass queue
+# Tier 1: donor
+# Tier 2: regular_viewer
+# Tier 3: new_viewer (random pick)
+_priority_queues: dict = {
+    "donor":          _queue.Queue(maxsize=20),
+    "regular_viewer": _queue.Queue(maxsize=50),
+    "new_viewer":     _queue.Queue(maxsize=200),
+}
+_new_viewer_pool: list = []   # pool để random pick
+_pool_lock = threading.Lock()
+
+# Cooldown giữa các TTS response (giây)
+REPLY_COOLDOWN = STREAM_REPLY_COOLDOWN
+_last_reply_time: float = 0.0
+_reply_lock = threading.Lock()
+
+# Random pick interval cho new_viewer (giây)
+NEW_VIEWER_PICK_INTERVAL = STREAM_NEW_VIEWER_INTERVAL
+_last_new_viewer_pick: float = 0.0
+
+
+def _can_reply() -> bool:
+    """True nếu đã qua cooldown"""
+    return (_time.time() - _last_reply_time) >= REPLY_COOLDOWN
+
+
+def _mark_replied():
+    global _last_reply_time
+    with _reply_lock:
+        _last_reply_time = _time.time()
+
+
+def _enqueue_stream_event(chat_event: dict):
+    """
+    Phân loại và đẩy event vào đúng queue theo priority.
+    Owner (source_type='owner') không đi qua queue — xử lý ngay ở /chat.
+    """
+    sender_id = chat_event.get("sender_id", "")
+    platform  = chat_event.get("platform", "youtube")
+    is_donor  = chat_event.get("is_donor", False)
+
+    regular = viewer_tracker.is_regular_viewer(sender_id, platform)
+
+    if is_donor:
+        tier = "donor"
+    elif regular:
+        tier = "regular_viewer"
+        chat_event["_regular_data"] = dict(regular)
+    else:
+        tier = "new_viewer"
+
+    chat_event["_tier"] = tier
+
+    if tier == "new_viewer":
+        with _pool_lock:
+            # Dedup: mỗi sender_id chỉ giữ 1 slot (tin nhắn mới nhất)
+            _new_viewer_pool[:] = [e for e in _new_viewer_pool if e.get("sender_id") != chat_event.get("sender_id")]
+            _new_viewer_pool.append(chat_event)
+            # Giữ pool tối đa 100 để tránh RAM bloat
+            if len(_new_viewer_pool) > 100:
+                _new_viewer_pool.pop(0)
+    else:
+        try:
+            _priority_queues[tier].put_nowait(chat_event)
+        except _queue.Full:
+            print(f"[Queue] {tier} queue full, dropping message from {chat_event.get('sender_name')}")
+
 
 def _process_queue_loop():
     """
-    Giai đoạn 6: Consumer loop — chạy trong background thread.
-    Lấy message từ yt_poller.message_queue, xử lý qua stream_chat logic,
-    tuân thủ slow mode cooldown.
+    Priority consumer loop — chạy trong background thread.
+    Lấy từ yt_poller → phân loại vào priority queues → xử lý theo thứ tự:
+    donor → regular_viewer → random new_viewer
+    Tuân thủ REPLY_COOLDOWN giữa các response.
     """
-    import time
+    global _last_new_viewer_pick
 
     while True:
         try:
             if not yt_poller._is_running:
-                time.sleep(1)
+                _time.sleep(1)
                 continue
 
-            # Slow mode: chờ cooldown trước khi reply tiếp
-            if not yt_poller.can_reply():
-                time.sleep(0.5)
+            # Drain yt_poller queue vào priority queues của mình
+            while True:
+                raw = yt_poller.get_next_message(timeout=0.05)
+                if raw is None:
+                    break
+                _enqueue_stream_event(raw)
+
+            if not _can_reply():
+                _time.sleep(0.3)
                 continue
 
-            chat_event = yt_poller.get_next_message(timeout=1.0)
-            if not chat_event:
+            # Tier 1: donor
+            event = None
+            try:
+                event = _priority_queues["donor"].get_nowait()
+            except _queue.Empty:
+                pass
+
+            # Tier 2: regular_viewer
+            if event is None:
+                try:
+                    event = _priority_queues["regular_viewer"].get_nowait()
+                except _queue.Empty:
+                    pass
+
+            # Tier 3: random new_viewer (mỗi NEW_VIEWER_PICK_INTERVAL giây)
+            if event is None:
+                now = _time.time()
+                if (now - _last_new_viewer_pick) >= NEW_VIEWER_PICK_INTERVAL:
+                    with _pool_lock:
+                        if _new_viewer_pool:
+                            import random as _random
+                            event = _random.choice(_new_viewer_pool)
+                            _new_viewer_pool.remove(event)  # chỉ xóa entry đã chọn
+                    _last_new_viewer_pick = now
+
+            if event is None:
+                _time.sleep(0.3)
                 continue
 
-            # Xử lý giống /stream-chat nhưng internal (không qua HTTP)
-            _handle_stream_event(chat_event)
-            yt_poller.mark_replied()
+            _handle_stream_event(event)
+            _mark_replied()
 
         except Exception as e:
             print(f"[Stream Consumer] Error: {e}")
-            time.sleep(1)
+            _time.sleep(1)
 
 
 def _handle_stream_event(chat_event: dict):
@@ -558,10 +709,10 @@ def _handle_stream_event(chat_event: dict):
 
         composed_input = f"[{sender_name}]: {message}"
 
-        print(f"[Stream Consumer] {sender_name}: {message}")
+        tier = chat_event.get("_tier", "new_viewer")
+        print(f"[Stream Consumer] [{tier}] {sender_name}: {message}")
 
         viewer_info = viewer_tracker.record_message(sender_id, sender_name, platform, channel_id, message)
-        viewer_rank = viewer_tracker.get_viewer_rank(sender_id, platform, channel_id)
 
         chat_analyzer.ingest(message, channel_id, platform)
         style_hints = chat_analyzer.get_style_hints(channel_id, platform)
@@ -569,27 +720,47 @@ def _handle_stream_event(chat_event: dict):
         stream_ctx = viewer_tracker.get_stream_context(sender_id, sender_name, platform, channel_id, viewer_info)
         if style_hints:
             stream_ctx = f"{stream_ctx}\n{style_hints}" if stream_ctx else style_hints
-        lyra_ai.stream_context = stream_ctx
+        content_ctx = _build_stream_content_context()
+        if content_ctx:
+            stream_ctx = f"{content_ctx}\n{stream_ctx}" if stream_ctx else content_ctx
 
         if not chat_analyzer.should_extract_memory(viewer_info):
-            lyra_ai.skip_memory_extraction = True
+            lyra_ai._thread_local.skip_memory_extraction = True
 
-        result = lyra_ai.chat(composed_input)
-        lyra_ai.skip_memory_extraction = False
+        regular_data = chat_event.get("_regular_data")
+
+        if tier == "donor":
+            source_type_val = "donor"
+            viewer_data = {
+                "viewer_name": sender_name,
+                "affection": regular_data["affection"] if regular_data else 40,
+                "amount": chat_event.get("donate_amount", ""),
+            }
+        elif tier == "regular_viewer":
+            source_type_val = "regular_viewer"
+            viewer_data = {
+                "viewer_name": sender_name,
+                "affection": regular_data["affection"] if regular_data else 35,
+                "total_streams": regular_data["total_streams"] if regular_data else 1,
+            }
+        else:
+            source_type_val = "new_viewer"
+            viewer_data = {"viewer_name": sender_name}
+
+        result = lyra_ai.chat(composed_input, source_type=source_type_val, viewer_data=viewer_data, stream_context=stream_ctx)
 
         if chat_analyzer.should_summarize():
             _trigger_stream_summary(channel_id, platform)
 
-        # Broadcast reply tới frontend qua SSE
         payload = build_state_payload(lyra_ai, result=result)
         payload.update({
             "sender_id": sender_id,
             "sender_name": sender_name,
             "channel_id": channel_id,
             "platform": platform,
+            "source_type": source_type_val,
             "viewer_message_count": viewer_info.get("message_count", 1),
             "viewer_affinity": viewer_info.get("affinity_score", 1.0),
-            "viewer_rank": viewer_rank,
         })
         _sse_broadcast(payload)
 
@@ -622,6 +793,18 @@ def _sse_broadcast(data: dict):
 # Khởi động consumer loop khi server start
 _consumer_thread = threading.Thread(target=_process_queue_loop, daemon=True)
 _consumer_thread.start()
+
+
+@app.route("/stream/content", methods=["GET"])
+def stream_get_content():
+    """Trả về stream content hiện tại (từ config.py)"""
+    return jsonify({
+        "title": STREAM_TITLE,
+        "game":  STREAM_GAME,
+        "goals": STREAM_GOALS,
+        "notes": STREAM_NOTES,
+        "context_string": _build_stream_content_context(),
+    })
 
 
 @app.route("/stream/start", methods=["POST"])
@@ -659,9 +842,59 @@ def stream_start():
 
 @app.route("/stream/stop", methods=["POST"])
 def stream_stop():
-    """Dừng poll YouTube Live Chat"""
+    """Dừng poll YouTube Live Chat và promote regular viewers"""
+    data = request.get_json() or {}
+    platform   = data.get("platform", "youtube")
+    channel_id = data.get("channel_id", "default")
+
+    promoted = viewer_tracker.promote_regular_viewers(platform=platform, channel_id=channel_id)
+
     result = yt_poller.stop()
+    result["promoted_viewers"] = promoted
+    result["promoted_count"] = len(promoted)
     return jsonify(result)
+
+
+@app.route("/stream/viewers/regulars", methods=["GET"])
+def stream_regular_viewers():
+    """Danh sách regular viewers, filter theo platform"""
+    platform = request.args.get("platform")
+    limit = min(int(request.args.get("limit", 50)), 200)
+    viewers = viewer_tracker.get_regular_viewers(platform=platform, limit=limit)
+    return jsonify({"viewers": viewers, "count": len(viewers)})
+
+
+@app.route("/stream/analytics", methods=["GET"])
+def stream_analytics():
+    """Thống kê sau mỗi stream: top viewers, regulars promoted, queue stats"""
+    platform   = request.args.get("platform", "youtube")
+    channel_id = request.args.get("channel_id")
+    limit      = min(int(request.args.get("limit", 10)), 50)
+
+    top_viewers = viewer_tracker.get_top_viewers(platform=platform, channel_id=channel_id, limit=limit)
+    regulars    = viewer_tracker.get_regular_viewers(platform=platform, limit=limit)
+
+    # Queue stats
+    queue_stats = {
+        "donor_pending":          _priority_queues["donor"].qsize(),
+        "regular_viewer_pending": _priority_queues["regular_viewer"].qsize(),
+        "new_viewer_pool":        len(_new_viewer_pool),
+        "reply_cooldown_s":       REPLY_COOLDOWN,
+        "new_viewer_interval_s":  NEW_VIEWER_PICK_INTERVAL,
+    }
+
+    return jsonify({
+        "top_viewers":    top_viewers,
+        "regular_viewers": regulars,
+        "stream_content": {
+            "title": STREAM_TITLE,
+            "game":  STREAM_GAME,
+            "goals": STREAM_GOALS,
+            "notes": STREAM_NOTES,
+        },
+        "queue_stats":    queue_stats,
+        "yt_poller":      yt_poller.get_status(),
+    })
 
 
 @app.route("/stream/status", methods=["GET"])

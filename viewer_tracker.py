@@ -13,6 +13,12 @@ SAVE_MESSAGE_MIN_COUNT = 3      # message_count >= 3 mới lưu message history
 SAVE_MESSAGE_MIN_AFFINITY = 2.0 # hoặc affinity >= 2.0
 MAX_MESSAGES_PER_VIEWER = 20    # giữ tối đa 20 message gần nhất mỗi viewer
 
+# Đọc từ config nếu có, fallback về 20
+try:
+    from config import STREAM_REGULAR_MIN_MESSAGES as REGULAR_VIEWER_MIN_MESSAGES
+except ImportError:
+    REGULAR_VIEWER_MIN_MESSAGES = 20
+
 
 class ViewerTracker:
     """
@@ -25,6 +31,10 @@ class ViewerTracker:
         self.db_path = db_path
         self.db_lock = threading.Lock()
         self._init_tables()
+        # Cache regular_viewers để tránh DB lookup mỗi message
+        self._regular_cache: dict = {}   # viewer_id+platform → dict
+        self._regular_cache_ts: float = 0.0
+        self._regular_cache_ttl: float = 60.0  # refresh mỗi 60 giây
 
     def _get_conn(self):
         conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=5.0)
@@ -33,7 +43,7 @@ class ViewerTracker:
         return conn
 
     def _init_tables(self):
-        """Tạo bảng viewer_stats và viewer_messages nếu chưa có"""
+        """Tạo bảng viewer_stats, viewer_messages, regular_viewers nếu chưa có"""
         try:
             conn = self._get_conn()
             with self.db_lock:
@@ -62,6 +72,20 @@ class ViewerTracker:
 
                     CREATE INDEX IF NOT EXISTS idx_viewer_messages_viewer
                         ON viewer_messages (viewer_id, platform, channel_id);
+
+                    CREATE TABLE IF NOT EXISTS regular_viewers (
+                        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                        viewer_id       TEXT NOT NULL,
+                        platform        TEXT NOT NULL DEFAULT 'youtube',
+                        viewer_name     TEXT NOT NULL,
+                        total_streams   INTEGER DEFAULT 1,
+                        total_messages  INTEGER DEFAULT 0,
+                        affection       INTEGER DEFAULT 30,
+                        first_seen      TEXT NOT NULL,
+                        last_seen       TEXT NOT NULL,
+                        notes           TEXT DEFAULT '',
+                        UNIQUE(viewer_id, platform)
+                    );
                 """)
                 conn.commit()
             conn.close()
@@ -229,47 +253,165 @@ class ViewerTracker:
             print(f"[ViewerTracker] get_viewer_info error: {e}")
             return None
 
+    def promote_regular_viewers(self, platform: str, channel_id: str) -> list:
+        """
+        Sau khi stream kết thúc: promote viewer có message_count >= REGULAR_VIEWER_MIN_MESSAGES
+        lên bảng regular_viewers. Trả về danh sách viewer được promote.
+        """
+        promoted = []
+        now = datetime.now().isoformat()
+        try:
+            conn = self._get_conn()
+            c = conn.cursor()
+
+            candidates = c.execute(
+                "SELECT viewer_id, viewer_name, message_count, first_seen FROM viewer_stats "
+                "WHERE platform=? AND channel_id=? AND message_count >= ?",
+                (platform, channel_id, REGULAR_VIEWER_MIN_MESSAGES)
+            ).fetchall()
+
+            with self.db_lock:
+                for row in candidates:
+                    vid = row["viewer_id"]
+                    vname = row["viewer_name"]
+                    msgs = row["message_count"]
+
+                    existing = c.execute(
+                        "SELECT id, total_streams, total_messages, affection FROM regular_viewers "
+                        "WHERE viewer_id=? AND platform=?",
+                        (vid, platform)
+                    ).fetchone()
+
+                    if existing:
+                        # Viewer đã quen — tăng số stream + messages, tăng affection nhẹ
+                        new_streams = existing["total_streams"] + 1
+                        new_msgs = existing["total_messages"] + msgs
+                        # Affection tăng +5 mỗi stream, cap 85
+                        new_aff = min(85, existing["affection"] + 5)
+                        c.execute(
+                            "UPDATE regular_viewers SET viewer_name=?, total_streams=?, "
+                            "total_messages=?, affection=?, last_seen=? "
+                            "WHERE viewer_id=? AND platform=?",
+                            (vname, new_streams, new_msgs, new_aff, now, vid, platform)
+                        )
+                    else:
+                        # Viewer mới được promote lần đầu
+                        c.execute(
+                            "INSERT INTO regular_viewers "
+                            "(viewer_id, platform, viewer_name, total_streams, total_messages, "
+                            "affection, first_seen, last_seen) VALUES (?,?,?,1,?,30,?,?)",
+                            (vid, platform, vname, msgs, row["first_seen"] or now, now)
+                        )
+
+                    promoted.append({"viewer_id": vid, "viewer_name": vname, "message_count": msgs})
+
+                conn.commit()
+            conn.close()
+
+            if promoted:
+                print(f"[ViewerTracker] Promoted {len(promoted)} regular viewer(s): "
+                      f"{[v['viewer_name'] for v in promoted]}")
+            # Invalidate cache sau promote
+            self._regular_cache_ts = 0.0
+        except Exception as e:
+            print(f"[ViewerTracker] promote_regular_viewers error: {e}")
+
+        return promoted
+
+    def get_regular_viewers(self, platform: str = None, limit: int = 50) -> list:
+        """Trả về danh sách regular viewers, sắp xếp theo affection giảm dần"""
+        try:
+            conn = self._get_conn()
+            if platform:
+                rows = conn.execute(
+                    "SELECT * FROM regular_viewers WHERE platform=? "
+                    "ORDER BY affection DESC, total_streams DESC LIMIT ?",
+                    (platform, limit)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM regular_viewers ORDER BY affection DESC, total_streams DESC LIMIT ?",
+                    (limit,)
+                ).fetchall()
+            conn.close()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            print(f"[ViewerTracker] get_regular_viewers error: {e}")
+            return []
+
+    def _refresh_regular_cache(self):
+        """Reload regular_viewers từ DB vào cache"""
+        import time as _t
+        try:
+            conn = self._get_conn()
+            rows = conn.execute("SELECT * FROM regular_viewers").fetchall()
+            conn.close()
+            self._regular_cache = {
+                f"{r['viewer_id']}:{r['platform']}": dict(r) for r in rows
+            }
+            self._regular_cache_ts = _t.time()
+        except Exception as e:
+            print(f"[ViewerTracker] cache refresh error: {e}")
+
+    def is_regular_viewer(self, viewer_id: str, platform: str) -> dict | None:
+        """
+        Kiểm tra viewer có phải regular không — dùng in-memory cache.
+        Trả về dict thông tin nếu có, None nếu không.
+        """
+        import time as _t
+        if (_t.time() - self._regular_cache_ts) > self._regular_cache_ttl:
+            self._refresh_regular_cache()
+        return self._regular_cache.get(f"{viewer_id}:{platform}")
+
     def get_stream_context(self, sender_id: str, sender_name: str, platform: str, channel_id: str, viewer_info: dict) -> str:
         """
         Build context string để inject vào prompt của Lyra.
-        Giai đoạn 3: Lyra biết ai đang chat và ai là top chatter.
-
-        Format ngắn gọn, không làm nặng prompt.
+        Phân biệt regular viewer vs viewer mới.
         """
         try:
             parts = []
 
+            # --- Kiểm tra regular viewer ---
+            regular = self.is_regular_viewer(sender_id, platform)
+            if regular:
+                aff = regular["affection"]
+                streams = regular["total_streams"]
+                parts.append(
+                    f"[VIEWER QUEN — {sender_name}] "
+                    f"Đã xem {streams} buổi stream. Affection: {aff}/100."
+                )
+                if aff >= 70:
+                    parts.append("→ Viewer rất thân, có thể nhắc tên và tương tác ấm áp hơn.")
+                elif aff >= 50:
+                    parts.append("→ Viewer quen mặt, thân thiện tự nhiên.")
+                else:
+                    parts.append("→ Viewer mới được nhận ra, thân thiện nhẹ.")
+            else:
+                count = viewer_info.get("message_count", 1)
+                affinity = viewer_info.get("affinity_score", 1.0)
+
+                if count >= 20:
+                    familiarity = "hay chat trong stream này"
+                elif count >= 5:
+                    familiarity = "đã chat vài lần"
+                else:
+                    familiarity = "viewer mới"
+
+                rank = self.get_viewer_rank(sender_id, platform, channel_id)
+                rank_str = f", rank #{rank}" if rank > 0 else ""
+
+                parts.append(
+                    f"[VIEWER — {sender_name}] {familiarity}{rank_str}, {count} tin nhắn hôm nay."
+                )
+
+                if affinity >= 3.0:
+                    parts.append("→ Tương tác nhiều hôm nay, có thể thân thiện hơn bình thường.")
+
             # --- Top chatters (tối đa 3 người) ---
             top = self.get_top_viewers(platform=platform, channel_id=channel_id, limit=3)
             if top:
-                names = []
-                for v in top:
-                    names.append(f"{v['viewer_name']} ({v['message_count']} msgs)")
-                parts.append("Top chatters: " + ", ".join(names))
-
-            # --- Viewer hiện tại ---
-            count = viewer_info.get("message_count", 1)
-            affinity = viewer_info.get("affinity_score", 1.0)
-
-            if count >= 20:
-                familiarity = "quen mặt, hay chat"
-            elif count >= 5:
-                familiarity = "đã chat vài lần"
-            else:
-                familiarity = "mới"
-
-            rank = self.get_viewer_rank(sender_id, platform, channel_id)
-            rank_str = f", rank #{rank}" if rank > 0 else ""
-
-            parts.append(
-                f"Người đang nhắn: {sender_name} — {familiarity}{rank_str}, {count} tin nhắn"
-            )
-
-            # --- Affinity hint ---
-            if affinity >= 3.0:
-                parts.append("→ Đây là viewer thân quen, có thể nhắc tên tự nhiên.")
-            elif affinity >= 2.0:
-                parts.append("→ Viewer này hay tương tác, có thể thân thiện hơn bình thường.")
+                names = [f"{v['viewer_name']} ({v['message_count']})" for v in top]
+                parts.append(f"Top chatters hôm nay: {', '.join(names)}")
 
             if not parts:
                 return ""
@@ -386,7 +528,7 @@ class ChatPatternAnalyzer:
         Gọi mỗi lần có message mới vào stream.
         """
         self._message_counter += 1
-        self._style_cache_dirty = True
+        # Không set dirty ở đây — chỉ set sau khi flush để cache có tác dụng
 
         # Trích emojis
         emojis = _EMOJI_RE.findall(message)
@@ -428,9 +570,10 @@ class ChatPatternAnalyzer:
                     )
                 conn.commit()
             conn.close()
-            # Reset in-memory sau khi flush
+            # Reset in-memory sau khi flush, đánh dấu cache cần rebuild
             self._word_freq.clear()
             self._emoji_freq.clear()
+            self._style_cache_dirty = True
         except Exception as e:
             print(f"[ChatPattern] flush_patterns error: {e}")
 

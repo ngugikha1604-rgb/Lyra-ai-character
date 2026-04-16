@@ -205,31 +205,59 @@ class YouTubeChatPoller:
             self._processed_ids = set(list(self._processed_ids)[-1000:])
 
         snippet = item.get("snippet", {})
-        author = item.get("authorDetails", {})
+        author  = item.get("authorDetails", {})
+        msg_type = snippet.get("type", "")
 
-        # Chỉ xử lý text message
-        if snippet.get("type") != "textMessageEvent":
+        sender_id   = author.get("channelId", "unknown")
+        sender_name = author.get("displayName", "Viewer")
+
+        # ── SuperChat / SuperSticker (donate) ──────────────────────────
+        if msg_type in ("superChatEvent", "superStickerEvent"):
+            details = snippet.get("superChatDetails", {}) or snippet.get("superStickerDetails", {})
+            amount_str = details.get("amountDisplayString", "")
+            comment    = details.get("userComment", "").strip()
+            message_text = comment if comment else f"[Super Chat {amount_str}]"
+
+            chat_event = {
+                "message":      message_text,
+                "sender_id":    sender_id,
+                "sender_name":  sender_name,
+                "platform":     "youtube",
+                "channel_id":   self._live_chat_id,
+                "role":         "donor",
+                "is_donor":     True,
+                "donate_amount": amount_str,
+                "priority":     10,
+                "timestamp":    snippet.get("publishedAt", datetime.now().isoformat()),
+            }
+            try:
+                self.message_queue.put_nowait((-10, chat_event))
+                self._stats["queued"] += 1
+            except queue.Full:
+                self._stats["skipped_flood"] += 1
+            return
+
+        # ── Text message thông thường ───────────────────────────────────
+        if msg_type != "textMessageEvent":
             return
 
         message_text = snippet.get("textMessageDetails", {}).get("messageText", "").strip()
         if not message_text:
             return
 
-        sender_id = author.get("channelId", "unknown")
-        sender_name = author.get("displayName", "Viewer")
-
         # Tính priority score
         priority = self._score_message(message_text, sender_id, sender_name)
 
         chat_event = {
-            "message": message_text,
-            "sender_id": sender_id,
+            "message":     message_text,
+            "sender_id":   sender_id,
             "sender_name": sender_name,
-            "platform": "youtube",
-            "channel_id": self._live_chat_id,
-            "role": "viewer",
-            "priority": priority,
-            "timestamp": snippet.get("publishedAt", datetime.now().isoformat()),
+            "platform":    "youtube",
+            "channel_id":  self._live_chat_id,
+            "role":        "viewer",
+            "is_donor":    False,
+            "priority":    priority,
+            "timestamp":   snippet.get("publishedAt", datetime.now().isoformat()),
         }
 
         # Đưa vào queue — dùng priority âm vì PriorityQueue lấy nhỏ nhất trước

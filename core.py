@@ -75,6 +75,7 @@ class MiniAI:
         self.emotion = EmotionEngine()
         self.memory = MemorySystem(max_summaries=MAX_SUMMARIES)
         self.conv_state = ConversationStateDetector(window=10)
+        self._thread_local = __import__("threading").local()  # per-thread flags
         self.memory.load()
 
         # Khởi tạo messages từ lịch sử đã lưu trong memory sau khi memory đã load xong
@@ -125,7 +126,14 @@ class MiniAI:
         return self._call_chat_model(messages, temperature=temperature, max_tokens=max_tokens)
 
     def _call_chat_model(self, messages, temperature=0.8, max_tokens=200):
-        """Call local Ollama for main chat generation, fallback to Groq if unavailable"""
+        """Call Groq for main chat generation, fallback to local Ollama if unavailable"""
+        # Primary: Groq
+        result = self._call_translate_model(messages, temperature=temperature, max_tokens=max_tokens)
+        if result:
+            return result
+
+        # Fallback: local Ollama
+        print("[Chat] Groq unavailable, falling back to Ollama...")
         for attempt in range(2):
             try:
                 data = {
@@ -156,7 +164,7 @@ class MiniAI:
                 result = response.json()
 
                 if response.status_code != 200:
-                    print(f"[Chat] Ollama failed ({response.status_code}) in {duration:.1f}s: {result}")
+                    print(f"[Chat] Ollama failed ({response.status_code}) in {duration:.1f}s")
                     break
 
                 print(f"[Chat] Ollama responded in {duration:.1f}s")
@@ -167,12 +175,10 @@ class MiniAI:
             except Exception as e:
                 print(f"[Chat] Ollama error (attempt {attempt + 1}): {e}")
 
-        # Fallback to Groq
-        print("[Chat] Falling back to Groq...")
-        return self._call_translate_model(messages, temperature=temperature, max_tokens=max_tokens)
+        return None
 
     def _call_translate_model(self, messages, temperature=0.4, max_tokens=150):
-        """Call Groq llama3 for translate / text polishing"""
+        """Call Groq llama3 — primary chat model + translate/polish fallback"""
         for attempt in range(2):
             try:
                 data = {
@@ -190,7 +196,7 @@ class MiniAI:
                     TRANSLATE_BASE_URL,
                     headers=self._translate_headers,
                     json=data,
-                    timeout=15,
+                    timeout=60,
                     verify=False,
                 )
 
@@ -340,7 +346,11 @@ class MiniAI:
         """Direct dict access for backward compatibility"""
         return self.memory.memory
 
-    def chat(self, user_input):
+    def chat(self, user_input, source_type: str = "owner", viewer_data: dict = None, stream_context: str = ""):
+        """
+        source_type: "owner" | "regular_viewer" | "new_viewer" | "donor"
+        viewer_data: dict với affection, viewer_name, total_streams (cho viewer)
+        """
         self.current_time = get_vietnam_time()
         self.time_period = get_time_period(self.current_time.hour)
         self.time_gap_hours = calculate_time_gap(
@@ -353,10 +363,25 @@ class MiniAI:
         self.turn_counter += 1
         intent = self.detect_intent(user_input)
 
+        # Với viewer: không extract memory vào DB chính của owner
+        if source_type != "owner":
+            self._thread_local.skip_memory_extraction = True
+
         self.extract_memory(user_input, intent)
         self.emotion.update(user_input, self.time_gap_hours)
 
-        # Update conversation state (after emotion so we have fresh mood/attention)
+        # Override affection tạm thời theo source_type
+        _original_affection = self.emotion.affection
+        if source_type == "owner":
+            pass  # dùng affection từ DB chính
+        elif source_type == "regular_viewer":
+            self.emotion.affection = float(viewer_data.get("affection", 35)) if viewer_data else 35.0
+        elif source_type == "donor":
+            self.emotion.affection = min(100, float(viewer_data.get("affection", 40)) + 20) if viewer_data else 55.0
+        else:  # new_viewer
+            self.emotion.affection = 10.0
+
+        # Update conversation state
         self.conv_state.update(user_input, self.messages)
 
         self.summarize_history()
@@ -366,22 +391,27 @@ class MiniAI:
         self.last_intent = intent
 
         search_context = ""
-        should_search, search_query = self._should_search(user_input)
-        if should_search and search_query:
-            print(f"[Search] Query: {search_query}")
-            search_results = self._search_web(search_query)
-            if search_results:
-                search_context = (
-                    f"\n\n[SEARCH RESULTS]\n{search_results}\n[/SEARCH RESULTS]\n"
-                )
-                print(f"[Search] Found results")
+        # Chỉ search web khi owner chat, không tốn quota cho viewer
+        if source_type == "owner":
+            should_search, search_query = self._should_search(user_input)
+            if should_search and search_query:
+                print(f"[Search] Query: {search_query}")
+                search_results = self._search_web(search_query)
+                if search_results:
+                    search_context = (
+                        f"\n\n[SEARCH RESULTS]\n{search_results}\n[/SEARCH RESULTS]\n"
+                    )
 
-        system_prompt = self.build_prompt(intent, user_input, search_context)
+        system_prompt = self.build_prompt(intent, user_input, search_context, source_type=source_type, viewer_data=viewer_data, stream_context=stream_context)
         composed = self.compose_user_message(user_input, intent)
 
         api_messages = [{"role": "system", "content": system_prompt}]
 
-        history = self.messages[-MAX_HISTORY * 2 :]
+        # Owner dùng full history, viewer chỉ dùng ít context hơn để tiết kiệm tokens
+        if source_type == "owner":
+            history = self.messages[-MAX_HISTORY * 2:]
+        else:
+            history = self.messages[-4:]
         api_messages.extend(history)
         api_messages.append({"role": "user", "content": composed})
 
@@ -406,6 +436,10 @@ class MiniAI:
         original_reply = reply
         reply = self._translate_response(reply)
 
+        # Restore affection gốc của owner sau khi xử lý viewer
+        if source_type != "owner":
+            self.emotion.affection = _original_affection
+
         milestone = self.check_milestone()
         if milestone:
             self.memory.memory["relationship"]["last_milestone_hint"] = milestone
@@ -421,26 +455,27 @@ class MiniAI:
                 }
             )
 
-        self.messages.append({"role": "user", "content": user_input})
-        self.messages.append({"role": "assistant", "content": original_reply})
-        
-        # Đồng bộ vào conversation_thread để memory.py có thể thấy và lưu
-        if "conversation_thread" not in self.memory.memory["conversation"]:
-            self.memory.memory["conversation"]["conversation_thread"] = []
-        
-        self.memory.memory["conversation"]["conversation_thread"].append({"role": "user", "content": user_input})
-        self.memory.memory["conversation"]["conversation_thread"].append({"role": "assistant", "content": original_reply})
+        # Chỉ lưu conversation history khi owner chat
+        if source_type == "owner":
+            self.messages.append({"role": "user", "content": user_input})
+            self.messages.append({"role": "assistant", "content": original_reply})
 
-        self.memory.memory["conversation"]["total_messages"] = self.turn_counter
-        self.memory.memory["conversation"]["conversation_count"] += 1
-        self.memory.memory["time_tracking"]["last_message_time"] = (
-            self.current_time.isoformat()
-        )
-        self.memory.memory["time_tracking"]["time_gap_hours"] = self.time_gap_hours or 0
-        self.memory.memory["relationship"]["current_affection"] = self.emotion.affection
+            if "conversation_thread" not in self.memory.memory["conversation"]:
+                self.memory.memory["conversation"]["conversation_thread"] = []
 
-        self.memory._is_dirty = True
-        self.memory.save()
+            self.memory.memory["conversation"]["conversation_thread"].append({"role": "user", "content": user_input})
+            self.memory.memory["conversation"]["conversation_thread"].append({"role": "assistant", "content": original_reply})
+
+            self.memory.memory["conversation"]["total_messages"] = self.turn_counter
+            self.memory.memory["conversation"]["conversation_count"] += 1
+            self.memory.memory["time_tracking"]["last_message_time"] = (
+                self.current_time.isoformat()
+            )
+            self.memory.memory["time_tracking"]["time_gap_hours"] = self.time_gap_hours or 0
+            self.memory.memory["relationship"]["current_affection"] = self.emotion.affection
+
+            self.memory._is_dirty = True
+            self.memory.save()
 
         emotion = self.current_vbrain.get("emotion", self.emotion.emotion_from_state())
         action = self.current_vbrain.get("action", "NONE")
@@ -458,6 +493,7 @@ class MiniAI:
             "time_gap_hours": self.time_gap_hours,
             "intent": intent,
             "conv_state": self.conv_state.state,
+            "source_type": source_type,
         }
 
     def detect_intent(self, text):
@@ -689,9 +725,9 @@ class MiniAI:
         return None
 
     def extract_memory(self, text, intent):
-        # Giai đoạn 4: Skip extraction nếu viewer không đủ quen (set từ web.py)
-        if getattr(self, "skip_memory_extraction", False):
-            self.skip_memory_extraction = False
+        # Skip extraction nếu viewer không đủ quen (set per-thread)
+        if getattr(self._thread_local, "skip_memory_extraction", False):
+            self._thread_local.skip_memory_extraction = False
             return
 
         now_ts = datetime.now().isoformat()
@@ -928,7 +964,41 @@ class MiniAI:
             )
             conn.commit()
 
-    def build_prompt(self, intent, user_input, search_context=""):
+    def _build_source_context(self, source_type: str, viewer_data: dict = None) -> str:
+        """Tạo context block phân biệt owner vs viewer để inject vào prompt"""
+        if source_type == "owner":
+            name = self.memory.memory.get("user_profile", {}).get("name", "")
+            name_str = f" ({name})" if name else ""
+            return (
+                f"[NGƯỜI DÙNG: CHỦ KÊNH{name_str}]\n"
+                f"Đây là chủ kênh đang nói chuyện trực tiếp qua mic. Ưu tiên cao nhất.\n"
+                f"Affection: {int(self.emotion.affection)}/100. Trả lời tự nhiên như bình thường."
+            )
+        elif source_type == "regular_viewer":
+            vname = viewer_data.get("viewer_name", "Viewer") if viewer_data else "Viewer"
+            streams = viewer_data.get("total_streams", 1) if viewer_data else 1
+            aff = viewer_data.get("affection", 35) if viewer_data else 35
+            return (
+                f"[NGƯỜI DÙNG: VIEWER QUEN — {vname}]\n"
+                f"Đã xem {streams} buổi stream. Affection: {aff}/100.\n"
+                f"Nhận ra họ, thân thiện hơn viewer lạ, nhưng vẫn giữ vibe streamer."
+            )
+        elif source_type == "donor":
+            vname = viewer_data.get("viewer_name", "Viewer") if viewer_data else "Viewer"
+            amount = viewer_data.get("amount", "") if viewer_data else ""
+            amount_str = f" {amount}" if amount else ""
+            return (
+                f"[SỰ KIỆN: DONATE — {vname}{amount_str}]\n"
+                f"Cảm ơn chân thành, đọc tên họ, react tự nhiên và ấm áp."
+            )
+        else:  # new_viewer
+            vname = viewer_data.get("viewer_name", "Viewer") if viewer_data else "Viewer"
+            return (
+                f"[NGƯỜI DÙNG: VIEWER MỚI — {vname}]\n"
+                f"Viewer chưa quen. Thân thiện nhưng giữ khoảng cách vừa phải. Affection: 10/100."
+            )
+
+    def build_prompt(self, intent, user_input, search_context="", source_type: str = "owner", viewer_data: dict = None, stream_context: str = ""):
         memory_context = self.memory.get_context(
             user_input
         ) or self.memory.get_relevant_context(user_input)
@@ -983,13 +1053,16 @@ class MiniAI:
         if recent_patterns:
             anti_repeat_note += f"\n- Avoid starting with any of these patterns used recently: {list(recent_patterns)}."
 
-        # Stream context từ ViewerTracker (Giai đoạn 3) — chỉ có khi gọi từ /stream-chat
-        stream_context = getattr(self, "stream_context", "") or ""
+        # Stream context từ ViewerTracker — truyền qua tham số, không dùng self attribute
+        _stream_ctx = stream_context or getattr(self, "stream_context", "") or ""
 
         # Conversation state & rhythm hints
         state_hint  = self.conv_state.get_state_hint()
         rhythm_hint = self.conv_state.get_rhythm_hint()
         conv_hints  = "\n".join(filter(None, [state_hint, rhythm_hint]))
+
+        # Source type context — phân biệt owner vs viewer
+        source_context = self._build_source_context(source_type, viewer_data)
 
         system_prompt = f"""{NATURAL_BASE_PERSONALITY}
 
@@ -1017,11 +1090,12 @@ Current state:
 
 {memory_context}
 {search_context}
-{stream_context}
+{_stream_ctx}
+{source_context}
 
 {VTUBER_BRAIN_INSTRUCTIONS}
 """
-        # Reset sau mỗi turn để không leak context sang /chat thường
+        # Xóa legacy attribute nếu còn tồn tại
         self.stream_context = ""
         return system_prompt
 
@@ -1241,34 +1315,25 @@ Current state:
         name_str = f" {name}" if name else ""
 
         try:
-            response = requests.post(
-                BASE_URL,
-                headers=self.headers,
-                json={
-                    "model": self.model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": f"{NATURAL_BASE_PERSONALITY}\n\nYou are sending an unprompted message to the user because they've been away.\n- Keep it SHORT — 1-2 sentences MAXIMUM\n- Sound natural, like a text from a little sister\n- Don't say 'I noticed you were gone' — just reach out casually\n- Don't be desperate or needy\n- {time_flavor}",
-                        },
-                        {
-                            "role": "user",
-                            "content": f"Send a proactive message. Situation: {situation}. Call them{name_str} if you know their name.",
-                        },
-                    ],
-                    "temperature": 0.95,
-                    "max_tokens": 60,
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        f"{NATURAL_BASE_PERSONALITY}\n\n"
+                        "You are sending an unprompted message to the user because they've been away.\n"
+                        "- Keep it SHORT — 1-2 sentences MAXIMUM\n"
+                        "- Sound natural, like a text from a little sister\n"
+                        "- Don't say 'I noticed you were gone' — just reach out casually\n"
+                        "- Don't be desperate or needy\n"
+                        f"- {time_flavor}"
+                    ),
                 },
-                timeout=15,
-                verify=False,
-            )
-            msg = (
-                response.json()
-                .get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-                .strip()
-            )
+                {
+                    "role": "user",
+                    "content": f"Send a proactive message. Situation: {situation}. Call them{name_str} if you know their name.",
+                },
+            ]
+            msg = self._call_model(messages, temperature=0.95, max_tokens=60)
             if msg:
                 parsed = parse_vbrain_response(msg)
                 return self.clean_reply(parsed.get("reply", ""))
