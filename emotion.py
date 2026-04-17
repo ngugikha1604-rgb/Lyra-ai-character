@@ -53,6 +53,7 @@ class EmotionEngine:
         text_lower = text.lower()
 
         positive = [
+            # English
             "good",
             "great",
             "awesome",
@@ -69,9 +70,29 @@ class EmotionEngine:
             "excellent",
             "fantastic",
             "incredible",
+            # Vietnamese
+            "tuyệt",
+            "hay",
+            "thích",
+            "vui",
+            "cảm ơn",
+            "cảm on",
+            "yêu",
+            "đẹp",
+            "giỏi",
+            "ngoan",
+            "tốt",
+            "ổn",
+            "sướng",
+            "phấn khích",
+            "hạnh phúc",
+            "thú vị",
+            "xuất sắc",
+            "tuyệt vời",
         ]
 
         negative = [
+            # English
             "stupid",
             "hate",
             "annoying",
@@ -82,6 +103,23 @@ class EmotionEngine:
             "awful",
             "horrible",
             "worst",
+            # Vietnamese
+            "ghét",
+            "tệ",
+            "dở",
+            "ngu",
+            "bực",
+            "chán",
+            "mệt",
+            "buồn",
+            "tức",
+            "khó chịu",
+            "thất vọng",
+            "chán nản",
+            "bực bội",
+            "tức giận",
+            "đau",
+            "khổ",
         ]
 
         if any(w in text_lower for w in positive):

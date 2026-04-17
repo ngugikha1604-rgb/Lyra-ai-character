@@ -397,11 +397,8 @@ class ViewerTracker:
                 else:
                     familiarity = "viewer mới"
 
-                rank = self.get_viewer_rank(sender_id, platform, channel_id)
-                rank_str = f", rank #{rank}" if rank > 0 else ""
-
                 parts.append(
-                    f"[VIEWER — {sender_name}] {familiarity}{rank_str}, {count} tin nhắn hôm nay."
+                    f"[VIEWER — {sender_name}] {familiarity}, {count} tin nhắn hôm nay."
                 )
 
                 if affinity >= 3.0:

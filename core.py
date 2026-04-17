@@ -1518,7 +1518,7 @@ Current state:
             return ""
 
         try:
-            reply = self._call_model(messages, temperature=0.9, max_tokens=60)
+            reply = self._call_light_model(messages, temperature=0.9, max_tokens=60)
             return self.clean_reply(reply or "")
         except Exception as e:
             print(f"[Stream Event] generate error: {e}")

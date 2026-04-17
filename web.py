@@ -446,7 +446,6 @@ def stream_chat():
 
         # Giai đoạn 2 & 3: Track viewer + build stream context
         viewer_info = viewer_tracker.record_message(sender_id, sender_name, platform, channel_id, message)
-        viewer_rank = viewer_tracker.get_viewer_rank(sender_id, platform, channel_id)
 
         # Giai đoạn 4: Thu thập chat pattern
         chat_analyzer.ingest(message, channel_id, platform)
@@ -502,7 +501,6 @@ def stream_chat():
                 "source_type": source_type_val,
                 "viewer_message_count": viewer_info.get("message_count", 1),
                 "viewer_affinity": viewer_info.get("affinity_score", 1.0),
-                "viewer_rank": viewer_rank,
             }
         )
 

@@ -340,7 +340,7 @@ Yêu cầu:
 - Trả về plain text (không cần JSON).
 
 Ví dụ tốt:
-"Cảm ơn mọi người đã xem stream hôm nay nha~ Đặc biệt cảm ơn {top_viewers} đã chat nhiều! Hẹn gặp lại lần sau!"
+"Cảm ơn mọi người đã xem stream hôm nay nha~ Đặc biệt cảm ơn {{top_viewers}} đã chat nhiều! Hẹn gặp lại lần sau!"
 
 Ví dụ tệ (quá dài, quá formal):
 "Cảm ơn tất cả mọi người rất nhiều vì đã dành thời gian quý báu để xem stream của mình..."

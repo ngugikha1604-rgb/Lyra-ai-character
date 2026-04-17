@@ -13,54 +13,37 @@
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-body {
-  font-family: 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
-  height: 100vh;
-  background: linear-gradient(135deg, #0a0e27 0%, #1a1a3e 50%, #0d0d1f 100%);
-  color: #e0e0ff;
-  overflow: hidden;
-  display: flex;
-}
-
-/* ==================== LAYOUT ==================== */
-
-.main-layout {
-  display: flex;
+html, body {
   width: 100%;
-  height: 100vh;
-  gap: 16px;
-  padding: 16px;
-}
-
-/* ==================== MODEL SECTION ==================== */
-
-.model-section {
-  flex: 1;
-  position: relative;
-  background: rgba(20, 20, 40, 0.3);
-  border-radius: 20px;
-  border: 1px solid rgba(0, 245, 255, 0.15);
+  height: 100%;
+  background: transparent;
   overflow: hidden;
-  min-width: 380px;
 }
 
-#live2dCanvas { display: block; }
+#live2dCanvas {
+  display: block;
+  position: fixed;
+  top: 0; left: 0;
+  background: transparent !important;
+}
 
 #emotionFilterOverlay {
-  position: absolute;
+  position: fixed;
   top: 0; left: 0;
   width: 100%; height: 100%;
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.6s ease, background-color 0.6s ease;
+  mix-blend-mode: screen;
   z-index: 5;
 }
 
-/* Monologue */
+/* Monologue bubble hiện phía trên model */
 .monologue-overlay {
-  position: absolute;
-  top: 15%;
-  width: 80%; left: 10%;
+  position: fixed;
+  top: 8%;
+  width: 80%;
+  left: 10%;
   display: flex;
   justify-content: center;
   z-index: 20;
@@ -72,440 +55,84 @@ body {
   backdrop-filter: blur(8px);
   border: 1px solid rgba(0, 245, 255, 0.3);
   color: #00f5ff;
-  padding: 15px 25px;
+  padding: 12px 22px;
   border-radius: 20px;
+  font-family: 'Segoe UI', Roboto, sans-serif;
   font-style: italic;
-  font-size: 14px;
+  font-size: 15px;
   text-align: center;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
   opacity: 0;
   transform: translateY(20px) rotateX(-20deg);
   transition: all 0.6s cubic-bezier(0.23, 1, 0.32, 1);
-  max-width: 400px;
+  max-width: 420px;
 }
 .monologue-text.active {
   opacity: 1;
   transform: translateY(0) rotateX(0deg);
 }
 
-/* Emotion display */
-.emotion-display {
-  position: absolute;
-  top: 20px; right: 20px;
-  background: rgba(10, 10, 20, 0.8);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(0, 245, 255, 0.3);
-  border-radius: 15px;
-  padding: 10px 18px;
-  z-index: 6;
-}
-.emotion-label {
-  font-size: 10px;
-  color: #a0a0ff;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  margin-bottom: 3px;
-}
-.emotion-text {
-  font-size: 16px;
-  font-weight: bold;
-  color: #00f5ff;
-}
-
-/* Model info */
-.model-info {
-  position: absolute;
-  bottom: 20px; left: 20px;
-  background: rgba(10, 10, 20, 0.8);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(0, 245, 255, 0.3);
-  border-radius: 15px;
-  padding: 12px 20px;
-  z-index: 6;
-}
-.model-name {
-  font-size: 16px;
-  font-weight: bold;
-  color: #00f5ff;
-  letter-spacing: 2px;
-  margin-bottom: 6px;
-}
-.model-status {
-  font-size: 11px;
-  color: #a0a0ff;
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-.status-indicator {
-  width: 7px; height: 7px;
-  border-radius: 50%;
-  background: #00ff88;
-  animation: pulse 2s infinite;
-}
-
-/* Top chatters panel */
-.top-chatters {
-  position: absolute;
-  bottom: 20px; right: 20px;
-  background: rgba(10, 10, 20, 0.8);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(0, 245, 255, 0.2);
-  border-radius: 15px;
-  padding: 12px 16px;
-  z-index: 6;
-  min-width: 160px;
-  display: none; /* ẩn cho đến khi có data */
-}
-.chatters-title {
-  font-size: 10px;
-  color: #a0a0ff;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  margin-bottom: 8px;
-}
-.chatter-item {
-  font-size: 12px;
-  color: #d0d0ff;
-  padding: 3px 0;
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-}
-.chatter-item .chatter-name { color: #00f5ff; }
-.chatter-item .chatter-count { color: #a0a0ff; font-size: 11px; }
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-
-/* ==================== CHAT SECTION ==================== */
-
-.chat-section {
-  width: 420px;
-  display: flex;
-  flex-direction: column;
-  background: rgba(15, 15, 35, 0.6);
+/* Mic status indicator nhỏ ở góc */
+#micStatus {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.5);
+  border: 1px solid rgba(0,245,255,0.25);
   border-radius: 20px;
-  border: 1px solid rgba(0, 245, 255, 0.15);
-  overflow: hidden;
-  backdrop-filter: blur(10px);
-}
-
-.chat-header {
-  padding: 20px 24px;
-  background: linear-gradient(135deg, rgba(0, 245, 255, 0.1), rgba(138, 43, 226, 0.1));
-  border-bottom: 1px solid rgba(0, 245, 255, 0.2);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-.chat-title {
-  font-size: 16px;
-  font-weight: bold;
-  color: #00f5ff;
-  letter-spacing: 1px;
-}
-.chat-stats {
-  display: flex;
-  gap: 10px;
-}
-.stat-item {
-  background: rgba(0, 245, 255, 0.1);
-  padding: 6px 12px;
-  border-radius: 20px;
-  border: 1px solid rgba(0, 245, 255, 0.3);
+  padding: 5px 14px;
+  font-family: 'Segoe UI', sans-serif;
   font-size: 12px;
-  display: flex;
-  align-items: center;
-  gap: 5px;
+  color: rgba(160,200,255,0.7);
+  z-index: 30;
+  pointer-events: none;
+  transition: opacity 0.4s;
 }
-.stat-value { color: #00f5ff; font-weight: bold; }
-
-#messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-#messages::-webkit-scrollbar { width: 5px; }
-#messages::-webkit-scrollbar-track { background: rgba(0, 245, 255, 0.05); border-radius: 10px; }
-#messages::-webkit-scrollbar-thumb { background: rgba(0, 245, 255, 0.3); border-radius: 10px; }
-
-.message {
-  padding: 10px 14px;
-  border-radius: 14px;
-  font-size: 14px;
-  line-height: 1.5;
-  word-wrap: break-word;
-  animation: slideIn 0.3s ease-out;
-  max-width: 90%;
-}
-@keyframes slideIn {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
-.message.user {
-  background: linear-gradient(135deg, rgba(0, 150, 255, 0.2), rgba(138, 43, 226, 0.2));
-  border: 1px solid rgba(0, 150, 255, 0.4);
-  align-self: flex-end;
-  color: #e0e0ff;
-}
-.message.ai {
-  background: linear-gradient(135deg, rgba(138, 43, 226, 0.15), rgba(0, 245, 255, 0.1));
-  border: 1px solid rgba(138, 43, 226, 0.3);
-  align-self: flex-start;
-  color: #d0d0ff;
-}
-.history-divider {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  margin: 6px 0;
-  color: rgba(180, 160, 255, 0.4);
-  font-size: 11px;
-  letter-spacing: 1px;
-}
-.history-divider::before, .history-divider::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: rgba(138, 43, 226, 0.2);
-}
-
-.loading {
-  display: inline-flex;
-  gap: 5px;
-  align-items: center;
-}
-.dot {
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  background: #00f5ff;
-  animation: typing 1.4s infinite;
-}
-.dot:nth-child(2) { animation-delay: 0.2s; }
-.dot:nth-child(3) { animation-delay: 0.4s; }
-@keyframes typing {
-  0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
-  30% { transform: translateY(-8px); opacity: 1; }
-}
-
-.input-area {
-  padding: 16px;
-  background: rgba(0, 0, 0, 0.3);
-  border-top: 1px solid rgba(0, 245, 255, 0.15);
-  display: flex;
-  gap: 10px;
-}
-input {
-  flex: 1;
-  padding: 11px 14px;
-  border-radius: 12px;
-  border: 1px solid rgba(0, 245, 255, 0.3);
-  background: rgba(15, 15, 30, 0.8);
-  color: #e0e0ff;
-  font-size: 14px;
-  transition: all 0.3s ease;
-  outline: none;
-}
-input:focus {
-  border-color: rgba(0, 245, 255, 0.6);
-  background: rgba(15, 15, 30, 0.95);
-  box-shadow: 0 0 15px rgba(0, 245, 255, 0.2);
-}
-input::placeholder { color: rgba(160, 160, 200, 0.5); }
-
-button {
-  padding: 11px 22px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #00f5ff, #0099ff);
-  color: #000;
-  border: none;
-  font-weight: 600;
-  cursor: pointer;
-  font-size: 14px;
-  transition: all 0.3s ease;
-  box-shadow: 0 0 15px rgba(0, 245, 255, 0.3);
-}
-button:hover { transform: translateY(-2px); box-shadow: 0 5px 25px rgba(0, 245, 255, 0.5); }
-button:active { transform: translateY(0); }
-button:disabled { opacity: 0.5; cursor: not-allowed; }
-
-#micBtn {
-  padding: 11px 13px;
-  border-radius: 12px;
-  background: rgba(0, 245, 255, 0.1);
-  color: #00f5ff;
-  border: 1px solid rgba(0, 245, 255, 0.3);
-  font-size: 16px;
-  box-shadow: none;
-}
-#micBtn:hover {
-  background: rgba(0, 245, 255, 0.2);
-  border-color: rgba(0, 245, 255, 0.5);
-  transform: translateY(-2px);
-  box-shadow: 0 5px 15px rgba(0, 245, 255, 0.2);
-}
-#micBtn.listening {
-  background: linear-gradient(135deg, rgba(255, 80, 80, 0.3), rgba(255, 50, 50, 0.2));
-  border-color: #ff4444;
-  color: #ff4444;
-  box-shadow: 0 0 14px rgba(255, 60, 60, 0.4);
-  animation: micPulse 1s infinite;
-}
-@keyframes micPulse {
-  0%, 100% { box-shadow: 0 0 14px rgba(255, 60, 60, 0.4); }
-  50%       { box-shadow: 0 0 24px rgba(255, 60, 60, 0.7); }
-}
+#micStatus.hidden { opacity: 0; }
 </style>
 </head>
 
 <body>
-<div class="main-layout">
 
-  <!-- MODEL SECTION -->
-  <div class="model-section">
-    <div id="emotionFilterOverlay"></div>
+<div id="emotionFilterOverlay"></div>
 
-    <div class="monologue-overlay" id="monologueOverlay">
-      <div class="monologue-text" id="monologueText"></div>
-    </div>
-
-    <canvas id="live2dCanvas"></canvas>
-
-    <div class="emotion-display">
-      <div class="emotion-label">Emotion</div>
-      <div class="emotion-text" id="emotionDisplay">neutral</div>
-      <div style="margin-top:6px; padding-top:6px; border-top:1px solid rgba(0,245,255,0.2); font-size:10px;">
-        <div id="timeDisplay" style="color:#a0a0ff;">Vietnam Time</div>
-      </div>
-    </div>
-
-    <div class="model-info">
-      <div class="model-name">LYRA</div>
-      <div class="model-status">
-        <span class="status-indicator"></span>
-        <span>Online</span>
-      </div>
-    </div>
-
-    <!-- Top Chatters (stream mode) -->
-    <div class="top-chatters" id="topChattersPanel">
-      <div class="chatters-title">🏆 Top Chatters</div>
-      <div id="chattersList"></div>
-    </div>
-  </div>
-
-  <!-- CHAT SECTION -->
-  <div class="chat-section">
-    <div class="chat-header">
-      <div class="chat-title">CHAT</div>
-      <div class="chat-stats">
-        <div class="stat-item">
-          <span>❤️</span>
-          <span class="stat-value" id="affectionValue">50</span>
-          <span>/100</span>
-        </div>
-        <div class="stat-item">
-          <span>😊</span>
-          <span class="stat-value" id="moodValue">+0</span>
-        </div>
-      </div>
-    </div>
-
-    <div id="messages"></div>
-
-    <div class="input-area">
-      <input
-        type="text"
-        id="userInput"
-        placeholder="Message Lyra..."
-        onkeydown="if(event.key==='Enter' && !event.shiftKey) sendMessage()"
-      />
-      <button id="micBtn" onclick="toggleMic()" title="Voice Input">🎤</button>
-      <button id="ttsToggleBtn" class="tts-on" onclick="toggleTTS()" title="Toggle Voice">🔊</button>
-      <button onclick="sendMessage()">Send</button>
-    </div>
-  </div>
-
+<div class="monologue-overlay" id="monologueOverlay">
+  <div class="monologue-text" id="monologueText"></div>
 </div>
+
+<canvas id="live2dCanvas"></canvas>
+
+<div id="micStatus" class="hidden">🎤 Đang nghe...</div>
 
 <script>
 
-let model;
-let isLoading = false;
-
-function formatMoodValue(mood) {
-  return mood > 0 ? "+" + mood : String(mood);
-}
-
-function updateTimeDisplay(timePeriod, timeGapHours) {
-  const period = timePeriod || "afternoon";
-  let text = period.charAt(0).toUpperCase() + period.slice(1);
-  if (timeGapHours !== null && timeGapHours !== undefined && timeGapHours > 0) {
-    text += ` (${timeGapHours.toFixed(1)}h gap)`;
-  }
-  document.getElementById("timeDisplay").innerText = text;
-}
-
-function applyChatState(data) {
-  if (data.affection !== undefined) {
-    document.getElementById("affectionValue").innerText = data.affection;
-  }
-  if (data.mood !== undefined) {
-    document.getElementById("moodValue").innerText = formatMoodValue(data.mood);
-  }
-  if (data.emotion) {
-    document.getElementById("emotionDisplay").innerText = data.emotion;
-    if (model) reactToEmotion(data.emotion);
-  }
-  if (data.action && data.action !== "NONE") triggerAction(data.action);
-  if (data.monologue) showMonologue(data.monologue);
-  updateTimeDisplay(data.time_period, data.time_gap_hours);
-}
-
-function showMonologue(text) {
-  const el = document.getElementById("monologueText");
-  el.innerText = text;
-  el.classList.remove("active");
-  void el.offsetWidth;
-  el.classList.add("active");
-  if (window.monologueTimeout) clearTimeout(window.monologueTimeout);
-  window.monologueTimeout = setTimeout(() => el.classList.remove("active"), 6000);
-}
-
-async function initializeChatState() {
-  try {
-    const res = await fetch("/status");
-    if (!res.ok) return;
-    applyChatState(await res.json());
-  } catch (e) { console.warn("Could not init chat state:", e); }
-}
-
 /* ==================== LIVE2D SETUP ==================== */
 
+const canvas = document.getElementById("live2dCanvas");
+
+// Tạo WebGL context với alpha thật sự transparent
+const gl = canvas.getContext("webgl", { alpha: true, premultipliedAlpha: false })
+           || canvas.getContext("experimental-webgl", { alpha: true, premultipliedAlpha: false });
+
 const app = new PIXI.Application({
-  view: document.getElementById("live2dCanvas"),
-  width: document.querySelector(".model-section").clientWidth || 640,
-  height: document.querySelector(".model-section").clientHeight || 600,
+  view: canvas,
+  width: window.innerWidth,
+  height: window.innerHeight,
   transparent: true,
   backgroundAlpha: 0,
+  clearBeforeRender: true,
   antialias: true,
   resolution: window.devicePixelRatio || 1,
   autoDensity: true,
+  context: gl,
 });
+
+let model;
 
 function repositionModel() {
   if (!model) return;
-  const section = document.querySelector(".model-section");
-  if (!section) return;
-  const w = section.clientWidth, h = section.clientHeight;
-  if (w === 0 || h === 0) return;
+  const w = window.innerWidth, h = window.innerHeight;
   app.renderer.resize(w, h);
   model.x = w / 2;
   model.y = h - 10;
@@ -521,9 +148,10 @@ window.addEventListener("load", async () => {
     model.scale.set(0.07);
     setTimeout(repositionModel, 100);
     startIdleAnimations();
+    startBlinking();
     await initializeChatState();
-    await loadChatHistory();
-    startTopChattersPolling();
+    // Bắt đầu vòng lặp mic sau khi mọi thứ sẵn sàng
+    setTimeout(startMicLoop, 1500);
   } catch (err) {
     console.error("Live2D load error:", err);
   }
@@ -538,35 +166,50 @@ function setParam(id, value) {
   } catch (e) { /* ignore */ }
 }
 
+/* ==================== STATE ==================== */
+
+async function initializeChatState() {
+  try {
+    const res = await fetch("/status");
+    if (!res.ok) return;
+    applyChatState(await res.json());
+  } catch (e) { console.warn("Could not init chat state:", e); }
+}
+
+function applyChatState(data) {
+  if (data.emotion) {
+    reactToEmotion(data.emotion);
+  }
+  if (data.action && data.action !== "NONE") triggerAction(data.action);
+  if (data.monologue) showMonologue(data.monologue);
+}
+
+function showMonologue(text) {
+  const el = document.getElementById("monologueText");
+  el.innerText = text;
+  el.classList.remove("active");
+  void el.offsetWidth;
+  el.classList.add("active");
+  if (window.monologueTimeout) clearTimeout(window.monologueTimeout);
+  window.monologueTimeout = setTimeout(() => el.classList.remove("active"), 6000);
+}
+
 /* ==================== TTS ==================== */
 
-let ttsEnabled = true;
 let currentAudio = null;
 let talkingInterval = null;
 let audioContext = null;
-
-function toggleTTS() {
-  ttsEnabled = !ttsEnabled;
-  const btn = document.getElementById("ttsToggleBtn");
-  if (ttsEnabled) {
-    btn.textContent = "🔊";
-    btn.classList.replace("tts-off", "tts-on");
-  } else {
-    btn.textContent = "🔇";
-    btn.classList.replace("tts-on", "tts-off");
-    if (currentAudio) { currentAudio.pause(); currentAudio = null; stopTalkingAnimation(); }
-  }
-}
+let isSpeaking = false;
 
 async function speakText(text) {
-  if (!ttsEnabled) return;
   try {
+    isSpeaking = true;
     const res = await fetch("/speak", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text })
     });
-    if (!res.ok) { unlockInput(); return; }
+    if (!res.ok) { isSpeaking = false; return; }
 
     const audioBlob = await res.blob();
     const audioUrl = URL.createObjectURL(audioBlob);
@@ -591,41 +234,33 @@ async function speakText(text) {
       if (audioContext) { audioContext.close(); audioContext = null; }
       URL.revokeObjectURL(audioUrl);
       currentAudio = null;
-      unlockInput();
+      isSpeaking = false;
+      // Sau khi Lyra nói xong → bật mic lại
+      startListening();
     });
     currentAudio.addEventListener("error", () => {
       stopTalkingAnimation();
       if (audioContext) { audioContext.close(); audioContext = null; }
       currentAudio = null;
-      unlockInput();
+      isSpeaking = false;
+      startListening();
     });
 
     await currentAudio.play();
   } catch (err) {
     console.error("TTS error:", err);
-    unlockInput();
+    isSpeaking = false;
+    startListening();
   }
-}
-
-function unlockInput() {
-  isLoading = false;
-  const input = document.getElementById("userInput");
-  input.disabled = false;
-  input.focus();
 }
 
 /* ==================== CHAT ==================== */
 
-async function sendMessage() {
-  const input = document.getElementById("userInput");
-  const text = input.value.trim();
-  if (!text || isLoading) return;
+let isLoading = false;
 
+async function sendMessage(text) {
+  if (!text || isLoading) return;
   isLoading = true;
-  addMessage(text, "user");
-  addMessage('<div class="loading"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div> Lyra is typing...', "ai");
-  input.value = "";
-  input.disabled = true;
 
   try {
     const res = await fetch("/chat", {
@@ -635,84 +270,19 @@ async function sendMessage() {
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-
-    const msgs = document.getElementById("messages");
-    msgs.removeChild(msgs.lastChild);
-    addMessage(data.reply, "ai");
     applyChatState(data);
-
-    if (ttsEnabled) {
+    if (data.reply) {
+      showMonologue(data.reply);
       await speakText(data.reply);
     } else {
-      unlockInput();
+      isLoading = false;
+      startListening();
     }
   } catch (e) {
     console.error("Chat error:", e);
-    const msgs = document.getElementById("messages");
-    if (msgs.lastChild) msgs.removeChild(msgs.lastChild);
-    addMessage("Something went wrong...", "ai");
-    unlockInput();
+    isLoading = false;
+    startListening();
   }
-}
-
-function addMessage(text, sender) {
-  const msgs = document.getElementById("messages");
-  const msg = document.createElement("div");
-  msg.className = `message ${sender}`;
-  msg.innerHTML = text;
-  msgs.appendChild(msg);
-  msgs.scrollTop = msgs.scrollHeight;
-}
-
-async function loadChatHistory() {
-  try {
-    const res = await fetch("/history");
-    if (!res.ok) return;
-    const data = await res.json();
-    const history = data.history || [];
-    if (history.length === 0) return;
-
-    const msgs = document.getElementById("messages");
-    const divider = document.createElement("div");
-    divider.className = "history-divider";
-    divider.innerHTML = "<span>— previous messages —</span>";
-    msgs.appendChild(divider);
-
-    for (const msg of history) {
-      if (msg.role === "user") addMessage(msg.content, "user");
-      else if (msg.role === "assistant") addMessage(msg.content, "ai");
-    }
-    msgs.scrollTop = msgs.scrollHeight;
-  } catch (e) { console.warn("Could not load history:", e); }
-}
-
-/* ==================== TOP CHATTERS ==================== */
-
-async function loadTopChatters() {
-  try {
-    const res = await fetch("/viewers?limit=5");
-    if (!res.ok) return;
-    const data = await res.json();
-    const viewers = data.viewers || [];
-    if (viewers.length === 0) return;
-
-    const panel = document.getElementById("topChattersPanel");
-    const list = document.getElementById("chattersList");
-
-    list.innerHTML = viewers.map((v, i) => `
-      <div class="chatter-item">
-        <span class="chatter-name">${i + 1}. ${v.viewer_name}</span>
-        <span class="chatter-count">${v.message_count} msgs</span>
-      </div>
-    `).join("");
-
-    panel.style.display = "block";
-  } catch (e) { /* silent */ }
-}
-
-function startTopChattersPolling() {
-  loadTopChatters();
-  setInterval(loadTopChatters, 30000); // refresh mỗi 30 giây
 }
 
 /* ==================== PROACTIVE MESSAGING ==================== */
@@ -721,19 +291,111 @@ const PROACTIVE_INTERVAL = 5 * 60 * 1000;
 
 setTimeout(() => {
   setInterval(async () => {
-    if (isLoading) return;
+    if (isLoading || isSpeaking || isListening) return;
     try {
       const res = await fetch("/proactive");
       if (!res.ok) return;
       const data = await res.json();
       if (data.should_show && data.message) {
-        addMessage(data.message, "ai");
         applyChatState(data);
-        if (ttsEnabled) await speakText(data.message);
+        showMonologue(data.message);
+        await speakText(data.message);
       }
     } catch (e) { console.warn("Proactive poll error:", e); }
   }, PROACTIVE_INTERVAL);
 }, PROACTIVE_INTERVAL);
+
+/* ==================== SPEECH RECOGNITION (STT) ==================== */
+
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+let isListening = false;
+
+if (SpeechRecognition) {
+  recognition = new SpeechRecognition();
+  recognition.lang = 'vi-VN';
+  recognition.continuous = false;
+  recognition.interimResults = false;
+
+  recognition.onstart = () => {
+    isListening = true;
+    showMicStatus(true);
+  };
+
+  recognition.onresult = (event) => {
+    let final = "";
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      if (event.results[i].isFinal) final += event.results[i][0].transcript;
+    }
+    if (final.trim()) {
+      isLoading = false; // reset trước khi gửi
+      sendMessage(final.trim());
+    }
+  };
+
+  recognition.onend = () => {
+    isListening = false;
+    showMicStatus(false);
+    // Nếu không có kết quả và không đang xử lý → bật lại mic sau 1s
+    if (!isLoading && !isSpeaking) {
+      setTimeout(startListening, 1000);
+    }
+  };
+
+  recognition.onerror = (event) => {
+    console.warn("[STT] Error:", event.error);
+    isListening = false;
+    showMicStatus(false);
+    if (!isLoading && !isSpeaking) {
+      setTimeout(startListening, 2000);
+    }
+  };
+}
+
+function startListening() {
+  if (!recognition || isListening || isSpeaking || isLoading) return;
+  try {
+    recognition.start();
+  } catch (e) {
+    // Đã đang chạy hoặc lỗi khác — thử lại sau
+    setTimeout(startListening, 1500);
+  }
+}
+
+function startMicLoop() {
+  startListening();
+}
+
+function showMicStatus(active) {
+  const el = document.getElementById("micStatus");
+  if (active) {
+    el.classList.remove("hidden");
+  } else {
+    el.classList.add("hidden");
+  }
+}
+
+/* ==================== YOUTUBE STREAM SSE ==================== */
+
+const streamEvents = new EventSource("/stream/events");
+
+streamEvents.onmessage = (e) => {
+  try {
+    const data = JSON.parse(e.data);
+    if (data.type === "connected") return;
+    applyChatState(data);
+    if (data.reply) {
+      showMonologue(data.reply);
+      speakText(data.reply);
+    }
+  } catch (err) {
+    console.warn("SSE parse error:", err);
+  }
+};
+
+streamEvents.onerror = () => {
+  console.warn("[SSE] Connection lost, will retry automatically.");
+};
 
 /* ==================== EMOTIONS ==================== */
 
@@ -767,13 +429,9 @@ const MOUSE_LERP = 0.05;
 const HEAD_ANGLE_X_MAX = 25;
 const HEAD_ANGLE_Y_MAX = 20;
 
-document.querySelector(".model-section").addEventListener("mousemove", (e) => {
-  const rect = e.currentTarget.getBoundingClientRect();
-  mouseX = ((e.clientX - rect.left) / rect.width - 0.5) * 2;
-  mouseY = ((e.clientY - rect.top) / rect.height - 0.5) * 2;
-});
-document.querySelector(".model-section").addEventListener("mouseleave", () => {
-  mouseX = 0; mouseY = 0;
+document.addEventListener("mousemove", (e) => {
+  mouseX = (e.clientX / window.innerWidth - 0.5) * 2;
+  mouseY = (e.clientY / window.innerHeight - 0.5) * 2;
 });
 
 /* ==================== IDLE ANIMATIONS ==================== */
@@ -844,8 +502,6 @@ function startBlinking() {
   }, 2500 + Math.random() * 2500);
 }
 
-window.addEventListener("load", () => setTimeout(startBlinking, 1000));
-
 /* ==================== LIP SYNC ==================== */
 
 function startLipSync(analyser, dataArray) {
@@ -860,16 +516,6 @@ function startLipSync(analyser, dataArray) {
     const avg = sum / 20;
     setParam("ParamMouthOpenY", Math.min(1.0, Math.max(0, emotion.mouthOpen + (avg / 255) * 0.9)));
   }, 33);
-}
-
-function startTalking() {
-  isTalking = true;
-  const emotion = emotionMap[currentEmotion];
-  const t = setInterval(() => {
-    if (!isTalking) { clearInterval(t); return; }
-    setParam("ParamMouthOpenY", emotion.mouthOpen + Math.random() * 0.6);
-  }, 100);
-  setTimeout(() => { isTalking = false; setParam("ParamMouthOpenY", emotion.mouthOpen); }, 2000);
 }
 
 function stopTalkingAnimation() {
@@ -910,9 +556,10 @@ function reactToEmotion(emotion) {
   setParam("ParamMouthOpenY", p.mouthOpen);
 
   applyColorFilter(emotion);
-  if (!ttsEnabled) startTalking();
   startBlinking();
 }
+
+/* ==================== ACTIONS ==================== */
 
 function triggerAction(action) {
   if (!model) return;
@@ -948,108 +595,6 @@ function triggerAction(action) {
       setParam("ParamEyeROpen", 1.2);
       setParam("ParamMouthOpenY", 0.8);
       break;
-  }
-}
-/* ==================== YOUTUBE STREAM SSE ==================== */
-
-const streamEvents = new EventSource("/stream/events");
-
-streamEvents.onmessage = (e) => {
-  try {
-    const data = JSON.parse(e.data);
-    if (data.type === "connected") return;
-
-    // Hiện message từ viewer + reply của Lyra
-    if (data.sender_name && data.reply) {
-      addMessage(`${data.sender_name}: ${data.reply}`, "ai");
-    } else if (data.reply) {
-      addMessage(data.reply, "ai");
-    }
-
-    applyChatState(data);
-
-    if (ttsEnabled && data.reply) speakText(data.reply);
-  } catch (err) {
-    console.warn("SSE parse error:", err);
-  }
-};
-
-streamEvents.onerror = () => {
-  console.warn("[SSE] Connection lost, will retry automatically.");
-};
-/* ==================== SPEECH RECOGNITION (STT) ==================== */
-
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognition = null;
-let isListening = false;
-
-if (SpeechRecognition) {
-  recognition = new SpeechRecognition();
-  recognition.lang = 'vi-VN';
-  recognition.continuous = false;
-  recognition.interimResults = true;
-
-  recognition.onstart = () => {
-    isListening = true;
-    const btn = document.getElementById("micBtn");
-    btn.classList.add("listening");
-    btn.textContent = "🔴";
-    document.getElementById("userInput").placeholder = "Đang nghe...";
-  };
-
-  recognition.onresult = (event) => {
-    let interim = "";
-    let final = "";
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const t = event.results[i][0].transcript;
-      if (event.results[i].isFinal) final += t;
-      else interim += t;
-    }
-    // Hiện interim text vào input để user thấy realtime
-    document.getElementById("userInput").value = final || interim;
-  };
-
-  recognition.onend = () => {
-    isListening = false;
-    const btn = document.getElementById("micBtn");
-    btn.classList.remove("listening");
-    btn.textContent = "🎤";
-    document.getElementById("userInput").placeholder = "Message Lyra...";
-
-    // Nếu có text thì tự gửi luôn
-    const text = document.getElementById("userInput").value.trim();
-    if (text) sendMessage();
-  };
-
-  recognition.onerror = (event) => {
-    console.warn("[STT] Error:", event.error);
-    isListening = false;
-    const btn = document.getElementById("micBtn");
-    btn.classList.remove("listening");
-    btn.textContent = "🎤";
-    document.getElementById("userInput").placeholder = "Message Lyra...";
-  };
-} else {
-  // Browser không hỗ trợ — ẩn nút mic
-  window.addEventListener("load", () => {
-    const btn = document.getElementById("micBtn");
-    if (btn) btn.style.display = "none";
-  });
-}
-
-function toggleMic() {
-  if (!recognition) return;
-  if (isListening) {
-    recognition.stop();
-  } else {
-    // Dừng TTS đang phát nếu có để tránh mic nghe lại giọng Lyra
-    if (currentAudio) {
-      currentAudio.pause();
-      currentAudio = null;
-      stopTalkingAnimation();
-    }
-    document.getElementById("userInput").value = "";
-    recognition.start();
   }
 }
 
