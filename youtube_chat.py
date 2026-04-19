@@ -15,6 +15,8 @@ except ImportError:
     YOUTUBE_API_AVAILABLE = False
     print("[YouTube] google-api-python-client not installed. YouTube polling disabled.")
 
+from config import OWNER_YOUTUBE_ID
+
 # ========================
 # Config
 # ========================
@@ -31,6 +33,7 @@ _MENTION_RE = re.compile(
 )
 
 # Priority score — message có score cao hơn được xử lý trước
+PRIORITY_OWNER = 100            # chủ kênh tự comment (highest)
 PRIORITY_MENTION = 10
 PRIORITY_TOP_VIEWER = 5         # viewer có affinity >= 2.0
 PRIORITY_NORMAL = 1
@@ -253,6 +256,7 @@ class YouTubeChatPoller:
 
         # Tính priority score
         priority = self._score_message(message_text, sender_id, sender_name)
+        is_owner = priority == PRIORITY_OWNER
 
         chat_event = {
             "message":     message_text,
@@ -260,8 +264,9 @@ class YouTubeChatPoller:
             "sender_name": sender_name,
             "platform":    "youtube",
             "channel_id":  self._live_chat_id,
-            "role":        "viewer",
+            "role":        "owner" if is_owner else "viewer",
             "is_donor":    False,
+            "is_owner":    is_owner,
             "priority":    priority,
             "timestamp":   snippet.get("publishedAt", datetime.now().isoformat()),
         }
@@ -278,6 +283,9 @@ class YouTubeChatPoller:
         Tính priority score cho message.
         Cao hơn = được xử lý trước.
         """
+        if OWNER_YOUTUBE_ID and sender_id == OWNER_YOUTUBE_ID:
+            return PRIORITY_OWNER
+
         score = PRIORITY_NORMAL
         msg_lower = message.lower()
 
