@@ -6,6 +6,8 @@ import json
 import random
 import requests
 import re
+import threading
+import time
 from datetime import datetime
 from duckduckgo_search import DDGS
 
@@ -55,6 +57,7 @@ from emotion import EmotionEngine
 from memory import MemorySystem
 from vbrain import parse_vbrain_response
 from conversation_state import ConversationStateDetector
+from skill_synthesizer import SkillSynthesizer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -98,6 +101,13 @@ class MiniAI:
 
         self.current_time = get_vietnam_time()
         self.time_period = get_time_period(self.current_time.hour)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # PHASE 2 — SKILL SYSTEM
+        # ══════════════════════════════════════════════════════════════════════
+        self.skills_dir = os.path.join(BASE_DIR, "skills")
+        self._skills_index = self._load_skill_index()
+        self.synthesizer = SkillSynthesizer(self.skills_dir)
         self.last_message_time = self.memory.memory.get("time_tracking", {}).get("last_message_time")
         self.time_gap_hours = calculate_time_gap(
             self.last_message_time, self.current_time
@@ -477,7 +487,12 @@ class MiniAI:
                         f"\n\n[SEARCH RESULTS]\n{search_results}\n[/SEARCH RESULTS]\n"
                     )
 
-        system_prompt = self.build_prompt(intent, user_input, search_context, source_type=source_type, viewer_data=viewer_data, stream_context=stream_context)
+        system_prompt = self.build_prompt(
+            intent, user_input, search_context, 
+            source_type=source_type, 
+            viewer_data=viewer_data, 
+            stream_context=stream_context
+        )
         composed = self.compose_user_message(user_input, intent)
 
         api_messages = [{"role": "system", "content": system_prompt}]
@@ -501,6 +516,41 @@ class MiniAI:
 
         if content:
             parsed = parse_vbrain_response(content)
+            
+            # ── Skill Trigger Logic (Recursive) ───────────────────────────────
+            # Cho phép Lyra gọi tối đa 2 skill liên tiếp nếu cần
+            skill_depth = 0
+            while parsed.get("skill_needed") and skill_depth < 2:
+                skill_name = parsed["skill_needed"]
+                skill_content = self._load_skill_content(skill_name)
+                
+                if skill_content:
+                    print(f"[Skill] Loading skill: {skill_name} (depth {skill_depth+1})")
+                    self._log_skill_usage(skill_name)
+                    
+                    # Re-build prompt với nội dung skill mới
+                    system_prompt = self.build_prompt(
+                        intent, user_input, search_context,
+                        source_type=source_type,
+                        viewer_data=viewer_data,
+                        stream_context=stream_context,
+                        loaded_skill_content=skill_content
+                    )
+                    api_messages[0]["content"] = system_prompt
+                    
+                    # Gọi model lần N với kiến thức mới
+                    content = self._call_model(
+                        api_messages, temperature=dynamic_temperature, max_tokens=dynamic_max_tokens
+                    )
+                    if content:
+                        parsed = parse_vbrain_response(content)
+                    else:
+                        break
+                    skill_depth += 1
+                else:
+                    # Skill không tồn tại hoặc lỗi load
+                    break
+
             reply = parsed.get("reply", "...")
             self.current_vbrain = parsed
         else:
@@ -578,15 +628,21 @@ class MiniAI:
             self.memory.memory["conversation"]["conversation_thread"].append({"role": "assistant", "content": original_reply})
 
             self.memory.memory["conversation"]["total_messages"] = self.turn_counter
-            self.memory.memory["conversation"]["conversation_count"] += 1
-            self.memory.memory["time_tracking"]["last_message_time"] = (
-                self.current_time.isoformat()
-            )
             self.memory.memory["time_tracking"]["time_gap_hours"] = self.time_gap_hours or 0
             self.memory.memory["relationship"]["current_affection"] = self.emotion.affection
 
             self.memory._is_dirty = True
             self.memory.save()
+
+            # ── Auto-learning (Skill Synthesis) ────────────────────────────────
+            # Thử đúc kết skill mới mỗi 25 lượt chat
+            if self.turn_counter % 25 == 0:
+                def _run_synthesis():
+                    new_skill = self.synthesizer.synthesize(self.messages[:], self)
+                    if new_skill:
+                        self._skills_index = self._load_skill_index()
+                
+                threading.Thread(target=_run_synthesis, daemon=True).start()
 
         emotion = self.current_vbrain.get("emotion", self.emotion.emotion_from_state())
         action = self.current_vbrain.get("action", "NONE")
@@ -1075,54 +1131,49 @@ class MiniAI:
             )
             conn.commit()
 
-    def _build_source_context(self, source_type: str, viewer_data: dict = None) -> str:
-        """Tạo context block phân biệt owner vs viewer để inject vào prompt"""
-        if source_type == "owner":
-            name = self.memory.memory.get("user_profile", {}).get("name", "")
-            name_str = f" ({name})" if name else ""
-            return (
-                f"[NGƯỜI DÙNG: CHỦ KÊNH{name_str}]\n"
-                f"Đây là chủ kênh đang nói chuyện trực tiếp qua mic. Ưu tiên cao nhất.\n"
-                f"Affection: {int(self.emotion.affection)}/100. Trả lời tự nhiên như bình thường."
-            )
-        elif source_type == "regular_viewer":
-            vname = viewer_data.get("viewer_name", "Viewer") if viewer_data else "Viewer"
-            streams = viewer_data.get("total_streams", 1) if viewer_data else 1
-            aff = viewer_data.get("affection", 35) if viewer_data else 35
-            return (
-                f"[NGƯỜI DÙNG: VIEWER QUEN — {vname}]\n"
-                f"Đã xem {streams} buổi stream. Affection: {aff}/100.\n"
-                f"Nhận ra họ, thân thiện hơn viewer lạ, nhưng vẫn giữ vibe streamer."
-            )
-        elif source_type == "donor":
-            vname = viewer_data.get("viewer_name", "Viewer") if viewer_data else "Viewer"
-            amount = viewer_data.get("amount", "") if viewer_data else ""
-            amount_str = f" {amount}" if amount else ""
-            return (
-                f"[SỰ KIỆN: DONATE — {vname}{amount_str}]\n"
-                f"Cảm ơn chân thành, đọc tên họ, react tự nhiên và ấm áp."
-            )
-        else:  # new_viewer
-            vname = viewer_data.get("viewer_name", "Viewer") if viewer_data else "Viewer"
-            return (
-                f"[NGƯỜI DÙNG: VIEWER MỚI — {vname}]\n"
-                f"Viewer chưa quen. Thân thiện nhưng giữ khoảng cách vừa phải. Affection: 10/100."
-            )
+    def _load_skill_index(self) -> str:
+        index_path = os.path.join(self.skills_dir, "_index.md")
+        if os.path.exists(index_path):
+            with open(index_path, "r", encoding="utf-8") as f:
+                return f.read()
+        return ""
 
-    def build_prompt(self, intent, user_input, search_context="", source_type: str = "owner", viewer_data: dict = None, stream_context: str = ""):
-        basic_ctx = self.memory.get_context(user_input)
-        rag_ctx   = self.memory.get_relevant_context(user_input)
-        memory_context = "\n\n".join(filter(None, [basic_ctx, rag_ctx]))
-        time_context = get_time_context(self.current_time, self.time_period)
+    def _load_skill_content(self, skill_name: str) -> str:
+        # Bảo mật: chỉ cho phép ký tự b-z và _
+        safe_name = re.sub(r'[^a-zA-Z0-9_]', '', skill_name)
+        skill_path = os.path.join(self.skills_dir, f"{safe_name}.md")
+        if os.path.exists(skill_path):
+            with open(skill_path, "r", encoding="utf-8") as f:
+                return f.read()
+        return ""
 
-        # Chọn base personality theo source_type
-        # Viewer/stream dùng STREAM_VIEWER_PERSONALITY — aware đang stream, không intimate
-        # Owner dùng NATURAL_BASE_PERSONALITY — private 1-1
+    def _log_skill_usage(self, skill_name: str):
+        """Cập nhật thống kê sử dụng skill vào JSON"""
+        stats_path = os.path.join(self.skills_dir, "skill_stats.json")
+        stats = {}
+        if os.path.exists(stats_path):
+            try:
+                with open(stats_path, "r", encoding="utf-8") as f:
+                    stats = json.load(f)
+            except Exception:
+                pass
+        
+        entry = stats.get(skill_name, {"call_count": 0, "first_used": time.time(), "description": "Kỹ năng tự học"})
+        entry["call_count"] += 1
+        entry["last_used"] = time.time()
+        stats[skill_name] = entry
+
+        with open(stats_path, "w", encoding="utf-8") as f:
+            json.dump(stats, f, indent=2)
+
+    def build_prompt(self, intent, user_input, search_context="", source_type: str = "owner", viewer_data: dict = None, stream_context: str = "", loaded_skill_content: str = ""):
+        # ── TIER 0: STATIC & FRAMEWORK (Always first for caching) ───────────
         if source_type == "owner":
             base_personality = NATURAL_BASE_PERSONALITY
         else:
             base_personality = STREAM_VIEWER_PERSONALITY
 
+        # ── TIER 1: SESSION & RELATIONSHIP (Semi-dynamic) ───────────────────
         relationship_hint = (
             RELATIONSHIP_HINTS["very_close"]
             if self.emotion.affection > 70
@@ -1130,6 +1181,19 @@ class MiniAI:
             if self.emotion.affection > 40
             else RELATIONSHIP_HINTS["new"]
         )
+
+        # Source type context — phân biệt owner vs viewer
+        source_context = self._build_source_context(source_type, viewer_data)
+        
+        # Stream context
+        _stream_ctx = stream_context or getattr(self, "stream_context", "") or ""
+
+        # ── TIER 2: DYNAMIC CONTEXT (Changes every message) ────────────────
+        basic_ctx = self.memory.get_context(user_input)
+        rag_ctx   = self.memory.get_relevant_context(user_input)
+        memory_context = "\n\n".join(filter(None, [basic_ctx, rag_ctx, search_context]))
+        
+        time_context = get_time_context(self.current_time, self.time_period)
 
         mood_hint = ""
         if self.emotion.mood > 5:
@@ -1156,12 +1220,11 @@ class MiniAI:
                 last_reply = msg.get("content", "")[:60]
                 break
 
-        # Pattern-based anti-repetition: block repeated sentence starters
+        # Pattern-based anti-repetition
         recent_patterns = set()
         for msg in self.messages[-6:]:
             if isinstance(msg, dict) and msg.get("role") == "assistant":
                 content = msg.get("content", "")
-                # Extract the first 3 words as a pattern signature
                 words = content.strip().split()[:3]
                 if words:
                     recent_patterns.add(" ".join(words).lower())
@@ -1172,10 +1235,6 @@ class MiniAI:
         if recent_patterns:
             anti_repeat_note += f"\n- Avoid starting with any of these patterns used recently: {list(recent_patterns)}."
 
-        # Stream context từ ViewerTracker — truyền qua tham số, không dùng self attribute
-        _stream_ctx = stream_context or getattr(self, "stream_context", "") or ""
-
-        # L2 Session Memory — chỉ inject khi đang stream (có stream_context)
         _session_ctx = ""
         if _stream_ctx:
             _session_ctx = self.memory.get_session_context()
@@ -1185,44 +1244,35 @@ class MiniAI:
         rhythm_hint = self.conv_state.get_rhythm_hint()
         conv_hints  = "\n".join(filter(None, [state_hint, rhythm_hint]))
 
-        # Source type context — phân biệt owner vs viewer
-        source_context = self._build_source_context(source_type, viewer_data)
+        # ASSEMBLY (Restructured for caching)
+        parts = [
+            base_personality,
+            VTUBER_BRAIN_INSTRUCTIONS,
+            "\n[AVAILABLE SKILLS]",
+            self._skills_index,
+            time_context,
+            "\n[SESSION INFO]",
+            source_context,
+            _stream_ctx,
+            relationship_hint,
+            "\n[PERSONALITY GUIDELINES]",
+            "- TRẢ LỜI BẰNG TIẾNG VIỆT. Không trả lời bằng tiếng Anh.",
+            "- Let warmth, teasing, distance, or softness emerge naturally.",
+            "- Be concise (1-2 sentences).",
+            anti_repeat_note,
+            conv_hints,
+            memory_context,
+            _session_ctx
+        ]
 
-        system_prompt = f"""{base_personality}
+        if loaded_skill_content:
+            parts.append("\n[LOADED SKILL CONTENT]")
+            parts.append(loaded_skill_content)
 
-{time_context}
+        parts.append(f"\nCurrent status:\n- Intent: {intent}")
+        
+        return "\n".join(filter(None, parts))
 
-Conversation principles:
-- TRẢ LỜI BẰNG TIẾNG VIỆT. Không trả lời bằng tiếng Anh hay bất kỳ ngôn ngữ nào khác.
-- Người dùng có thể viết tiếng Việt hoặc tiếng Anh, nhưng bạn LUÔN trả lời bằng tiếng Việt.
-- Treat the latest user message as the main thing that matters.
-- Use memory only when it is genuinely relevant.
-- Let warmth, teasing, distance, or softness emerge from the moment.
-- Do not mention hidden context tags, internal state, summaries, or memory directly.
-- Do not force a greeting just because time passed.
-- Do not force a question at the end.
-- BE CONCISE: Stop immediately after 1-2 short sentences. No rambling, no over-explaining, no filler.
-- A little messiness is fine. Repetition and over-performance are not.
-- You are an AI: you do not eat, sleep, or share physical experiences with the user. Never pretend you do.
-{anti_repeat_note}
-{conv_hints}
-
-Current state:
-- User signal: {self.infer_user_signal(user_input)}
-- Detected intent: {intent}
-{("- " + self.get_reflection_hint(user_input)) if self.get_reflection_hint(user_input) else ""}
-
-{memory_context}
-{search_context}
-{_session_ctx}
-{_stream_ctx}
-{source_context}
-
-{VTUBER_BRAIN_INSTRUCTIONS}
-"""
-        # Xóa legacy attribute nếu còn tồn tại
-        self.stream_context = ""
-        return system_prompt
 
     def compose_user_message(self, user_input, intent):
         parts = ["<context>"]

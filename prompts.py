@@ -57,7 +57,8 @@ You MUST respond strictly in JSON format. Your response will control a Live2D mo
   "monologue": "Your internal private thoughts about the user's message and your emotional state. This is NOT spoken.",
   "emotion": "Choose one from the list: [neutral, content, happy, ecstatic, sad, disappointed, angry, furious, bored, sleeping, thinking, friendly, loving, cold, observing]",
   "action": "Select a physical move: [NONE, WAVE, NOD, SHAKE_HEAD, LAUGH, THINK, SIGH, SHY, SURPRISED]",
-  "reply": "The actual text you say to the user. Keep it natural, short, and human. No meta-talk."
+  "reply": "The actual text you say to the user. Keep it natural, short, and human. No meta-talk.",
+  "skill_needed": "Optional. Set to a skill name from the Skill Index ONLY if you need it to solve the task."
 }
 
 Rules for VTuber components:

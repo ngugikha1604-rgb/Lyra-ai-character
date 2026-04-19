@@ -14,6 +14,7 @@ def parse_vbrain_response(content):
         "emotion": "neutral",
         "action": "NONE",
         "reply": content,
+        "skill_needed": None,
     }
 
     clean_content = content.replace("```json", "").replace("```", "").strip()
@@ -38,6 +39,11 @@ def parse_vbrain_response(content):
         pass
 
     # Final fallback: text extraction if JSON fails completely
+    # Try to find skill_needed via regex first
+    skill_match = re.search(r'"skill_needed":\s*"(.*?)"', clean_content)
+    if skill_match:
+        default_res["skill_needed"] = skill_match.group(1)
+
     lines = clean_content.split('\n')
     cleaned_lines = []
     for line in lines:
