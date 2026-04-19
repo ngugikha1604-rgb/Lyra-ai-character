@@ -1,603 +1,746 @@
 <!DOCTYPE html>
 <html>
+
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Lyra Stream</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lyra Stream</title>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/6.5.8/browser/pixi.min.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/dylanNew/live2d/webgl/Live2D/lib/live2d.min.js"></script>
-<script src="/static/live2d/live2dcubismcore.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/6.5.8/browser/pixi.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/dylanNew/live2d/webgl/Live2D/lib/live2d.min.js"></script>
+  <script src="/static/live2d/live2dcubismcore.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/index.min.js"></script>
 
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
 
-html, body {
-  width: 100%;
-  height: 100%;
-  background: transparent;
-  overflow: hidden;
-}
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      overflow: hidden;
+    }
 
-#live2dCanvas {
-  display: block;
-  position: fixed;
-  top: 0; left: 0;
-  background: transparent !important;
-}
+    #live2dCanvas {
+      display: block;
+      position: fixed;
+      top: 0;
+      left: 0;
+      background: transparent !important;
+    }
 
-#emotionFilterOverlay {
-  position: fixed;
-  top: 0; left: 0;
-  width: 100%; height: 100%;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.6s ease, background-color 0.6s ease;
-  mix-blend-mode: screen;
-  z-index: 5;
-}
+    #emotionFilterOverlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.6s ease, background-color 0.6s ease;
+      mix-blend-mode: screen;
+      z-index: 5;
+    }
 
-/* Monologue bubble hiện phía trên model */
-.monologue-overlay {
-  position: fixed;
-  top: 8%;
-  width: 80%;
-  left: 10%;
-  display: flex;
-  justify-content: center;
-  z-index: 20;
-  pointer-events: none;
-  perspective: 1000px;
-}
-.monologue-text {
-  background: rgba(0, 0, 0, 0.6);
-  backdrop-filter: blur(8px);
-  border: 1px solid rgba(0, 245, 255, 0.3);
-  color: #00f5ff;
-  padding: 12px 22px;
-  border-radius: 20px;
-  font-family: 'Segoe UI', Roboto, sans-serif;
-  font-style: italic;
-  font-size: 15px;
-  text-align: center;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-  opacity: 0;
-  transform: translateY(20px) rotateX(-20deg);
-  transition: all 0.6s cubic-bezier(0.23, 1, 0.32, 1);
-  max-width: 420px;
-}
-.monologue-text.active {
-  opacity: 1;
-  transform: translateY(0) rotateX(0deg);
-}
+    /* Monologue bubble hiện phía trên model */
+    .monologue-overlay {
+      position: fixed;
+      top: 8%;
+      width: 80%;
+      left: 10%;
+      display: flex;
+      justify-content: center;
+      z-index: 20;
+      pointer-events: none;
+      perspective: 1000px;
+    }
 
-/* Mic status indicator nhỏ ở góc */
-#micStatus {
-  position: fixed;
-  bottom: 18px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: rgba(0,0,0,0.5);
-  border: 1px solid rgba(0,245,255,0.25);
-  border-radius: 20px;
-  padding: 5px 14px;
-  font-family: 'Segoe UI', sans-serif;
-  font-size: 12px;
-  color: rgba(160,200,255,0.7);
-  z-index: 30;
-  pointer-events: none;
-  transition: opacity 0.4s;
-}
-#micStatus.hidden { opacity: 0; }
-</style>
+    .monologue-text {
+      background: rgba(0, 0, 0, 0.6);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(0, 245, 255, 0.3);
+      color: #00f5ff;
+      padding: 12px 22px;
+      border-radius: 20px;
+      font-family: 'Segoe UI', Roboto, sans-serif;
+      font-style: italic;
+      font-size: 15px;
+      text-align: center;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      opacity: 0;
+      transform: translateY(20px) rotateX(-20deg);
+      transition: all 0.6s cubic-bezier(0.23, 1, 0.32, 1);
+      max-width: 420px;
+    }
+
+    .monologue-text.active {
+      opacity: 1;
+      transform: translateY(0) rotateX(0deg);
+    }
+
+    /* Mic status indicator nhỏ ở góc */
+    #micStatus {
+      position: fixed;
+      bottom: 18px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(0, 245, 255, 0.25);
+      border-radius: 20px;
+      padding: 5px 14px;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 12px;
+      color: rgba(160, 200, 255, 0.7);
+      z-index: 30;
+      pointer-events: none;
+      transition: opacity 0.4s;
+    }
+
+    #micStatus.hidden {
+      opacity: 0;
+    }
+
+    #systemStatus {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      max-width: 360px;
+      background: rgba(0, 0, 0, 0.7);
+      border: 1px solid rgba(255, 180, 120, 0.35);
+      border-radius: 14px;
+      padding: 8px 12px;
+      font-family: 'Segoe UI', sans-serif;
+      font-size: 12px;
+      color: rgba(255, 230, 210, 0.92);
+      z-index: 35;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s ease;
+    }
+
+    #systemStatus.active {
+      opacity: 1;
+    }
+  </style>
 </head>
 
 <body>
 
-<div id="emotionFilterOverlay"></div>
+  <div id="emotionFilterOverlay"></div>
 
-<div class="monologue-overlay" id="monologueOverlay">
-  <div class="monologue-text" id="monologueText"></div>
-</div>
+  <div class="monologue-overlay" id="monologueOverlay">
+    <div class="monologue-text" id="monologueText"></div>
+  </div>
 
-<canvas id="live2dCanvas"></canvas>
+  <canvas id="live2dCanvas"></canvas>
 
-<div id="micStatus" class="hidden">🎤 Đang nghe...</div>
+  <div id="micStatus" class="hidden">🎤 Đang nghe...</div>
+  <div id="systemStatus"></div>
 
-<script>
+  <script>
 
-/* ==================== LIVE2D SETUP ==================== */
+    /* ==================== LIVE2D SETUP ==================== */
 
-const canvas = document.getElementById("live2dCanvas");
+    const canvas = document.getElementById("live2dCanvas");
 
-// Tạo WebGL context với alpha thật sự transparent
-const gl = canvas.getContext("webgl", { alpha: true, premultipliedAlpha: false })
-           || canvas.getContext("experimental-webgl", { alpha: true, premultipliedAlpha: false });
+    // Tạo WebGL context với alpha thật sự transparent
+    const gl = canvas.getContext("webgl", { alpha: true, premultipliedAlpha: false })
+      || canvas.getContext("experimental-webgl", { alpha: true, premultipliedAlpha: false });
 
-const app = new PIXI.Application({
-  view: canvas,
-  width: window.innerWidth,
-  height: window.innerHeight,
-  transparent: true,
-  backgroundAlpha: 0,
-  clearBeforeRender: true,
-  antialias: true,
-  resolution: window.devicePixelRatio || 1,
-  autoDensity: true,
-  context: gl,
-});
-
-let model;
-
-function repositionModel() {
-  if (!model) return;
-  const w = window.innerWidth, h = window.innerHeight;
-  app.renderer.resize(w, h);
-  model.x = w / 2;
-  model.y = h - 10;
-  model.scale.set(0.07);
-}
-window.addEventListener("resize", repositionModel);
-
-window.addEventListener("load", async () => {
-  try {
-    model = await PIXI.live2d.Live2DModel.from("/static/live2d/fuxuan/fuxuan.model3.json");
-    app.stage.addChild(model);
-    model.anchor.set(0.5, 1);
-    model.scale.set(0.07);
-    setTimeout(repositionModel, 100);
-    startIdleAnimations();
-    startBlinking();
-    await initializeChatState();
-    // Bắt đầu vòng lặp mic sau khi mọi thứ sẵn sàng
-    setTimeout(startMicLoop, 1500);
-  } catch (err) {
-    console.error("Live2D load error:", err);
-  }
-});
-
-function setParam(id, value) {
-  if (!model) return;
-  try {
-    const core = model.internalModel.coreModel;
-    const index = core._parameterIds.indexOf(id);
-    if (index !== -1) core.setParameterValueByIndex(index, value);
-  } catch (e) { /* ignore */ }
-}
-
-/* ==================== STATE ==================== */
-
-async function initializeChatState() {
-  try {
-    const res = await fetch("/status");
-    if (!res.ok) return;
-    applyChatState(await res.json());
-  } catch (e) { console.warn("Could not init chat state:", e); }
-}
-
-function applyChatState(data) {
-  if (data.emotion) {
-    reactToEmotion(data.emotion);
-  }
-  if (data.action && data.action !== "NONE") triggerAction(data.action);
-  if (data.monologue) showMonologue(data.monologue);
-}
-
-function showMonologue(text) {
-  const el = document.getElementById("monologueText");
-  el.innerText = text;
-  el.classList.remove("active");
-  void el.offsetWidth;
-  el.classList.add("active");
-  if (window.monologueTimeout) clearTimeout(window.monologueTimeout);
-  window.monologueTimeout = setTimeout(() => el.classList.remove("active"), 6000);
-}
-
-/* ==================== TTS ==================== */
-
-let currentAudio = null;
-let talkingInterval = null;
-let audioContext = null;
-let isSpeaking = false;
-
-async function speakText(text) {
-  try {
-    isSpeaking = true;
-    const res = await fetch("/speak", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text })
-    });
-    if (!res.ok) { isSpeaking = false; return; }
-
-    const audioBlob = await res.blob();
-    const audioUrl = URL.createObjectURL(audioBlob);
-
-    if (currentAudio) { currentAudio.pause(); URL.revokeObjectURL(currentAudio.src); currentAudio = null; stopTalkingAnimation(); }
-    if (audioContext) { audioContext.close(); audioContext = null; }
-
-    audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    const analyser = audioContext.createAnalyser();
-    analyser.fftSize = 256;
-    const dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-    currentAudio = new Audio(audioUrl);
-    currentAudio.crossOrigin = "anonymous";
-    const source = audioContext.createMediaElementSource(currentAudio);
-    source.connect(analyser);
-    analyser.connect(audioContext.destination);
-
-    currentAudio.addEventListener("play", () => startLipSync(analyser, dataArray));
-    currentAudio.addEventListener("ended", () => {
-      stopTalkingAnimation();
-      if (audioContext) { audioContext.close(); audioContext = null; }
-      URL.revokeObjectURL(audioUrl);
-      currentAudio = null;
-      isSpeaking = false;
-      // Sau khi Lyra nói xong → bật mic lại
-      startListening();
-    });
-    currentAudio.addEventListener("error", () => {
-      stopTalkingAnimation();
-      if (audioContext) { audioContext.close(); audioContext = null; }
-      currentAudio = null;
-      isSpeaking = false;
-      startListening();
+    const app = new PIXI.Application({
+      view: canvas,
+      width: window.innerWidth,
+      height: window.innerHeight,
+      transparent: true,
+      backgroundAlpha: 0,
+      clearBeforeRender: true,
+      antialias: true,
+      resolution: window.devicePixelRatio || 1,
+      autoDensity: true,
+      context: gl,
     });
 
-    await currentAudio.play();
-  } catch (err) {
-    console.error("TTS error:", err);
-    isSpeaking = false;
-    startListening();
-  }
-}
+    let model;
 
-/* ==================== CHAT ==================== */
-
-let isLoading = false;
-
-async function sendMessage(text) {
-  if (!text || isLoading) return;
-  isLoading = true;
-
-  try {
-    const res = await fetch("/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text })
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    applyChatState(data);
-    if (data.reply) {
-      showMonologue(data.reply);
-      await speakText(data.reply);
-    } else {
-      isLoading = false;
-      startListening();
+    function repositionModel() {
+      if (!model) return;
+      const w = window.innerWidth, h = window.innerHeight;
+      app.renderer.resize(w, h);
+      model.x = w / 2;
+      model.y = h - 10;
+      model.scale.set(0.07);
     }
-  } catch (e) {
-    console.error("Chat error:", e);
-    isLoading = false;
-    startListening();
-  }
-}
+    window.addEventListener("resize", repositionModel);
 
-/* ==================== PROACTIVE MESSAGING ==================== */
-
-const PROACTIVE_INTERVAL = 5 * 60 * 1000;
-
-setTimeout(() => {
-  setInterval(async () => {
-    if (isLoading || isSpeaking || isListening) return;
-    try {
-      const res = await fetch("/proactive");
-      if (!res.ok) return;
-      const data = await res.json();
-      if (data.should_show && data.message) {
-        applyChatState(data);
-        showMonologue(data.message);
-        await speakText(data.message);
+    window.addEventListener("load", async () => {
+      try {
+        model = await PIXI.live2d.Live2DModel.from("/static/live2d/fuxuan/fuxuan.model3.json");
+        app.stage.addChild(model);
+        model.anchor.set(0.5, 1);
+        model.scale.set(0.07);
+        setTimeout(repositionModel, 100);
+        startIdleAnimations();
+        startBlinking();
+        await initializeChatState();
+        // Bắt đầu vòng lặp mic sau khi mọi thứ sẵn sàng
+        setTimeout(startMicLoop, 1500);
+      } catch (err) {
+        console.error("Live2D load error:", err);
       }
-    } catch (e) { console.warn("Proactive poll error:", e); }
-  }, PROACTIVE_INTERVAL);
-}, PROACTIVE_INTERVAL);
+    });
 
-/* ==================== SPEECH RECOGNITION (STT) ==================== */
-
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognition = null;
-let isListening = false;
-
-if (SpeechRecognition) {
-  recognition = new SpeechRecognition();
-  recognition.lang = 'vi-VN';
-  recognition.continuous = false;
-  recognition.interimResults = false;
-
-  recognition.onstart = () => {
-    isListening = true;
-    showMicStatus(true);
-  };
-
-  recognition.onresult = (event) => {
-    let final = "";
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      if (event.results[i].isFinal) final += event.results[i][0].transcript;
+    function setParam(id, value) {
+      if (!model) return;
+      try {
+        const core = model.internalModel.coreModel;
+        const index = core._parameterIds.indexOf(id);
+        if (index !== -1) core.setParameterValueByIndex(index, value);
+      } catch (e) { /* ignore */ }
     }
-    if (final.trim()) {
-      isLoading = false; // reset trước khi gửi
-      sendMessage(final.trim());
+
+    /* ==================== STATE ==================== */
+
+    async function initializeChatState() {
+      try {
+        const res = await fetch("/status");
+        if (!res.ok) return;
+        applyChatState(await res.json());
+      } catch (e) { console.warn("Could not init chat state:", e); }
     }
-  };
 
-  recognition.onend = () => {
-    isListening = false;
-    showMicStatus(false);
-    // Nếu không có kết quả và không đang xử lý → bật lại mic sau 1s
-    if (!isLoading && !isSpeaking) {
-      setTimeout(startListening, 1000);
+    function applyChatState(data) {
+      debugLog("STATE", {
+        emotion: data.emotion,
+        action: data.action,
+        reply: data.reply || "",
+        monologue: data.monologue || "",
+      });
+      if (data.emotion) {
+        reactToEmotion(data.emotion);
+      }
+      if (data.action && data.action !== "NONE") triggerAction(data.action);
+      if (data.monologue) showMonologue(data.monologue);
     }
-  };
 
-  recognition.onerror = (event) => {
-    console.warn("[STT] Error:", event.error);
-    isListening = false;
-    showMicStatus(false);
-    if (!isLoading && !isSpeaking) {
-      setTimeout(startListening, 2000);
+    function showMonologue(text) {
+      debugLog("LYRA THINKING", text);
+      const el = document.getElementById("monologueText");
+      el.innerText = text;
+      el.classList.remove("active");
+      void el.offsetWidth;
+      el.classList.add("active");
+      if (window.monologueTimeout) clearTimeout(window.monologueTimeout);
+      window.monologueTimeout = setTimeout(() => el.classList.remove("active"), 6000);
     }
-  };
-}
 
-function startListening() {
-  if (!recognition || isListening || isSpeaking || isLoading) return;
-  try {
-    recognition.start();
-  } catch (e) {
-    // Đã đang chạy hoặc lỗi khác — thử lại sau
-    setTimeout(startListening, 1500);
-  }
-}
+    /* ==================== TTS ==================== */
 
-function startMicLoop() {
-  startListening();
-}
+    let currentAudio = null;
+    let talkingInterval = null;
+    let audioContext = null;
+    let isSpeaking = false;
 
-function showMicStatus(active) {
-  const el = document.getElementById("micStatus");
-  if (active) {
-    el.classList.remove("hidden");
-  } else {
-    el.classList.add("hidden");
-  }
-}
-
-/* ==================== YOUTUBE STREAM SSE ==================== */
-
-const streamEvents = new EventSource("/stream/events");
-
-streamEvents.onmessage = (e) => {
-  try {
-    const data = JSON.parse(e.data);
-    if (data.type === "connected") return;
-    applyChatState(data);
-    if (data.reply) {
-      showMonologue(data.reply);
-      speakText(data.reply);
+    function debugLog(label, payload) {
+      const time = new Date().toLocaleTimeString();
+      console.log(`[Lyra Debug ${time}] ${label}`, payload);
     }
-  } catch (err) {
-    console.warn("SSE parse error:", err);
-  }
-};
 
-streamEvents.onerror = () => {
-  console.warn("[SSE] Connection lost, will retry automatically.");
-};
+    function showSystemStatus(text, duration = 5000) {
+      const el = document.getElementById("systemStatus");
+      if (!el) return;
+      el.textContent = text;
+      el.classList.add("active");
+      if (window.systemStatusTimeout) clearTimeout(window.systemStatusTimeout);
+      window.systemStatusTimeout = setTimeout(() => {
+        el.classList.remove("active");
+      }, duration);
+    }
 
-/* ==================== EMOTIONS ==================== */
+    async function speakText(text) {
+      let audioUrl = null;
+      try {
+        debugLog("TTS REQUEST", text);
+        isSpeaking = true;
+        const res = await fetch("/speak", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text })
+        });
+        if (!res.ok) {
+          const detail = await res.text().catch(() => "");
+          throw new Error(`TTS HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
+        }
 
-let currentEmotion = "neutral";
-let blinkInterval;
-let isTalking = false;
+        const audioBlob = await res.blob();
+        debugLog("TTS RESPONSE", { ok: true, size: audioBlob.size, type: audioBlob.type });
+        audioUrl = URL.createObjectURL(audioBlob);
 
-const emotionMap = {
-  "neutral":      { eyeLOpen:1,    eyeROpen:1,    eyeBallX:0, eyeBallY:0,    browLY:0,    browRY:0,    browLForm:0,    browRForm:0,    mouthForm:0,    mouthOpen:0,    filterColor:"rgba(255,255,255,0)", filterOpacity:0,    swayAmplitude:1.0 },
-  "content":      { eyeLOpen:0.6,  eyeROpen:0.6,  eyeBallX:0, eyeBallY:-0.2, browLY:0.4,  browRY:0.4,  browLForm:0.3,  browRForm:0.3,  mouthForm:0.5,  mouthOpen:0.2,  filterColor:"rgba(100,220,180,1)", filterOpacity:0.15, swayAmplitude:1.1 },
-  "happy":        { eyeLOpen:0.4,  eyeROpen:0.4,  eyeBallX:0, eyeBallY:-0.1, browLY:0.6,  browRY:0.6,  browLForm:0.5,  browRForm:0.5,  mouthForm:0.9,  mouthOpen:0.4,  filterColor:"rgba(255,200,0,1)",   filterOpacity:0.25, swayAmplitude:1.6 },
-  "ecstatic":     { eyeLOpen:0.2,  eyeROpen:0.2,  eyeBallX:0, eyeBallY:-0.3, browLY:0.8,  browRY:0.8,  browLForm:0.7,  browRForm:0.7,  mouthForm:1.0,  mouthOpen:0.6,  filterColor:"rgba(255,215,0,1)",   filterOpacity:0.35, swayAmplitude:2.2 },
-  "sad":          { eyeLOpen:0.8,  eyeROpen:0.8,  eyeBallX:0, eyeBallY:0.3,  browLY:-0.6, browRY:-0.6, browLForm:-0.5, browRForm:-0.5, mouthForm:-0.9, mouthOpen:-0.4, filterColor:"rgba(100,150,220,1)", filterOpacity:0.25, swayAmplitude:0.4 },
-  "disappointed": { eyeLOpen:0.7,  eyeROpen:0.7,  eyeBallX:0, eyeBallY:0.2,  browLY:-0.4, browRY:-0.4, browLForm:-0.3, browRForm:-0.3, mouthForm:-0.5, mouthOpen:-0.2, filterColor:"rgba(120,160,180,1)", filterOpacity:0.18, swayAmplitude:0.5 },
-  "angry":        { eyeLOpen:1,    eyeROpen:1,    eyeBallX:0, eyeBallY:0,    browLY:-1.0, browRY:-1.0, browLForm:-0.8, browRForm:-0.8, mouthForm:-0.7, mouthOpen:0.2,  filterColor:"rgba(255,100,100,1)", filterOpacity:0.3,  swayAmplitude:1.8 },
-  "furious":      { eyeLOpen:1,    eyeROpen:1,    eyeBallX:0, eyeBallY:-0.1, browLY:-1.0, browRY:-1.0, browLForm:-1.0, browRForm:-1.0, mouthForm:-0.9, mouthOpen:0.3,  filterColor:"rgba(255,50,50,1)",   filterOpacity:0.4,  swayAmplitude:2.5 },
-  "bored":        { eyeLOpen:0.3,  eyeROpen:0.3,  eyeBallX:0, eyeBallY:0.4,  browLY:-0.5, browRY:-0.5, browLForm:-0.4, browRForm:-0.4, mouthForm:-0.5, mouthOpen:-0.3, filterColor:"rgba(80,80,100,1)",   filterOpacity:0.2,  swayAmplitude:0.3 },
-  "sleeping":     { eyeLOpen:0,    eyeROpen:0,    eyeBallX:0, eyeBallY:0,    browLY:-0.7, browRY:-0.7, browLForm:-0.3, browRForm:-0.3, mouthForm:0,    mouthOpen:-0.2, filterColor:"rgba(50,50,80,1)",    filterOpacity:0.3,  swayAmplitude:0.05 },
-  "thinking":     { eyeLOpen:0.9,  eyeROpen:0.9,  eyeBallX:0, eyeBallY:-0.6, browLY:1.0,  browRY:1.0,  browLForm:0.8,  browRForm:0.8,  mouthForm:0.2,  mouthOpen:-0.1, filterColor:"rgba(200,150,255,1)", filterOpacity:0.22, swayAmplitude:0.6 },
-  "friendly":     { eyeLOpen:0.65, eyeROpen:0.65, eyeBallX:0, eyeBallY:-0.25,browLY:0.5,  browRY:0.5,  browLForm:0.4,  browRForm:0.4,  mouthForm:0.8,  mouthOpen:0.3,  filterColor:"rgba(100,220,200,1)", filterOpacity:0.2,  swayAmplitude:1.4 },
-  "loving":       { eyeLOpen:0.35, eyeROpen:0.35, eyeBallX:0, eyeBallY:-0.3, browLY:0.7,  browRY:0.7,  browLForm:0.6,  browRForm:0.6,  mouthForm:0.95, mouthOpen:0.35, filterColor:"rgba(255,150,200,1)", filterOpacity:0.28, swayAmplitude:1.3 },
-  "cold":         { eyeLOpen:1,    eyeROpen:1,    eyeBallX:0, eyeBallY:0.1,  browLY:-0.6, browRY:-0.6, browLForm:-0.5, browRForm:-0.5, mouthForm:-0.4, mouthOpen:-0.1, filterColor:"rgba(100,200,255,1)", filterOpacity:0.25, swayAmplitude:0.2 },
-  "observing":    { eyeLOpen:1,    eyeROpen:1,    eyeBallX:0, eyeBallY:-0.05,browLY:0.2,  browRY:0.2,  browLForm:0.15, browRForm:0.15, mouthForm:0.1,  mouthOpen:0,    filterColor:"rgba(0,200,200,1)",   filterOpacity:0.12, swayAmplitude:0.7 },
-};
+        if (currentAudio) { currentAudio.pause(); URL.revokeObjectURL(currentAudio.src); currentAudio = null; stopTalkingAnimation(); }
+        if (audioContext) { audioContext.close(); audioContext = null; }
 
-/* ==================== MOUSE TRACKING ==================== */
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        // Fix G: Unlock AudioContext nếu bị suspend bởi browser autoplay policy
+        if (audioContext.state === "suspended") await audioContext.resume();
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
 
-let mouseX = 0, mouseY = 0;
-let currentAngleX = 0, currentAngleY = 0;
-const MOUSE_LERP = 0.05;
-const HEAD_ANGLE_X_MAX = 25;
-const HEAD_ANGLE_Y_MAX = 20;
+        currentAudio = new Audio(audioUrl);
+        const source = audioContext.createMediaElementSource(currentAudio);
+        source.connect(analyser);
+        analyser.connect(audioContext.destination);
 
-document.addEventListener("mousemove", (e) => {
-  mouseX = (e.clientX / window.innerWidth - 0.5) * 2;
-  mouseY = (e.clientY / window.innerHeight - 0.5) * 2;
-});
+        currentAudio.addEventListener("play", () => startLipSync(analyser, dataArray));
+        currentAudio.addEventListener("ended", () => {
+          stopTalkingAnimation();
+          if (audioContext) { audioContext.close(); audioContext = null; }
+          URL.revokeObjectURL(audioUrl);
+          currentAudio = null;
+          isSpeaking = false;
+          isLoading = false; // Fix B: reset để mic có thể bật lại sau TTS
+          startListening();
+        });
+        currentAudio.addEventListener("error", () => {
+          stopTalkingAnimation();
+          if (audioContext) { audioContext.close(); audioContext = null; }
+          if (audioUrl) URL.revokeObjectURL(audioUrl);
+          currentAudio = null;
+          isSpeaking = false;
+          isLoading = false; // Fix B: reset khi TTS lỗi
+          startListening();
+        });
 
-/* ==================== IDLE ANIMATIONS ==================== */
+        await currentAudio.play();
+      } catch (err) {
+        console.error("TTS error:", err);
+        debugLog("TTS ERROR", String(err && err.message ? err.message : err));
+        const msg = String(err && err.message ? err.message : err);
+        if (msg.includes("NotAllowedError") || msg.includes("user gesture")) {
+          showSystemStatus("TTS bị chặn bởi browser. Click vào trang một lần để bật audio.", 7000);
+        } else {
+          showSystemStatus(`TTS lỗi: ${msg.slice(0, 140)}`, 7000);
+        }
+        if (audioUrl) URL.revokeObjectURL(audioUrl);
+        currentAudio = null;
+        isSpeaking = false;
+        isLoading = false; // Fix B: reset khi TTS throw exception
+        startListening();
+      }
+    }
 
-let breathPhase = 0;
-let bodySwayPhase = 0;
-let idleAnimFrame = null;
-let currentSwayAmplitude = 1.0;
-let targetSwayAmplitude = 1.0;
-const SWAY_AMP_LERP = 0.02;
+    /* ==================== CHAT ==================== */
 
-function startIdleAnimations() {
-  if (idleAnimFrame) cancelAnimationFrame(idleAnimFrame);
+    let isLoading = false;
 
-  function idleLoop() {
-    if (!model) { idleAnimFrame = requestAnimationFrame(idleLoop); return; }
+    async function sendMessage(text) {
+      if (!text || isLoading) return;
+      debugLog("STT FINAL", text);
+      isLoading = true;
+      showMicStatus(true, "Đang chờ AI nghĩ...");
 
-    const targetAngleX = mouseX * HEAD_ANGLE_X_MAX;
-    const targetAngleY = -mouseY * HEAD_ANGLE_Y_MAX;
-    currentAngleX += (targetAngleX - currentAngleX) * MOUSE_LERP;
-    currentAngleY += (targetAngleY - currentAngleY) * MOUSE_LERP;
-    setParam("ParamAngleX", currentAngleX);
-    setParam("ParamAngleY", currentAngleY);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout /chat
 
-    currentSwayAmplitude += (targetSwayAmplitude - currentSwayAmplitude) * SWAY_AMP_LERP;
+      try {
+        const res = await fetch("/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: text }),
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        debugLog("CHAT RESPONSE", data);
+        applyChatState(data);
+        if (data.reply) {
+          debugLog("LYRA REPLY", data.reply);
+          showMonologue(data.reply);
+          await speakText(data.reply);
+        } else {
+          showSystemStatus("AI nhận được câu nói nhưng không tạo reply để đọc.", 5000);
+          isLoading = false;
+          startListening();
+        }
+      } catch (e) {
+        console.error("Chat error:", e);
+        showSystemStatus(`Chat lỗi: ${String(e && e.message ? e.message : e)}`, 7000);
+        isLoading = false;
+        startListening();
+      }
+    }
 
-    breathPhase += 0.008;
-    const breathValue = (Math.sin(breathPhase) + 1) / 2;
-    setParam("ParamBreath", breathValue);
-    setParam("ParamBodyAngleY", breathValue * 0.04 * currentSwayAmplitude);
+    /* ==================== PROACTIVE MESSAGING ==================== */
 
-    bodySwayPhase += 0.005;
-    const swayX = Math.sin(bodySwayPhase) * 2.5 * currentSwayAmplitude;
-    const swayZ = Math.sin(bodySwayPhase * 0.7) * 1.5 * currentSwayAmplitude;
-    setParam("ParamBodyAngleX", swayX);
-    setParam("ParamBodyAngleZ", swayZ);
-    setParam("ParamAngleZ", swayZ * 0.3);
+    const PROACTIVE_INTERVAL = 5 * 60 * 1000;
 
-    idleAnimFrame = requestAnimationFrame(idleLoop);
-  }
-  idleAnimFrame = requestAnimationFrame(idleLoop);
-}
-
-/* ==================== BLINKING ==================== */
-
-function startBlinking() {
-  clearInterval(blinkInterval);
-  blinkInterval = setInterval(() => {
-    const emotion = emotionMap[currentEmotion];
-    if (currentEmotion === "sleeping") return;
-    setParam("ParamEyeLOpen", 0);
-    setParam("ParamEyeROpen", 0);
     setTimeout(() => {
-      if (Math.random() < 0.2) {
+      setInterval(async () => {
+        if (isLoading || isSpeaking || isListening) return;
+        try {
+          const res = await fetch("/proactive");
+          if (!res.ok) return;
+          const data = await res.json();
+          if (data.should_show && data.message) {
+            applyChatState(data);
+            showMonologue(data.message);
+            await speakText(data.message);
+          }
+        } catch (e) { console.warn("Proactive poll error:", e); }
+      }, PROACTIVE_INTERVAL);
+    }, PROACTIVE_INTERVAL);
+
+    /* ==================== SPEECH RECOGNITION (STT) ==================== */
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition = null;
+    let isListening = false;
+
+    if (SpeechRecognition) {
+      recognition = new SpeechRecognition();
+
+      // Thêm Grammar List (nếu trình duyệt hỗ trợ) để ưu tiên từ khóa
+      const SpeechGrammarList = window.SpeechGrammarList || window.webkitSpeechGrammarList;
+      if (SpeechGrammarList) {
+        const speechRecognitionList = new SpeechGrammarList();
+        const grammar = '#JSGF V1.0; grammar names; public <name> = Lyra | Lai ra | Lira | Li ra ;';
+        speechRecognitionList.addFromString(grammar, 5);
+        recognition.grammars = speechRecognitionList;
+      }
+
+      recognition.lang = 'vi-VN';
+      recognition.continuous = false;
+      recognition.interimResults = true; // Fix A+D: hiển thị interim để debug và feedback realtime
+
+      recognition.onstart = () => {
+        isListening = true;
+        showMicStatus(true, "");
+      };
+
+      recognition.onresult = (event) => {
+        let interim = "";
+        let final = "";
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          if (event.results[i].isFinal) {
+            final += event.results[i][0].transcript;
+          } else {
+            interim += event.results[i][0].transcript;
+          }
+        }
+        // Fix D: Hiện live interim text lên mic indicator — xác nhận mic đang capture
+        if (interim) {
+          debugLog("STT INTERIM", interim);
+          showMicStatus(true, interim);
+        }
+
+        let finalTrimmed = final.trim();
+        if (finalTrimmed) {
+          // Fix 1: Sửa tên bị nhận diện sai bởi Web Speech API (Dùng cụm biến regex bao quát)
+          const lyraAliases = /L\u01b0u B\u00e1|Lisa|Eva|Liba|Lipa|Li ra|Ly ra|Lira|Lara|Layla|Leila|Lida|Liba|Lưu Bá|Lý Bá/gi;
+          finalTrimmed = finalTrimmed.replace(lyraAliases, "Lyra");
+
+          showMicStatus(true, finalTrimmed);
+          // Fix B/C: KHÔNG reset isLoading ở đây — để mutex sendMessage hoạt động đúng
+          // isLoading reset xảy ra sau khi TTS xong (trong speakText.ended handler)
+          sendMessage(finalTrimmed);
+        }
+      };
+
+      recognition.onend = () => {
+        isListening = false;
+        showMicStatus(false, "");
+        // Fix C: Chỉ restart nếu không đang xử lý/nói
+        // isLoading=true trong lúc đợi AI reply là bình thường — mic sẽ bật lại sau TTS
+        if (!isLoading && !isSpeaking) {
+          setTimeout(startListening, 800);
+        }
+      };
+
+      recognition.onerror = (event) => {
+        console.warn("[STT] Error:", event.error);
+        isListening = false;
+        showMicStatus(false, "");
+        // no-speech = im lặng thường, restart nhanh hơn; các lỗi khác chờ lâu hơn
+        const delay = event.error === "no-speech" ? 500 : 2000;
+        if (!isLoading && !isSpeaking) {
+          setTimeout(startListening, delay);
+        }
+      };
+    }
+
+    function startListening() {
+      return; // STT Hard Disabled
+    }
+
+    function startMicLoop() {
+      return; // STT Hard Disabled
+    }
+
+    // Fix D: showMicStatus hỗ trợ text parameter để hiện interim STT results
+    function showMicStatus(active, text) {
+      const el = document.getElementById("micStatus");
+      if (active) {
+        el.classList.remove("hidden");
+        el.textContent = text ? `🎤 ${text}` : "🎤 Đang nghe...";
+      } else {
+        el.classList.add("hidden");
+        el.textContent = "🎤 Đang nghe...";
+      }
+    }
+
+    // Fix G: Unlock AudioContext bằng user gesture lần đầu tiên click vào trang
+    // Sau đó mọi AudioContext instance tạo ra đều ở trạng thái running
+    let _audioContextUnlocked = false;
+    function unlockAudioOnce() {
+      if (_audioContextUnlocked) return;
+      _audioContextUnlocked = true;
+      const _ctx = new (window.AudioContext || window.webkitAudioContext)();
+      _ctx.resume().then(() => _ctx.close()).catch(() => { });
+    }
+    document.addEventListener("click", unlockAudioOnce);
+    document.addEventListener("pointerdown", unlockAudioOnce);
+    document.addEventListener("touchstart", unlockAudioOnce, { passive: true });
+    document.addEventListener("keydown", unlockAudioOnce);
+
+    /* ==================== CONSOLE CHAT BINDING ==================== */
+    // Hàm này cho phép bạn chat với Lyra trực tiếp từ F12 Console.
+    // Cách dùng: lyra("Chào em")
+    window.lyra = function(text) {
+      if (!text) return console.log("Vui lòng nhập nội dung");
+      console.log(">> Bạn: " + text);
+      sendMessage(text);
+    };
+
+    /* ==================== YOUTUBE STREAM SSE ==================== */
+
+    const streamEvents = new EventSource("/stream/events");
+
+    streamEvents.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === "connected") return;
+        applyChatState(data);
+        if (data.reply) {
+          showMonologue(data.reply);
+          speakText(data.reply);
+        }
+      } catch (err) {
+        console.warn("SSE parse error:", err);
+      }
+    };
+
+    streamEvents.onerror = () => {
+      console.warn("[SSE] Connection lost, will retry automatically.");
+    };
+
+    /* ==================== EMOTIONS ==================== */
+
+    let currentEmotion = "neutral";
+    let blinkInterval;
+    let isTalking = false;
+
+    const emotionMap = {
+      "neutral": { eyeLOpen: 1, eyeROpen: 1, eyeBallX: 0, eyeBallY: 0, browLY: 0, browRY: 0, browLForm: 0, browRForm: 0, mouthForm: 0, mouthOpen: 0, filterColor: "rgba(255,255,255,0)", filterOpacity: 0, swayAmplitude: 1.0 },
+      "content": { eyeLOpen: 0.6, eyeROpen: 0.6, eyeBallX: 0, eyeBallY: -0.2, browLY: 0.4, browRY: 0.4, browLForm: 0.3, browRForm: 0.3, mouthForm: 0.5, mouthOpen: 0.2, filterColor: "rgba(100,220,180,1)", filterOpacity: 0.15, swayAmplitude: 1.1 },
+      "happy": { eyeLOpen: 0.4, eyeROpen: 0.4, eyeBallX: 0, eyeBallY: -0.1, browLY: 0.6, browRY: 0.6, browLForm: 0.5, browRForm: 0.5, mouthForm: 0.9, mouthOpen: 0.4, filterColor: "rgba(255,200,0,1)", filterOpacity: 0.25, swayAmplitude: 1.6 },
+      "ecstatic": { eyeLOpen: 0.2, eyeROpen: 0.2, eyeBallX: 0, eyeBallY: -0.3, browLY: 0.8, browRY: 0.8, browLForm: 0.7, browRForm: 0.7, mouthForm: 1.0, mouthOpen: 0.6, filterColor: "rgba(255,215,0,1)", filterOpacity: 0.35, swayAmplitude: 2.2 },
+      "sad": { eyeLOpen: 0.8, eyeROpen: 0.8, eyeBallX: 0, eyeBallY: 0.3, browLY: -0.6, browRY: -0.6, browLForm: -0.5, browRForm: -0.5, mouthForm: -0.9, mouthOpen: -0.4, filterColor: "rgba(100,150,220,1)", filterOpacity: 0.25, swayAmplitude: 0.4 },
+      "disappointed": { eyeLOpen: 0.7, eyeROpen: 0.7, eyeBallX: 0, eyeBallY: 0.2, browLY: -0.4, browRY: -0.4, browLForm: -0.3, browRForm: -0.3, mouthForm: -0.5, mouthOpen: -0.2, filterColor: "rgba(120,160,180,1)", filterOpacity: 0.18, swayAmplitude: 0.5 },
+      "angry": { eyeLOpen: 1, eyeROpen: 1, eyeBallX: 0, eyeBallY: 0, browLY: -1.0, browRY: -1.0, browLForm: -0.8, browRForm: -0.8, mouthForm: -0.7, mouthOpen: 0.2, filterColor: "rgba(255,100,100,1)", filterOpacity: 0.3, swayAmplitude: 1.8 },
+      "furious": { eyeLOpen: 1, eyeROpen: 1, eyeBallX: 0, eyeBallY: -0.1, browLY: -1.0, browRY: -1.0, browLForm: -1.0, browRForm: -1.0, mouthForm: -0.9, mouthOpen: 0.3, filterColor: "rgba(255,50,50,1)", filterOpacity: 0.4, swayAmplitude: 2.5 },
+      "bored": { eyeLOpen: 0.3, eyeROpen: 0.3, eyeBallX: 0, eyeBallY: 0.4, browLY: -0.5, browRY: -0.5, browLForm: -0.4, browRForm: -0.4, mouthForm: -0.5, mouthOpen: -0.3, filterColor: "rgba(80,80,100,1)", filterOpacity: 0.2, swayAmplitude: 0.3 },
+      "sleeping": { eyeLOpen: 0, eyeROpen: 0, eyeBallX: 0, eyeBallY: 0, browLY: -0.7, browRY: -0.7, browLForm: -0.3, browRForm: -0.3, mouthForm: 0, mouthOpen: -0.2, filterColor: "rgba(50,50,80,1)", filterOpacity: 0.3, swayAmplitude: 0.05 },
+      "thinking": { eyeLOpen: 0.9, eyeROpen: 0.9, eyeBallX: 0, eyeBallY: -0.6, browLY: 1.0, browRY: 1.0, browLForm: 0.8, browRForm: 0.8, mouthForm: 0.2, mouthOpen: -0.1, filterColor: "rgba(200,150,255,1)", filterOpacity: 0.22, swayAmplitude: 0.6 },
+      "friendly": { eyeLOpen: 0.65, eyeROpen: 0.65, eyeBallX: 0, eyeBallY: -0.25, browLY: 0.5, browRY: 0.5, browLForm: 0.4, browRForm: 0.4, mouthForm: 0.8, mouthOpen: 0.3, filterColor: "rgba(100,220,200,1)", filterOpacity: 0.2, swayAmplitude: 1.4 },
+      "loving": { eyeLOpen: 0.35, eyeROpen: 0.35, eyeBallX: 0, eyeBallY: -0.3, browLY: 0.7, browRY: 0.7, browLForm: 0.6, browRForm: 0.6, mouthForm: 0.95, mouthOpen: 0.35, filterColor: "rgba(255,150,200,1)", filterOpacity: 0.28, swayAmplitude: 1.3 },
+      "cold": { eyeLOpen: 1, eyeROpen: 1, eyeBallX: 0, eyeBallY: 0.1, browLY: -0.6, browRY: -0.6, browLForm: -0.5, browRForm: -0.5, mouthForm: -0.4, mouthOpen: -0.1, filterColor: "rgba(100,200,255,1)", filterOpacity: 0.25, swayAmplitude: 0.2 },
+      "observing": { eyeLOpen: 1, eyeROpen: 1, eyeBallX: 0, eyeBallY: -0.05, browLY: 0.2, browRY: 0.2, browLForm: 0.15, browRForm: 0.15, mouthForm: 0.1, mouthOpen: 0, filterColor: "rgba(0,200,200,1)", filterOpacity: 0.12, swayAmplitude: 0.7 },
+    };
+
+    /* ==================== MOUSE TRACKING ==================== */
+
+    let mouseX = 0, mouseY = 0;
+    let currentAngleX = 0, currentAngleY = 0;
+    const MOUSE_LERP = 0.05;
+    const HEAD_ANGLE_X_MAX = 25;
+    const HEAD_ANGLE_Y_MAX = 20;
+
+    document.addEventListener("mousemove", (e) => {
+      mouseX = (e.clientX / window.innerWidth - 0.5) * 2;
+      mouseY = (e.clientY / window.innerHeight - 0.5) * 2;
+    });
+
+    /* ==================== IDLE ANIMATIONS ==================== */
+
+    let breathPhase = 0;
+    let bodySwayPhase = 0;
+    let idleAnimFrame = null;
+    let currentSwayAmplitude = 1.0;
+    let targetSwayAmplitude = 1.0;
+    const SWAY_AMP_LERP = 0.02;
+
+    function startIdleAnimations() {
+      if (idleAnimFrame) cancelAnimationFrame(idleAnimFrame);
+
+      function idleLoop() {
+        if (!model) { idleAnimFrame = requestAnimationFrame(idleLoop); return; }
+
+        const targetAngleX = mouseX * HEAD_ANGLE_X_MAX;
+        const targetAngleY = -mouseY * HEAD_ANGLE_Y_MAX;
+        currentAngleX += (targetAngleX - currentAngleX) * MOUSE_LERP;
+        currentAngleY += (targetAngleY - currentAngleY) * MOUSE_LERP;
+        setParam("ParamAngleX", currentAngleX);
+        setParam("ParamAngleY", currentAngleY);
+
+        currentSwayAmplitude += (targetSwayAmplitude - currentSwayAmplitude) * SWAY_AMP_LERP;
+
+        breathPhase += 0.008;
+        const breathValue = (Math.sin(breathPhase) + 1) / 2;
+        setParam("ParamBreath", breathValue);
+        setParam("ParamBodyAngleY", breathValue * 0.04 * currentSwayAmplitude);
+
+        bodySwayPhase += 0.005;
+        const swayX = Math.sin(bodySwayPhase) * 2.5 * currentSwayAmplitude;
+        const swayZ = Math.sin(bodySwayPhase * 0.7) * 1.5 * currentSwayAmplitude;
+        setParam("ParamBodyAngleX", swayX);
+        setParam("ParamBodyAngleZ", swayZ);
+        setParam("ParamAngleZ", swayZ * 0.3);
+
+        idleAnimFrame = requestAnimationFrame(idleLoop);
+      }
+      idleAnimFrame = requestAnimationFrame(idleLoop);
+    }
+
+    /* ==================== BLINKING ==================== */
+
+    function startBlinking() {
+      clearInterval(blinkInterval);
+      blinkInterval = setInterval(() => {
+        const emotion = emotionMap[currentEmotion];
+        if (currentEmotion === "sleeping") return;
+        setParam("ParamEyeLOpen", 0);
+        setParam("ParamEyeROpen", 0);
         setTimeout(() => {
-          setParam("ParamEyeLOpen", 0);
-          setParam("ParamEyeROpen", 0);
-          setTimeout(() => {
+          if (Math.random() < 0.2) {
+            setTimeout(() => {
+              setParam("ParamEyeLOpen", 0);
+              setParam("ParamEyeROpen", 0);
+              setTimeout(() => {
+                setParam("ParamEyeLOpen", emotion.eyeLOpen);
+                setParam("ParamEyeROpen", emotion.eyeROpen);
+              }, 80);
+            }, 150);
+          } else {
             setParam("ParamEyeLOpen", emotion.eyeLOpen);
             setParam("ParamEyeROpen", emotion.eyeROpen);
-          }, 80);
-        }, 150);
-      } else {
-        setParam("ParamEyeLOpen", emotion.eyeLOpen);
-        setParam("ParamEyeROpen", emotion.eyeROpen);
+          }
+        }, 80);
+      }, 2500 + Math.random() * 2500);
+    }
+
+    /* ==================== LIP SYNC ==================== */
+
+    function startLipSync(analyser, dataArray) {
+      isTalking = true;
+      const emotion = emotionMap[currentEmotion];
+      if (talkingInterval) clearInterval(talkingInterval);
+      talkingInterval = setInterval(() => {
+        if (!isTalking) { clearInterval(talkingInterval); talkingInterval = null; return; }
+        analyser.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < 20; i++) sum += dataArray[i];
+        const avg = sum / 20;
+        setParam("ParamMouthOpenY", Math.min(1.0, Math.max(0, emotion.mouthOpen + (avg / 255) * 0.9)));
+      }, 33);
+    }
+
+    function stopTalkingAnimation() {
+      isTalking = false;
+      if (talkingInterval) { clearInterval(talkingInterval); talkingInterval = null; }
+      setParam("ParamMouthOpenY", (emotionMap[currentEmotion] || emotionMap["neutral"]).mouthOpen);
+    }
+
+    /* ==================== EMOTION REACTIONS ==================== */
+
+    function applyColorFilter(emotion) {
+      const overlay = document.getElementById("emotionFilterOverlay");
+      if (overlay) {
+        overlay.style.backgroundColor = "transparent";
+        overlay.style.opacity = 0; // Tắt hoàn toàn bộ lọc màu để nền trong suốt cho OBS
       }
-    }, 80);
-  }, 2500 + Math.random() * 2500);
-}
+    }
 
-/* ==================== LIP SYNC ==================== */
+    function reactToEmotion(emotion) {
+      currentEmotion = emotion;
+      const p = emotionMap[emotion] || emotionMap["neutral"];
+      targetSwayAmplitude = p.swayAmplitude !== undefined ? p.swayAmplitude : 1.0;
 
-function startLipSync(analyser, dataArray) {
-  isTalking = true;
-  const emotion = emotionMap[currentEmotion];
-  if (talkingInterval) clearInterval(talkingInterval);
-  talkingInterval = setInterval(() => {
-    if (!isTalking) { clearInterval(talkingInterval); talkingInterval = null; return; }
-    analyser.getByteFrequencyData(dataArray);
-    let sum = 0;
-    for (let i = 0; i < 20; i++) sum += dataArray[i];
-    const avg = sum / 20;
-    setParam("ParamMouthOpenY", Math.min(1.0, Math.max(0, emotion.mouthOpen + (avg / 255) * 0.9)));
-  }, 33);
-}
+      setParam("ParamEyeLOpen", p.eyeLOpen);
+      setParam("ParamEyeROpen", p.eyeROpen);
+      setParam("ParamEyeBallX", p.eyeBallX);
+      setParam("ParamEyeBallY", p.eyeBallY);
 
-function stopTalkingAnimation() {
-  isTalking = false;
-  if (talkingInterval) { clearInterval(talkingInterval); talkingInterval = null; }
-  setParam("ParamMouthOpenY", (emotionMap[currentEmotion] || emotionMap["neutral"]).mouthOpen);
-}
+      const smileEmotions = ["happy", "ecstatic", "loving", "friendly", "content"];
+      const smileAmt = (emotion === "ecstatic" || emotion === "loving") ? 1.0 : 0.6;
+      setParam("ParamEyeLSmile", smileEmotions.includes(emotion) ? smileAmt : 0);
+      setParam("ParamEyeRSmile", smileEmotions.includes(emotion) ? smileAmt : 0);
 
-/* ==================== EMOTION REACTIONS ==================== */
+      setParam("ParamBrowLY", p.browLY);
+      setParam("ParamBrowRY", p.browRY);
+      setParam("ParamBrowLForm", p.browLForm);
+      setParam("ParamBrowRForm", p.browRForm);
+      setParam("ParamMouthForm", p.mouthForm);
+      setParam("ParamMouthOpenY", p.mouthOpen);
 
-function applyColorFilter(emotion) {
-  const overlay = document.getElementById("emotionFilterOverlay");
-  const p = emotionMap[emotion];
-  overlay.style.backgroundColor = p.filterColor;
-  overlay.style.opacity = p.filterOpacity;
-}
+      applyColorFilter(emotion);
+      startBlinking();
+    }
 
-function reactToEmotion(emotion) {
-  currentEmotion = emotion;
-  const p = emotionMap[emotion] || emotionMap["neutral"];
-  targetSwayAmplitude = p.swayAmplitude !== undefined ? p.swayAmplitude : 1.0;
+    /* ==================== ACTIONS ==================== */
 
-  setParam("ParamEyeLOpen", p.eyeLOpen);
-  setParam("ParamEyeROpen", p.eyeROpen);
-  setParam("ParamEyeBallX", p.eyeBallX);
-  setParam("ParamEyeBallY", p.eyeBallY);
+    function triggerAction(action) {
+      if (!model) return;
+      switch (action.toUpperCase()) {
+        case "WAVE":
+          setParam("ParamArmLAngle", 30);
+          setTimeout(() => setParam("ParamArmLAngle", 0), 1000);
+          break;
+        case "NOD":
+          setParam("ParamAngleY", 20);
+          setTimeout(() => setParam("ParamAngleY", -10), 300);
+          setTimeout(() => setParam("ParamAngleY", 0), 600);
+          break;
+        case "SHAKE_HEAD":
+          setParam("ParamAngleX", 25);
+          setTimeout(() => setParam("ParamAngleX", -25), 200);
+          setTimeout(() => setParam("ParamAngleX", 25), 400);
+          setTimeout(() => setParam("ParamAngleX", 0), 600);
+          break;
+        case "LAUGH":
+          setParam("ParamMouthOpenY", 1.0);
+          setParam("ParamEyeLSmile", 1.0);
+          setParam("ParamEyeRSmile", 1.0);
+          setTimeout(() => { setParam("ParamMouthOpenY", 0); reactToEmotion(currentEmotion); }, 1500);
+          break;
+        case "SHY":
+          setParam("ParamBrowLY", -0.5);
+          setParam("ParamBrowRY", -0.5);
+          setParam("ParamEyeBallY", -0.4);
+          break;
+        case "SURPRISED":
+          setParam("ParamEyeLOpen", 1.2);
+          setParam("ParamEyeROpen", 1.2);
+          setParam("ParamMouthOpenY", 0.8);
+          break;
+      }
+    }
 
-  const smileEmotions = ["happy", "ecstatic", "loving", "friendly", "content"];
-  const smileAmt = (emotion === "ecstatic" || emotion === "loving") ? 1.0 : 0.6;
-  setParam("ParamEyeLSmile", smileEmotions.includes(emotion) ? smileAmt : 0);
-  setParam("ParamEyeRSmile", smileEmotions.includes(emotion) ? smileAmt : 0);
-
-  setParam("ParamBrowLY", p.browLY);
-  setParam("ParamBrowRY", p.browRY);
-  setParam("ParamBrowLForm", p.browLForm);
-  setParam("ParamBrowRForm", p.browRForm);
-  setParam("ParamMouthForm", p.mouthForm);
-  setParam("ParamMouthOpenY", p.mouthOpen);
-
-  applyColorFilter(emotion);
-  startBlinking();
-}
-
-/* ==================== ACTIONS ==================== */
-
-function triggerAction(action) {
-  if (!model) return;
-  switch (action.toUpperCase()) {
-    case "WAVE":
-      setParam("ParamArmLAngle", 30);
-      setTimeout(() => setParam("ParamArmLAngle", 0), 1000);
-      break;
-    case "NOD":
-      setParam("ParamAngleY", 20);
-      setTimeout(() => setParam("ParamAngleY", -10), 300);
-      setTimeout(() => setParam("ParamAngleY", 0), 600);
-      break;
-    case "SHAKE_HEAD":
-      setParam("ParamAngleX", 25);
-      setTimeout(() => setParam("ParamAngleX", -25), 200);
-      setTimeout(() => setParam("ParamAngleX", 25), 400);
-      setTimeout(() => setParam("ParamAngleX", 0), 600);
-      break;
-    case "LAUGH":
-      setParam("ParamMouthOpenY", 1.0);
-      setParam("ParamEyeLSmile", 1.0);
-      setParam("ParamEyeRSmile", 1.0);
-      setTimeout(() => { setParam("ParamMouthOpenY", 0); reactToEmotion(currentEmotion); }, 1500);
-      break;
-    case "SHY":
-      setParam("ParamBrowLY", -0.5);
-      setParam("ParamBrowRY", -0.5);
-      setParam("ParamEyeBallY", -0.4);
-      break;
-    case "SURPRISED":
-      setParam("ParamEyeLOpen", 1.2);
-      setParam("ParamEyeROpen", 1.2);
-      setParam("ParamMouthOpenY", 0.8);
-      break;
-  }
-}
-
-</script>
+  </script>
 </body>
+
 </html>

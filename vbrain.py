@@ -37,6 +37,33 @@ def parse_vbrain_response(content):
     except Exception:
         pass
 
+    # Final fallback: text extraction if JSON fails completely
+    lines = clean_content.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        lower_line = line.lower()
+        if '"monologue"' in lower_line or lower_line.startswith("monologue:"):
+            continue
+        if '"emotion"' in lower_line or lower_line.startswith("emotion:"):
+            continue
+        if '"action"' in lower_line or lower_line.startswith("action:"):
+            continue
+        if lower_line.strip() in ['{', '}', '```', '```json']:
+            continue
+        cleaned_lines.append(line)
+    
+    # Process each line to remove 'reply' tags
+    final_lines = []
+    for line in cleaned_lines:
+        line_clean = re.sub(r'(?i)^"?reply"?\s*:\s*"?', '', line.strip())
+        line_clean = line_clean.strip(' ",')
+        if line_clean:
+            final_lines.append(line_clean)
+
+    fallback_text = ' '.join(final_lines).strip()
+    
+    default_res["reply"] = fallback_text or content
+
     return default_res
 
 

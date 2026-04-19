@@ -14,6 +14,8 @@ def main():
 
     # 1. Connection Check
     if USE_OLLAMA:
+        pass
+        """
         print(f"[Check] Verifying Ollama at {BASE_URL}...")
         try:
             tags_url = BASE_URL.replace("/api/chat", "/api/tags")
@@ -26,7 +28,7 @@ def main():
                 )
         except Exception as e:
             print(f"! Could not connect to Ollama: {e}")
-            print("  Make sure Ollama is started and reachable at localhost:11434")
+            print("  Make sure Ollama is started and reachable at localhost:11434")"""
 
     try:
         # 2. Khởi tạo AI engine
@@ -62,27 +64,26 @@ def main():
             result = ai.chat(user_input)
 
             reply = result.get("reply", "[No reply]")
-            original_reply = result.get("original_reply", "")
             monologue = result.get("monologue", "")
+            action = result.get("action", "NONE")
+            
+            # Since core.py uses attention as property
+            attention = getattr(ai, "attention", result.get("attention", 10.0))
 
             if monologue:
-                print(f"\n[Monologue]: {monologue}")
+                print(f"\n>>> THINKING: {monologue}")
 
             try:
-                print(f"\nLyra (VN): {reply}")
-                if original_reply and original_reply != reply:
-                    print(f"Lyra (EN): {original_reply}")
+                print(f"\nLyra: {reply}")
+                if action and action != "NONE":
+                    print(f"*(Action: {action})*")
             except UnicodeEncodeError:
-                print(
-                    f"\nLyra (encoded): {reply.encode('ascii', 'ignore').decode('ascii')}"
-                )
+                print(f"\nLyra (encoded): {reply.encode('ascii', 'ignore').decode('ascii')}")
 
             print("-" * 40)
-            print(f"Emotion: {result.get('emotion')} | Intent: {result.get('intent')}")
-            print(f"Mood: {result.get('mood')} | Affection: {result.get('affection')}")
-            print(
-                f"Time Gap: {result.get('time_gap_hours')} | Period: {result.get('time_period')}"
-            )
+            print(f"Emotion: {result.get('emotion', 'neutral')} | Intent: {result.get('intent', 'none')} | Action: {action}")
+            print(f"Mood: {result.get('mood', 0)} | Affection: {result.get('affection', 0)} | Attention: {attention:.1f}")
+            print(f"Time Gap: {result.get('time_gap_hours', 0)}h | Period: {result.get('time_period', 'unknown')}")
             print("-" * 40)
 
         except KeyboardInterrupt:

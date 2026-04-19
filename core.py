@@ -439,6 +439,12 @@ class MiniAI:
         self.extract_memory(user_input, intent)
         self.emotion.update(user_input, self.time_gap_hours)
 
+        # Ghi L2 Session Memory khi stream (viewer chat)
+        if source_type != "owner" and stream_context:
+            viewer_name = (viewer_data or {}).get("viewer_name", "")
+            if viewer_name:
+                self.memory.add_session_item(f"{viewer_name} nhắn: {user_input[:80]}", kind="session")
+
         # Override affection tạm thời theo source_type
         _original_affection = self.emotion.affection
         if source_type == "owner":
@@ -1104,9 +1110,9 @@ class MiniAI:
             )
 
     def build_prompt(self, intent, user_input, search_context="", source_type: str = "owner", viewer_data: dict = None, stream_context: str = ""):
-        memory_context = self.memory.get_context(
-            user_input
-        ) or self.memory.get_relevant_context(user_input)
+        basic_ctx = self.memory.get_context(user_input)
+        rag_ctx   = self.memory.get_relevant_context(user_input)
+        memory_context = "\n\n".join(filter(None, [basic_ctx, rag_ctx]))
         time_context = get_time_context(self.current_time, self.time_period)
 
         # Chọn base personality theo source_type
@@ -1169,6 +1175,11 @@ class MiniAI:
         # Stream context từ ViewerTracker — truyền qua tham số, không dùng self attribute
         _stream_ctx = stream_context or getattr(self, "stream_context", "") or ""
 
+        # L2 Session Memory — chỉ inject khi đang stream (có stream_context)
+        _session_ctx = ""
+        if _stream_ctx:
+            _session_ctx = self.memory.get_session_context()
+
         # Conversation state & rhythm hints
         state_hint  = self.conv_state.get_state_hint()
         rhythm_hint = self.conv_state.get_rhythm_hint()
@@ -1203,6 +1214,7 @@ Current state:
 
 {memory_context}
 {search_context}
+{_session_ctx}
 {_stream_ctx}
 {source_context}
 

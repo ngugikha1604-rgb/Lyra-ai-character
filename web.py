@@ -169,6 +169,15 @@ def chat():
         # ===== GENERATE AI REPLY =====
         # Owner chat qua web — source_type = "owner", full memory
         result = lyra_ai.chat(user_input, source_type="owner")
+        print(
+            "[CHAT] reply_len=%s monologue_len=%s emotion=%s action=%s"
+            % (
+                len((result or {}).get("reply", "") or ""),
+                len((result or {}).get("monologue", "") or ""),
+                (result or {}).get("emotion", ""),
+                (result or {}).get("action", ""),
+            )
+        )
 
         response_payload = build_state_payload(lyra_ai, result=result)
 
@@ -207,6 +216,7 @@ def speak():
         text = data["text"].strip()
         if not text:
             return jsonify({"error": "Empty text"}), 400
+        print(f"[TTS] Request text: {text[:120]!r}")
 
         response = requests.post(
             FPT_TTS_URL,
@@ -230,10 +240,23 @@ def speak():
         if not audio_url:
             return jsonify({"error": "No audio URL returned", "detail": result}), 500
 
-        # Fetch file mp3 từ URL đó rồi stream về client
-        audio_res = requests.get(audio_url, timeout=15)
-        if audio_res.status_code != 200:
-            return jsonify({"error": "Failed to fetch audio file"}), 500
+        # FPT xử lý TTS async — Chờ và thử lại tối đa 4 lần (mỗi lần 1s)
+        import time as _t
+        audio_res = None
+        for attempt in range(4):
+            _t.sleep(1.0)
+            try:
+                temp_res = requests.get(audio_url, timeout=5)
+                if temp_res.status_code == 200 and len(temp_res.content) > 500:
+                    audio_res = temp_res
+                    break
+                print(f"[TTS] Retry {attempt+1}/4 - Status: {temp_res.status_code}")
+            except Exception as _e:
+                print(f"[TTS] Lấy audio lỗi: {_e}")
+
+        if not audio_res:
+            print(f"[TTS] Audio URL lỗi hoặc bị FPT delay quá lâu!")
+            return jsonify({"error": "Audio fetch failed after 4s"}), 500
 
         return send_file(
             io.BytesIO(audio_res.content),
@@ -576,6 +599,7 @@ import time as _time
 # Tier 2: regular_viewer
 # Tier 3: new_viewer (random pick)
 _priority_queues: dict = {
+    "owner":          _queue.Queue(maxsize=10),
     "donor":          _queue.Queue(maxsize=20),
     "regular_viewer": _queue.Queue(maxsize=50),
     "new_viewer":     _queue.Queue(maxsize=200),
@@ -618,8 +642,11 @@ def _enqueue_stream_event(chat_event: dict):
     is_donor  = chat_event.get("is_donor", False)
 
     regular = viewer_tracker.is_regular_viewer(sender_id, platform)
+    is_owner = chat_event.get("is_owner", False)
 
-    if is_donor:
+    if is_owner:
+        tier = "owner"
+    elif is_donor:
         tier = "donor"
     elif regular:
         tier = "regular_viewer"
@@ -666,16 +693,25 @@ def _process_queue_loop():
                     break
                 _enqueue_stream_event(raw)
 
-            if not _can_reply():
+            has_owner_waiting = not _priority_queues["owner"].empty()
+            if not has_owner_waiting and not _can_reply():
                 _time.sleep(0.3)
                 continue
 
-            # Tier 1: donor
             event = None
+            
+            # Tier 0: owner
             try:
-                event = _priority_queues["donor"].get_nowait()
+                event = _priority_queues["owner"].get_nowait()
             except _queue.Empty:
                 pass
+
+            # Tier 1: donor
+            if event is None:
+                try:
+                    event = _priority_queues["donor"].get_nowait()
+                except _queue.Empty:
+                    pass
 
             # Tier 2: regular_viewer
             if event is None:
@@ -719,9 +755,12 @@ def _handle_stream_event(chat_event: dict):
         platform = chat_event.get("platform", "youtube")
         channel_id = chat_event.get("channel_id", "default")
 
-        composed_input = f"[{sender_name}]: {message}"
-
         tier = chat_event.get("_tier", "new_viewer")
+        if tier == "owner":
+            composed_input = message
+        else:
+            composed_input = f"[{sender_name}]: {message}"
+
         print(f"[Stream Consumer] [{tier}] {sender_name}: {message}")
 
         viewer_info = viewer_tracker.record_message(sender_id, sender_name, platform, channel_id, message)
@@ -759,7 +798,10 @@ def _handle_stream_event(chat_event: dict):
 
         regular_data = chat_event.get("_regular_data")
 
-        if tier == "donor":
+        if tier == "owner":
+            source_type_val = "owner"
+            viewer_data = None
+        elif tier == "donor":
             source_type_val = "donor"
             viewer_data = {
                 "viewer_name": sender_name,
@@ -927,6 +969,9 @@ def stream_stop():
         print(f"[Stream] Farewell error: {e}")
 
     promoted = viewer_tracker.promote_regular_viewers(platform=platform, channel_id=channel_id)
+
+    # Clear L2 Session Memory khi stream kết thúc
+    lyra_ai.memory.clear_session_memory()
 
     # Reset greeted set cho session tiếp theo
     with _greeted_lock:

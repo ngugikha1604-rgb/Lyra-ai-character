@@ -35,29 +35,24 @@ Handles:
 
 ---
 
-### 2. Memory System (IMPORTANT)
+### 2. Memory System (Layered Architecture)
 
-Storage:
+Lyra uses a structured, three-layer memory system to balance personality consistency, short-term awareness, and long-term history.
 
-* SQLite (`memory.db`)
-* Migrated from old JSON (`memory.json`)
+**Storage**: Hybrid (SQLite for structure + Pinecone for vector search).
 
-Types of memory:
+#### Memory Layers:
+| Layer | Content | Storage | Injection Logic |
+|-------|---------|---------|-----------------|
+| **L1 — User Memory** | Core identity (Profile, Likes, Goals, Relational bond). | SQLite | Always injected (compact format) |
+| **L2 — Session Memory** | Context from the current stream/chat session. | In-memory | Always injected during session |
+| **L3 — Temporal** | Episodic summaries and historical events. | SQLite + Pinecone | Semantic search (RAG) match only |
 
-* Profile (name, age, location…)
-* Preferences (likes / dislikes)
-* Goals
-* Topics
-* Episodic summaries
-* Relational notes
-
-Key features:
-
-* Saliency scoring (importance of memory)
-* Memory buffer (lazy extraction → save cost)
-* Auto summarization (compress old chats)
-* Retrieval based on relevance (not dump all memory)
-* **Memory Forgetting**: Stale SQLite memory items (`saliency < 7`, `access_count = 0`) are permanently deleted after 100 turns to save context length.
+**Key Features**:
+* **Layered Retrieval**: Prevents context bloat by only pulling what's necessary.
+* **Conflict Resolution**: Detects contradictions (e.g., changing likes) and updates facts while archiving historical changes to L3.
+* **Saliency Scoring**: Ranks memory importance (1-10).
+* **Automatic Consolidation**: Stale L1 items (low saliency, no access for 100 turns) are deleted to keep the database clean.
 
 ---
 
@@ -119,19 +114,15 @@ Features:
 
 ---
 
-### 6. Memory Extraction Pipeline
+### 6. Memory Extraction & Conflict Pipeline
 
 Flow:
 
-1. Heuristic extraction (cheap)
-2. Buffer candidates
-3. Periodic AI extraction (batch)
-4. Save to SQLite
-
-Goal:
-
-* Reduce API usage
-* Keep only meaningful memory
+1. **Heuristic extraction**: Fast keyword-based detection.
+2. **Buffer candidates**: Items are staged to check for frequency and saliency.
+3. **AI extraction (Batch)**: Light model cleans and extracts structured JSON.
+4. **Conflict Resolution**: New facts are compared against existing L1 items. If a contradiction is found, the old item is marked `superseded` and archived to L3.
+5. **Storage**: User facts save to SQLite; Temporal/Episodic events upsert to Pinecone for long-term RAG.
 
 ---
 
@@ -276,12 +267,13 @@ Every `chat()` call carries a `source_type` that changes Lyra's behavior:
 Messages from YouTube are processed in strict priority order:
 
 ```
-Tier 1: donor        → Queue maxsize=20,  processed first always
+Tier 0: owner        → Queue maxsize=10, processed instantly, bypasses cooldown
+Tier 1: donor        → Queue maxsize=20, processed first always
 Tier 2: regular_viewer → Queue maxsize=50
 Tier 3: new_viewer   → Random pool maxsize=100, pick 1 every N seconds
 ```
 
-Owner (STT) bypasses the queue entirely — processed immediately via `/chat`.
+Owner bypasses the cooldown entirely. STT from Web uses `/chat` directly, and comments from the Owner's YouTube account (configured via `OWNER_YOUTUBE_ID`) are processed as Tier 0 and `source_type="owner"`.
 
 Config in `config.py`:
 - `STREAM_REPLY_COOLDOWN` — seconds between replies (default 4.0s)
