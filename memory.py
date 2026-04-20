@@ -1405,16 +1405,17 @@ class MemorySystem:
             
         try:
             with self.db_lock:
-                # strategy: saliency >= 6, least accessed first, oldest first
+                # Lấy top 5 ít được access nhất (saliency cao) — ưu tiên đúng intent "rare"
                 query = """
                     SELECT value FROM memory_items 
                     WHERE kind IN ('like', 'dislike', 'goal', 'episodic', 'relational', 'inside_joke')
                     AND saliency >= 6
-                    ORDER BY access_count ASC, RANDOM()
-                    LIMIT 20
+                    ORDER BY access_count ASC, saliency DESC
+                    LIMIT 5
                 """
                 res = conn.execute(query).fetchall()
                 if res:
+                    # random.choice trong top 5 ít-access nhất — vẫn có yếu tố bất ngờ
                     return random.choice(res)[0]
         except Exception as e:
             print(f"[Memory] get_rare_memory error: {e}")

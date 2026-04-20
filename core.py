@@ -597,15 +597,21 @@ class MiniAI:
             self.current_vbrain = parsed
         else:
             reply = "..."
+            parsed = {}  # Bug fix: đảm bảo parsed luôn defined để tránh NameError
+            # Reset vbrain state khi model fail — tránh trả về emotion/monologue cũ
+            self.current_vbrain = {
+                "monologue": "", "emotion": "neutral", "action": "NONE", "reply": "..."
+            }
 
         # ── Thought chaining (~7% chance) ─────────────────────────────────────
         # Dùng monologue từ lần gọi đầu làm "suy nghĩ trước" → gọi lại để phát triển
         # Chỉ áp dụng khi owner chat, có monologue thực sự, và response không quá ngắn
-        monologue = parsed.get("monologue", "") if content else ""
+        monologue = parsed.get("monologue", "")
         if (
             source_type == "owner"
             and monologue
             and len(monologue.strip()) > 20
+            and content  # Guard: content phải còn valid (không None) để dùng làm assistant message
             and random.random() < 0.07
         ):
             # Dùng THOUGHT_CHAIN_SYSTEM làm system prompt riêng — Lyra biết rõ đây là thought chain
@@ -635,8 +641,9 @@ class MiniAI:
                     print("[Core] Thought chain applied")
 
         reply = self.clean_reply(reply)
+        original_reply = reply  # Bug fix: lưu reply sạch TRƯỚC khi inject filler
+        reply = self._maybe_add_filler(reply, user_input, source_type)
 
-        original_reply = reply
         reply = self._translate_response(reply)
 
         # Restore affection gốc của owner sau khi xử lý viewer
@@ -1386,6 +1393,8 @@ class MiniAI:
             source_context,
             _stream_ctx,
             relationship_hint,
+            mood_hint,
+            user_hint,
             "\n[PERSONALITY GUIDELINES]",
             "- TRẢ LỜI BẰNG TIẾNG VIỆT. Không trả lời bằng tiếng Anh.",
             "- Let warmth, teasing, distance, or softness emerge naturally.",
@@ -1450,9 +1459,8 @@ class MiniAI:
                 f"Stay in character! Only ask one question. Don't explain why."
             )
 
-        # 7% chance to trigger reward-based interaction (only if not doing curiosity)
-        if random.random() < 0.07:
-            parts.append("<reward_trigger>The user has been exceptionally engaging. Offer a small, warm, or playful reward/compliment.</reward_trigger>")
+        # 7% reward trigger đã được xử lý ở chat() qua Dopamine system (reward_hint trong system prompt)
+        # Không trigger thêm ở đây để tránh double-reward cùng lượt
 
         parts.append(f"<user_signal>{self.infer_user_signal(user_input)}</user_signal>")
 
@@ -1607,6 +1615,44 @@ class MiniAI:
                     return True
 
         return False
+
+    # ── Filler Words (Social Presence / Presence Theory) ──────────────────────
+    _FILLER_WORDS = [
+        "hmmm... ", "ừm... ", "à thì... ", "đợi em nghĩ tí... ",
+        "ờ... ", "ừ thì... ", "à... ", "hmm... ",
+    ]
+
+    # Chỉ trigger filler khi câu hỏi/phức tạp — không trigger khi user nhắn ngắn/casual
+    # Không dùng \b vì \b không hoạt động với ký tự Unicode có dấu tiếng Việt
+    _FILLER_TRIGGER = re.compile(
+        r"(tại sao|vì sao|như thế nào|thế nào|nghĩ gì|ý kiến|cảm thấy|"
+        r"why|how|what do you think|opinion|feel|explain|giải thích|phân tích)",
+        re.IGNORECASE,
+    )
+
+    def _maybe_add_filler(self, reply: str, user_input: str, source_type: str) -> str:
+        """
+        Dopaminergic Feedback Loop — Social Presence component.
+        ~12% chance to prepend a natural Vietnamese filler word when the user
+        asks a complex/reflective question. Owner-only to keep stream replies snappy.
+        """
+        if source_type != "owner":
+            return reply
+        if not reply or reply == "...":
+            return reply
+        # Only trigger on complex/reflective inputs
+        if not self._FILLER_TRIGGER.search(user_input):
+            return reply
+        if random.random() >= 0.12:
+            return reply
+
+        filler = random.choice(self._FILLER_WORDS)
+        # Lowercase first char of reply after filler to flow naturally
+        if reply and reply[0].isupper():
+            reply = reply[0].lower() + reply[1:]
+        result = filler + reply
+        print(f"[Dopamine] Filler word injected: '{filler.strip()}'")
+        return result
 
     def clean_reply(self, text):
         if not text:
