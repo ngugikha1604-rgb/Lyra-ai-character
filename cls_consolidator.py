@@ -44,8 +44,18 @@ class CLSConsolidator:
             )
             if resp.status_code == 200:
                 raw = resp.json().get("message", {}).get("content", "").strip()
-                raw = re.sub(r"```json|```", "", raw).strip()
-                return json.loads(raw).get("updates", [])
+                # Use regex to find the most likely JSON block containing "updates"
+                json_match = re.search(r"(\{[\s\S]*?\"updates\"[\s\S]*?\})", raw)
+                if not json_match: # Fallback to greedy if non-greedy fails
+                    json_match = re.search(r"(\{[\s\S]*\})", raw)
+                
+                if json_match:
+                    try:
+                        return json.loads(json_match.group(0)).get("updates", [])
+                    except json.JSONDecodeError:
+                        # Final attempt: try to find the largest valid JSON substring
+                        pass 
+                return []
         except Exception as e:
             print(f"[CLS] Consolidation error: {e}")
         
@@ -81,8 +91,17 @@ class CLSConsolidator:
             )
             if resp.status_code == 200:
                 raw = resp.json().get("message", {}).get("content", "").strip()
-                raw = re.sub(r"```json|```", "", raw).strip()
-                return json.loads(raw)
+                # Use regex to find the most likely JSON block containing personality keys
+                json_match = re.search(r"(\{[\s\S]*?\"mood_bias\"[\s\S]*?\})", raw)
+                if not json_match:
+                    json_match = re.search(r"(\{[\s\S]*\})", raw)
+
+                if json_match:
+                    try:
+                        return json.loads(json_match.group(0))
+                    except json.JSONDecodeError:
+                        pass
+                return {}
         except Exception:
             pass
         return {}

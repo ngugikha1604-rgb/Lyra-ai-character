@@ -1017,13 +1017,8 @@ def stream_stop():
     # ── IDEA-03: Check stream milestones ──────────────────────────────────────
     try:
         stream_count_row = None
-        import sqlite3 as _sqlite3
-        conn_m = _sqlite3.connect("memory.db")
-        conn_m.row_factory = _sqlite3.Row
-        c_m = conn_m.cursor()
-        total_streams_row = c_m.execute("SELECT COUNT(*) FROM stream_milestones WHERE event_type LIKE 'stream_%'").fetchone()
-        stream_num = (total_streams_row[0] if total_streams_row else 0) + 1
-        conn_m.close()
+        # Thay vì mở connection mới, dùng helper từ memory system để tránh race condition
+        stream_num = lyra_ai.memory.get_stream_count() + 1
 
         from config import STREAM_TITLE
         # Debut (lần đầu tiên)

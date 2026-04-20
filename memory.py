@@ -149,7 +149,7 @@ class PineconeLayer:
                 headers={"Api-Key": self.api_key, "Content-Type": "application/json"},
                 json={
                     "name": self.index_name,
-                    "dimension": 768,   # nomic-embed-text output dim (Ollama)
+                    "dimension": self.dimension or 768,   # Dùng dimension auto-detected
                     "metric": "cosine",
                     "spec": {
                         "serverless": {"cloud": "aws", "region": "us-east-1"}
@@ -1188,6 +1188,19 @@ class MemorySystem:
             self._rag_context_cache = ""
             return ""
 
+        # P1.1: Touch items to keep them from being forgotten
+        to_touch = []
+        for text in context_items:
+            # We don't have the original 'kind' here easily, but we can search for the item
+            # To simplify, we only touch items that are in the original candidates list
+            for cand in candidates:
+                if cand["value"] == text:
+                    to_touch.append((cand["kind"], text))
+                    break
+        
+        if to_touch:
+            threading.Thread(target=self.touch_items, args=(to_touch,), daemon=True).start()
+
         result = "Bối cảnh quan trọng:\n" + "\n".join(f"- {m}" for m in context_items)
         self._rag_cache_key = cache_key
         self._rag_context_cache = result
@@ -1480,6 +1493,17 @@ class MemorySystem:
         except Exception as e:
             print(f"[Memory] check_stream_milestone error: {e}")
             return False
+
+    def get_stream_count(self) -> int:
+        """Đếm số lượng buổi stream đã lưu (thread-safe)."""
+        try:
+            conn = self._get_db()
+            if not conn: return 0
+            with self.db_lock:
+                row = conn.execute("SELECT COUNT(*) FROM stream_milestones WHERE event_type LIKE 'stream_%'").fetchone()
+                return row[0] if row else 0
+        except Exception:
+            return 0
 
     def get_stream_milestones(self, limit: int = 5) -> list:
         try:

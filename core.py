@@ -446,7 +446,6 @@ class MiniAI:
         self.turn_counter += 1
         intent = self.detect_intent(user_input)
 
-        self.extract_memory(user_input, intent)
         self.emotion.update(user_input, self.time_gap_hours)
 
         # Ghi L2 Session Memory khi stream (viewer chat)
@@ -635,6 +634,8 @@ class MiniAI:
                 }
             )
 
+        self.extract_memory(user_input, intent, source_type=source_type)
+        
         # Chỉ lưu conversation history khi owner chat
         if source_type == "owner":
             self.messages.append({"role": "user", "content": user_input})
@@ -910,7 +911,7 @@ class MiniAI:
 
         return None
 
-    def extract_memory(self, text, intent):
+    def extract_memory(self, text, intent, source_type="owner"):
         # Skip extraction nếu viewer không đủ quen (set per-thread)
         if getattr(self._thread_local, "skip_memory_extraction", False):
             self._thread_local.skip_memory_extraction = False
@@ -1000,14 +1001,19 @@ class MiniAI:
             prefs = self.memory.memory["preferences"]
             mfacts = self.memory.memory["facts"]
 
-            if facts.get("name") and not profile["name"]:
-                profile["name"] = facts["name"]
-            if facts.get("location") and not profile["location"]:
-                profile["location"] = facts["location"]
-            if facts.get("occupation") and not profile["occupation"]:
-                profile["occupation"] = facts["occupation"]
-            if facts.get("age") and not profile.get("age_range"):
-                profile["age_range"] = facts["age"]
+            # P0.1 Privacy Gate: Chỉ cập nhật Profile và Relational nếu là Owner
+            if source_type == "owner":
+                if facts.get("name") and not profile["name"]:
+                    profile["name"] = facts["name"]
+                if facts.get("location") and not profile["location"]:
+                    profile["location"] = facts["location"]
+                if facts.get("occupation") and not profile["occupation"]:
+                    profile["occupation"] = facts["occupation"]
+                if facts.get("age") and not profile.get("age_range"):
+                    profile["age_range"] = facts["age"]
+
+                for item in facts.get("relational", []):
+                    self.memory.add_item("relational", item, weight=1.3)
 
             for item in facts.get("likes", []):
                 self.memory.add_item("like", item)
@@ -1019,8 +1025,6 @@ class MiniAI:
                 self.memory.add_item("topic", item)
             for item in facts.get("inside_jokes", []):
                 self.memory.add_item("inside_joke", item, weight=1.5)
-            for item in facts.get("relational", []):
-                self.memory.add_item("relational", item, weight=1.3)
 
             if facts.get("mood_today"):
                 self._user_mood_today = facts["mood_today"]
