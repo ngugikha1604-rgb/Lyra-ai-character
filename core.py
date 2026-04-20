@@ -1407,6 +1407,21 @@ class MiniAI:
         
         return "\n".join(filter(None, parts))
 
+    def _build_source_context(self, source_type: str, viewer_data: dict) -> str:
+        """Helper to create context based on the message source (Owner vs Viewer)"""
+        if source_type == "owner":
+            return "Status: You are talking privately with your creator/brother."
+        
+        name = (viewer_data or {}).get("viewer_name", "A viewer")
+        streams = (viewer_data or {}).get("total_streams", 1)
+        
+        if source_type == "regular_viewer":
+            return f"Status: You are streaming to {name}, a regular viewer (seen {streams} sessions)."
+        if source_type == "donor":
+            return f"Status: {name} just sent a donation! Be appreciative and acknowledge them."
+        
+        return f"Status: {name} is a new viewer. Be welcoming but keep your core personality."
+
     def compose_user_message(self, user_input, intent):
         parts = ["<context>"]
 
