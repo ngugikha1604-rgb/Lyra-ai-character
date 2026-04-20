@@ -1253,30 +1253,18 @@ class MiniAI:
 
         # ── TIER 2: DYNAMIC CONTEXT (Changes every message) ────────────────
         # Shared memory: allow stream/viewer to use Lyra's common memory.
-        rag_ctx = self.memory.get_relevant_context(user_input)
+        is_public = (source_type != "owner")
+        memory_context = self.memory.get_relevant_context(user_input, is_public=is_public)
+        
         diary_hint = ""
-
-        if source_type == "owner":
-            basic_ctx = self.memory.get_context(user_input)
+        if not is_public:
+            # Special diaries/internal notes only for private chat
             recent_diaries = self.memory.get_diary_entries(limit=1)
             if recent_diaries:
                 diary_hint = f"\n[LYRA'S RECENT FEELINGS]\nYour last secret thought: '{recent_diaries[0]['content'][:150]}...'"
-        else:
-            shared_facts = []
-            mem_items = self.memory.memory.get("memory_items", {})
-            facts = self.memory.memory.get("facts", {})
-            if mem_items.get("topics"):
-                shared_facts.append("Known topics: " + ", ".join(mem_items["topics"][:6]))
-            if mem_items.get("goals"):
-                shared_facts.append("Known goals: " + ", ".join(mem_items["goals"][:4]))
-            if facts.get("inside_jokes"):
-                shared_facts.append("Inside jokes: " + ", ".join(facts["inside_jokes"][:3]))
-            if mem_items.get("relational"):
-                shared_facts.append("Long-term bonds: " + ", ".join(mem_items["relational"][:4]))
-            if shared_facts:
-                basic_ctx = "Shared memory highlights:\n" + "\n".join(f"- {p}" for p in shared_facts)
-
-        memory_context = "\n\n".join(filter(None, [basic_ctx, rag_ctx, search_context, diary_hint]))
+        
+        # Combined memory block
+        full_memory_context = "\n\n".join(filter(None, [memory_context, search_context, diary_hint]))
         
         time_context = get_time_context(self.current_time, self.time_period)
 
@@ -1365,7 +1353,7 @@ class MiniAI:
             "- Be concise (1-2 sentences).",
             anti_repeat_note,
             conv_hints,
-            memory_context,
+            full_memory_context,
             _session_ctx
         ]
 

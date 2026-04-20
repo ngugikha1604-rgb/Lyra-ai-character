@@ -1006,8 +1006,9 @@ def stream_stop():
     # Clear L2 Session Memory khi stream kết thúc
     lyra_ai.memory.clear_session_memory()
 
-    # Viết nhật ký bí mật sau buổi stream
+    # Viết nhật ký bí mật + Hợp nhất trí nhớ sau buổi stream (CLS)
     threading.Thread(target=lyra_ai.write_diary_entry, daemon=True).start()
+    threading.Thread(target=lyra_ai.memory.consolidate_episodic_to_semantic, daemon=True).start()
 
     # Reset greeted set cho session tiếp theo
     with _greeted_lock:

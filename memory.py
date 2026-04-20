@@ -232,6 +232,99 @@ class PineconeLayer:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MemoryRanker — Using qwen2.5:0.5b to prioritize context
+# ══════════════════════════════════════════════════════════════════════════════
+
+class MemoryRanker:
+    """
+    Ranks memory items based on their relevance to the current user input.
+    Uses qwen2.5:0.5b (LIGHT_MODEL) for high-speed, numeric scoring.
+    """
+    def __init__(self):
+        try:
+            from config import LIGHT_MODEL, LIGHT_BASE_URL
+            self.model = LIGHT_MODEL or "qwen2.5:0.5b"
+            self.url = LIGHT_BASE_URL or "http://localhost:11434/api/chat"
+        except ImportError:
+            self.model = "qwen2.5:0.5b"
+            self.url = "http://localhost:11434/api/chat"
+
+    def _call_scoring_model(self, query: str, candidates: list[str]) -> list[float]:
+        """Calls light model to get relevance scores (1-10) for candidates."""
+        if not candidates:
+            return []
+        
+        # Batch scoring to save time/tokens
+        prompt = (
+            f"Query: \"{query}\"\n"
+            "Rank how relevant each item is to the query (1-10, 10 is most relevant).\n"
+            "Return ONLY a comma-separated list of numbers.\n"
+            "Items:\n"
+        )
+        for i, cand in enumerate(candidates):
+            prompt += f"{i+1}. {cand[:120]}\n"
+
+        try:
+            resp = requests.post(
+                self.url,
+                json={
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "options": {"temperature": 0.1, "num_predict": 30},
+                    "stream": False
+                },
+                timeout=8,
+                verify=False
+            )
+            if resp.status_code == 200:
+                content = resp.json().get("message", {}).get("content", "").strip()
+                # Extract numbers
+                scores = [float(s.strip()) for s in re.findall(r"\b\d+\b", content)]
+                # Ensure length matches
+                if len(scores) < len(candidates):
+                    scores.extend([1.0] * (len(candidates) - len(scores)))
+                return scores[:len(candidates)]
+        except Exception:
+            pass
+        return [1.0] * len(candidates)
+
+    def rank(self, query: str, items: list[dict], token_budget: int = 550) -> list[str]:
+        """
+        Sorts items by Score * Weight and fits them into the token budget.
+        Items list: [{"kind": kind, "value": value, "weight": weight}]
+        """
+        if not items:
+            return []
+
+        candidates_text = [i["value"] for i in items]
+        scores = self._call_scoring_model(query, candidates_text)
+
+        scored_items = []
+        for i, item in enumerate(items):
+            # Final Score = AI Relevancy * Saliency/Kind Weight
+            relevancy = scores[i] if i < len(scores) else 1.0
+            final_score = relevancy * item.get("weight", 1.0)
+            scored_items.append((final_score, item["value"]))
+
+        # Sort descending
+        scored_items.sort(key=lambda x: x[0], reverse=True)
+
+        # Fit to budget (roughly 4 chars per token)
+        result = []
+        current_chars = 0
+        char_limit = token_budget * 3.8 # Heuristic buffer
+
+        for _, text in scored_items:
+            text_len = len(text)
+            if current_chars + text_len > char_limit:
+                break
+            result.append(text)
+            current_chars += text_len
+
+        return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # MemorySystem
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -252,6 +345,7 @@ class MemorySystem:
 
         # Pinecone — L3 only
         self.pinecone = PineconeLayer()
+        self.ranker   = MemoryRanker()
 
         # Session memory (L2) — in-memory, cleared on stream stop
         self._session_items: list[dict] = []
@@ -1023,84 +1117,79 @@ class MemorySystem:
             print(f"[Memory] get_context error: {e}")
             return ""
 
-    def get_relevant_context(self, user_input: str) -> str:
+    def get_relevant_context(self, user_input: str, is_public: bool = False) -> str:
         """
-        Semantic search cho L1 (SQLite cosine) + L3 (Pinecone).
-        Trả về top relevant memories để inject vào prompt.
+        Unified Ranking Pipeline:
+        1. Gathers candidates from L1 (Facts), L2 (Session), L3 (Temporal).
+        2. Filter out creator-private if is_public=True.
+        3. Use MemoryRanker (Model-based) to select top relevant context fitting ~550 tokens.
         """
-        cache_key = f"rag_{self.turn_counter}_{user_input.strip().lower()}"
+        cache_key = f"ranked_{self.turn_counter}_{is_public}_{user_input.strip().lower()}"
         if self._rag_context_cache and cache_key == self._rag_cache_key:
             return self._rag_context_cache
 
-        query_vec = _get_ollama_embedding(user_input)
-        results   = []
-        touched   = []
+        candidates = []
 
-        # ── L1: SQLite cosine search ──────────────────────────────────────────
+        # ── Collect L1 Candidates (User/Shared) ────────────────────────────────
         try:
             conn = self._get_db()
             if conn:
                 c = conn.cursor()
-                if self._relevant_items_cache is None:
-                    self._relevant_items_cache = list(c.execute(
-                        "SELECT kind, value, saliency, embedding FROM memory_items "
-                        "WHERE layer=? AND superseded=0 "
-                        "ORDER BY saliency DESC, created_at DESC LIMIT 100",
-                        (LAYER_USER,)
-                    ))
-                rows = self._relevant_items_cache
+                # Fetch more than we need for the ranker to choose
+                rows = list(c.execute(
+                    "SELECT kind, value, weight, saliency FROM memory_items "
+                    "WHERE layer=? AND superseded=0 "
+                    "ORDER BY saliency DESC, created_at DESC LIMIT 50",
+                    (LAYER_USER,)
+                ))
+                for r in rows:
+                    kind = r["kind"]
+                    # Privacy filter
+                    if is_public and kind in ("profile", "relational"):
+                        continue
+                    candidates.append({
+                        "kind": kind,
+                        "value": r["value"],
+                        "weight": r["weight"] * (1.0 + (r["saliency"] / 10.0))
+                    })
+        except Exception:
+            pass
 
-                if query_vec is not None and np is not None:
-                    scored = []
-                    for r in rows:
-                        if r["embedding"]:
-                            try:
-                                vec   = np.frombuffer(r["embedding"], dtype=np.float32)
-                                score = _cosine_similarity(query_vec, vec)
-                                final = score * 0.8 + min(1, r["saliency"] / 10) * 0.2
-                                scored.append((final, r["kind"], r["value"]))
-                            except Exception:
-                                continue
-                    scored.sort(key=lambda x: x[0], reverse=True)
-                    for score, kind, value in scored[:4]:
-                        if score > 0.45:
-                            results.append(value)
-                            touched.append((kind, value))
-                else:
-                    # Keyword fallback
-                    query_tokens = self._tokenize(user_input)
-                    for r in rows:
-                        overlap = len(query_tokens & self._tokenize(r["value"]))
-                        if overlap:
-                            results.append(r["value"])
-                            touched.append((r["kind"], r["value"]))
-                    results = results[:3]
-                    touched = touched[:3]
-        except Exception as e:
-            print(f"[Memory] L1 search error: {e}")
+        # ── Collect L2 Candidates (Session) ────────────────────────────────────
+        for item in self._session_items[-10:]:
+            candidates.append({
+                "kind": "session",
+                "value": item["value"],
+                "weight": 1.2 # Recent session events are highly relevant
+            })
 
-        # ── L3: Pinecone semantic search ──────────────────────────────────────
+        # ── Collect L3 Candidates (Temporal RAG) ──────────────────────────────
+        query_vec = _get_ollama_embedding(user_input)
         if query_vec is not None and self.pinecone._enabled:
             try:
-                matches = self.pinecone.query(query_vec.tolist(), top_k=4)
+                matches = self.pinecone.query(query_vec.tolist(), top_k=6)
                 for m in matches:
-                    if m["score"] > 0.70:
+                    if m["score"] > 0.65:
                         val = m["metadata"].get("value", "")
-                        if val and val not in results:
-                            results.append(val)
-            except Exception as e:
-                print(f"[Memory] Pinecone search error: {e}")
+                        if val:
+                            candidates.append({
+                                "kind": "temporal",
+                                "value": val,
+                                "weight": m["score"] * 1.5 # Boost RAG matches
+                            })
+            except Exception:
+                pass
 
-        if not results:
-            self._rag_cache_key   = cache_key
+        # ── Ranking ───────────────────────────────────────────────────────────
+        context_items = self.ranker.rank(user_input, candidates, token_budget=550)
+
+        if not context_items:
+            self._rag_cache_key = cache_key
             self._rag_context_cache = ""
             return ""
 
-        if touched:
-            self.touch_items(touched)
-
-        result = "Relevant memory highlights:\n" + "\n".join(f"- {m}" for m in results[:6])
-        self._rag_cache_key   = cache_key
+        result = "Bối cảnh quan trọng:\n" + "\n".join(f"- {m}" for m in context_items)
+        self._rag_cache_key = cache_key
         self._rag_context_cache = result
         return result
 
@@ -1290,6 +1379,63 @@ class MemorySystem:
                         (now, kind, value)
                     )
             conn.commit()
+
+    def consolidate_episodic_to_semantic(self):
+        """
+        Complementary Learning System (CLS) - Post-stream consolidation.
+        Distills today's episodic events into permanent L1 facts.
+        """
+        try:
+            from cls_consolidator import CLSConsolidator
+            consolidator = CLSConsolidator()
+            
+            # 1. Fetch today's episodes (last 16h)
+            conn = self._get_db()
+            if not conn: return
+            
+            cutoff = (datetime.now() - timedelta(hours=16)).isoformat()
+            rows = conn.execute(
+                "SELECT value FROM memory_items WHERE kind='episodic' AND created_at > ? AND superseded=0",
+                (cutoff,)
+            ).fetchall()
+            
+            episodes = [r["value"] for r in rows]
+            if not episodes:
+                print("[CLS] No new episodes to consolidate.")
+                return
+
+            # 2. Get current semantic context for the AI to compare
+            current_facts = {
+                "likes": self.memory.get("preferences", {}).get("likes", [])[:10],
+                "goals": self.memory.get("facts", {}).get("goals", [])[:5]
+            }
+
+            # 3. Distill
+            print(f"[CLS] Consolidating {len(episodes)} episodes...")
+            new_facts = consolidator.distill_episodic_memories(episodes, current_facts)
+            
+            # 4. Integrate into DB
+            if new_facts:
+                for item in new_facts:
+                    kind = item.get("kind")
+                    val  = item.get("value")
+                    if kind and val:
+                        self.add_item(kind, val, weight=1.1)
+                print(f"[CLS] Integrated {len(new_facts)} new semantic facts.")
+
+            # 5. Personality shifts (optional, hidden in DB for now)
+            summary = self._rolling_stream_summary
+            shifts = consolidator.update_personality_indices(episodes, summary)
+            if shifts:
+                # Update mood bias or other indicators in metadata
+                with self.db_lock:
+                    for key, val in shifts.items():
+                        conn.execute("INSERT OR REPLACE INTO metadata VALUES (?,?)", (f"idx_{key}", str(val)))
+                    conn.commit()
+                print(f"[CLS] Personality indices updated: {shifts}")
+
+        except Exception as e:
+            print(f"[CLS] Consolidation failed: {e}")
 
     def consolidate(self):
         """Xóa L1 items stale. L3 items không bị xóa (temporal = lịch sử)."""

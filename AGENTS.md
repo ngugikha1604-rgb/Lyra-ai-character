@@ -35,29 +35,34 @@ Handles:
 
 ---
 
-### 2. Memory System (Layered Architecture)
+### 2. Memory System (Advanced Cognitive Architecture)
 
-Lyra uses a structured, three-layer memory system to balance personality consistency, short-term awareness, and long-term history.
+Lyra uses a structured, three-layer memory system inspired by human neurobiology to balance personality consistency, short-term awareness, and long-term history.
 
 **Storage**: Hybrid (SQLite for structure + Pinecone for vector search).
 
 #### Memory Layers:
-| Layer | Content | Storage | Injection Logic |
-|-------|---------|---------|-----------------|
-| **L1 — Shared Long-term Memory** | Cross-session memory learned from owner + stream (topics, goals, relational signals, recurring events). | SQLite | Injected for owner and stream (compact + relevant) |
-| **L2 — Session Memory** | Context from the current stream/chat session. | In-memory | Always injected during session |
-| **L3 — Temporal** | Episodic summaries and historical events. | SQLite + Pinecone | Semantic search (RAG) match only |
+| Layer | Psychological Equivalent | Storage | Injection Logic |
+|-------|--------------------------|---------|-----------------|
+| **L1 — Semantic** | Shared Long-term Memory (facts, traits, goals) | SQLite | Always available; injected via Ranker |
+| **L2 — Working Memory** | Short-term Awareness (current session events) | In-memory | Active during session; clears on 'sleep' |
+| **L3 — Episodic** | Temporal/Autobiographical context (past events) | Pinecone | Semantic search (RAG) retrieval only |
 
-**Memory scope policy (VERY IMPORTANT):**
-* **Shared-memory-first:** Stream/viewer interactions are a primary memory source for Lyra and can be saved into long-term memory.
-* **Creator-private memory:** Owner-specific private identity and diary-style internal notes must remain private and should not be injected to public stream viewers.
-* When in doubt: keep memory shared for learning, but never leak creator-private details in viewer-facing replies.
+#### Cognitive Components:
 
-**Key Features**:
-* **Layered Retrieval**: Prevents context bloat by only pulling what's necessary.
-* **Conflict Resolution**: Detects contradictions (e.g., changing likes) and updates facts while archiving historical changes to L3.
-* **Saliency Scoring**: Ranks memory importance (1-10).
-* **Automatic Consolidation**: Stale L1 items (low saliency, no access for 100 turns) are deleted to keep the database clean.
+*   **Working Memory & Attention Control (Ranking Module)**:
+    - Instead of simple FIFO, Lyra uses an **Attention Control** module.
+    - A light model (`qwen2.5:0.5b`) acts as a reranker, scoring candidates for relevancy.
+    - **Token Budgeting**: Only top items fitting a ~550 token window are "attended" to, mimicking human focus.
+*   **Complementary Learning Systems (CLS - Consolidation)**:
+    - Mimics the **sleep-phase consolidation** of the human brain.
+    - Triggered after every stream session (`/stream/stop`).
+    - **Distillation**: Analyzes today's episodic buffer to detect recurring patterns.
+    - **Integration**: Stable findings are migrated from L2/L3 to L1 (Semantic Memory).
+    - **Personality Adaptation**: Updates behavioral indices (mood bias, affection rate) based on daily vibe.
+*   **Layered Retrieval**: Prevents context bloat by only pulling what's necessary.
+*   **Conflict Resolution**: Detects contradictions (e.g., changing likes) and updates facts while archiving historical changes to L3.
+*   **Automatic Consolidation**: Stale L1 items are moved or deleted to keep the database clean.
 
 ---
 
@@ -145,10 +150,12 @@ Flow:
 ### 8. Psychological Tweaks & Dynamic Persona
 
 Advanced features implemented to make Lyra "human":
-* **Weekend Context**: Time-aware prompts dynamically switch her to a "lazy/gaming" vibe on weekends.
-* **Proactive Curiosity**: 15% random chance to override her response and force her to proactively ask the user about past `goals` or `topics`.
-* **Dynamic Persona Tiers**: Prompt injections override behavior based on affection (<30: cold/distant, 30-75: teasing/normal, >75: clingy/demanding).
-* **Dynamic Auto-Tokens**: Modifies the `max_tokens` API param dynamically. If she's tired (`attention < 3`), it locks to 40 max tokens (short, cold texts). If energized, it expands to 180 tokens.
+*   **Working Memory (Attention Control)**: A ranking module prioritized context based on semantic relevance, allowing her to stay "on topic" during complex discussions.
+*   **Sleep-phase Consolidation (CLS)**: Post-stream distillation of episodic events into semantic core traits, enabling her personality to evolve naturally over time.
+*   **Weekend Context**: Time-aware prompts dynamically switch her to a "lazy/gaming" vibe on weekends.
+*   **Proactive Curiosity**: 15% random chance to override her response and force her to proactively ask the user about past `goals` or `topics`.
+*   **Dynamic Persona Tiers**: Prompt injections override behavior based on affection (<30: cold/distant, 30-75: teasing/normal, >75: clingy/demanding).
+*   **Dynamic Auto-Tokens**: Modifies the `max_tokens` API param dynamically. If she's tired (`attention < 3`), it locks to 40 max tokens (short, cold texts). If energized, it expands to 180 tokens.
 
 ---
 
