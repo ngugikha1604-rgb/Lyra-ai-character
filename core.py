@@ -39,6 +39,7 @@ from prompts import (
     STREAM_FAREWELL_PROMPT,
     PROACTIVE_STREAM_PROMPT,
     REGULAR_VIEWER_ARRIVAL_HINT,
+    DIARY_GENERATION_PROMPT,
 )
 
 from time_utils import (
@@ -88,6 +89,7 @@ class MiniAI:
         self.conv_state = ConversationStateDetector(window=10)
         self._thread_local = __import__("threading").local()  # per-thread flags
         self.memory.load()
+        self.is_streaming = False
 
         # Khởi tạo messages từ lịch sử đã lưu trong memory sau khi memory đã load xong
         self.messages = self.memory.memory.get("conversation", {}).get("conversation_thread", [])
@@ -439,12 +441,9 @@ class MiniAI:
             self.time_gap_hours, self.last_message_time
         )
 
+        # Shared-memory mode: stream turns also contribute to Lyra's growth.
         self.turn_counter += 1
         intent = self.detect_intent(user_input)
-
-        # Với viewer: không extract memory vào DB chính của owner
-        if source_type != "owner":
-            self._thread_local.skip_memory_extraction = True
 
         self.extract_memory(user_input, intent)
         self.emotion.update(user_input, self.time_gap_hours)
@@ -454,6 +453,18 @@ class MiniAI:
             viewer_name = (viewer_data or {}).get("viewer_name", "")
             if viewer_name:
                 self.memory.add_session_item(f"{viewer_name} nhắn: {user_input[:80]}", kind="session")
+            # Selective viewer memory (temporary): extract a few high-signal hints into L2 cache.
+            # This matches: keep viewer memory per stream and free it on stream stop.
+            try:
+                text_for_extract = re.sub(r"^\[[^\]]+\]:\s*", "", user_input).strip()
+                candidates = self.memory.extract_candidates_heuristic(text_for_extract)
+                for cand in candidates[:2]:
+                    k = cand.get("kind")
+                    v = cand.get("value", "")
+                    if k in ("topic", "episodic", "goal", "like", "dislike") and v:
+                        self.memory.add_session_item(f"Hint ({k}): {v[:120]}", kind="session")
+            except Exception:
+                pass
 
         # Override affection tạm thời theo source_type
         _original_affection = self.emotion.affection
@@ -469,6 +480,7 @@ class MiniAI:
         # Update conversation state
         self.conv_state.update(user_input, self.messages)
 
+        # Keep memory maintenance active in shared-memory mode.
         self.summarize_history()
         if self.turn_counter % 20 == 0:
             self.memory.consolidate()
@@ -1166,6 +1178,50 @@ class MiniAI:
         with open(stats_path, "w", encoding="utf-8") as f:
             json.dump(stats, f, indent=2)
 
+    def write_diary_entry(self):
+        """
+        Tổng hợp dữ liệu và viết nhật ký bí mật sau buổi stream/chat.
+        """
+        try:
+            print("[Core] Writing secret diary...")
+            
+            # 1. Lấy context buổi chat
+            session_ctx = self.memory.get_session_context()
+            if not session_ctx:
+                # Nếu session trống thì lấy vài summaries gần nhất
+                summaries = self.memory.get_diary_entries(limit=3)
+                session_ctx = "\n".join([d["content"] for d in summaries])
+
+            emotion_desc = self.emotion.describe_internal_state()
+            affection = int(self.emotion.affection)
+            turns = self.turn_counter
+            
+            # 2. Sinh nội dung nhật ký
+            prompt = DIARY_GENERATION_PROMPT.format(
+                session_summary=session_ctx[:800],
+                emotion_state=emotion_desc,
+                affection_level=f"{affection}/100",
+                turns=turns
+            )
+            
+            entry_content = self._call_light_model([
+                {"role": "system", "content": "Bạn là Lyra đang viết nhật ký. Trả về plain text."},
+                {"role": "user", "content": prompt}
+            ])
+
+            if entry_content and len(entry_content.strip()) > 10:
+                # 3. Lưu vào DB
+                self.memory.add_diary_entry(
+                    content=entry_content.strip(),
+                    mood=self.emotion.mood,
+                    affection=self.emotion.affection
+                )
+                return True
+            return False
+        except Exception as e:
+            print(f"[Core] write_diary_entry error: {e}")
+            return False
+
     def build_prompt(self, intent, user_input, search_context="", source_type: str = "owner", viewer_data: dict = None, stream_context: str = "", loaded_skill_content: str = ""):
         # ── TIER 0: STATIC & FRAMEWORK (Always first for caching) ───────────
         if source_type == "owner":
@@ -1189,9 +1245,31 @@ class MiniAI:
         _stream_ctx = stream_context or getattr(self, "stream_context", "") or ""
 
         # ── TIER 2: DYNAMIC CONTEXT (Changes every message) ────────────────
-        basic_ctx = self.memory.get_context(user_input)
-        rag_ctx   = self.memory.get_relevant_context(user_input)
-        memory_context = "\n\n".join(filter(None, [basic_ctx, rag_ctx, search_context]))
+        # Shared memory: allow stream/viewer to use Lyra's common memory.
+        rag_ctx = self.memory.get_relevant_context(user_input)
+        diary_hint = ""
+
+        if source_type == "owner":
+            basic_ctx = self.memory.get_context(user_input)
+            recent_diaries = self.memory.get_diary_entries(limit=1)
+            if recent_diaries:
+                diary_hint = f"\n[LYRA'S RECENT FEELINGS]\nYour last secret thought: '{recent_diaries[0]['content'][:150]}...'"
+        else:
+            shared_facts = []
+            mem_items = self.memory.memory.get("memory_items", {})
+            facts = self.memory.memory.get("facts", {})
+            if mem_items.get("topics"):
+                shared_facts.append("Known topics: " + ", ".join(mem_items["topics"][:6]))
+            if mem_items.get("goals"):
+                shared_facts.append("Known goals: " + ", ".join(mem_items["goals"][:4]))
+            if facts.get("inside_jokes"):
+                shared_facts.append("Inside jokes: " + ", ".join(facts["inside_jokes"][:3]))
+            if mem_items.get("relational"):
+                shared_facts.append("Long-term bonds: " + ", ".join(mem_items["relational"][:4]))
+            if shared_facts:
+                basic_ctx = "Shared memory highlights:\n" + "\n".join(f"- {p}" for p in shared_facts)
+
+        memory_context = "\n\n".join(filter(None, [basic_ctx, rag_ctx, search_context, diary_hint]))
         
         time_context = get_time_context(self.current_time, self.time_period)
 
@@ -1244,10 +1322,29 @@ class MiniAI:
         rhythm_hint = self.conv_state.get_rhythm_hint()
         conv_hints  = "\n".join(filter(None, [state_hint, rhythm_hint]))
 
+        # Assembly current situation
+        situation_note = "[SITUATION]\n"
+        if self.is_streaming:
+            situation_note += "Status: You are currently STREAMING LIVE on YouTube.\n"
+            situation_note += "Note: Interaction is public. Acknowledge your creator/brother naturally but remember the audience is watching."
+        else:
+            situation_note += "Status: You are in a PRIVATE CONVERSATION with your creator/brother.\n"
+            situation_note += "Note: You can be more intimate and relaxed here."
+        
+        # Identity block
+        identity = self.memory.memory.get("identity", {})
+        identity_note = ""
+        if identity:
+            identity_note = "[IDENTITY]\n"
+            for k, v in identity.items():
+                identity_note += f"- {k.capitalize()}: {v}\n"
+        
         # ASSEMBLY (Restructured for caching)
         parts = [
             base_personality,
+            identity_note,
             VTUBER_BRAIN_INSTRUCTIONS,
+            "\n" + situation_note,
             "\n[AVAILABLE SKILLS]",
             self._skills_index,
             time_context,
@@ -1515,6 +1612,13 @@ class MiniAI:
         except Exception as e:
             print(f"Proactive message error: {e}")
         return None
+
+    def prepare_for_stream(self):
+        """Chuẩn bị trạng thái Lyra hào hứng nhất để bắt đầu stream"""
+        print("[Core] Preparing state for livestream warm-up...")
+        self.emotion.attention = 10
+        self.memory.clear_session_memory()
+        self.is_streaming = True
 
     def save_memory(self):
         """Save memory to database"""

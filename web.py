@@ -12,6 +12,7 @@ import sqlite3
 import threading
 import requests
 import pytz
+from memory import DB_PATH, DB_LOCK
 from config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, FLASK_SECRET_KEY, FPT_API_KEY, FPT_TTS_URL, FPT_TTS_VOICE
 from config import STREAM_TITLE, STREAM_GAME, STREAM_GOALS, STREAM_NOTES
 from config import STREAM_REPLY_COOLDOWN, STREAM_NEW_VIEWER_INTERVAL, STREAM_REGULAR_MIN_MESSAGES
@@ -43,7 +44,7 @@ os.makedirs("./flask_sessions", exist_ok=True)
 
 Session(app)
 
-DB_PATH = "memory.db"
+# DB_PATH is imported from memory
 
 # ========================
 # STREAM CONTENT CONTEXT
@@ -404,9 +405,13 @@ def _trigger_stream_summary(channel_id: str, platform: str):
                 summary = summary.strip()
                 # Lưu vào DB stream_summaries
                 chat_analyzer.save_stream_summary(summary, channel_id, platform)
-                # Lưu vào episodic memory của Lyra để cô ấy "nhớ" buổi stream
-                lyra_ai.memory.add_item("episodic", f"[Stream] {summary}", weight=1.1, limit=8)
-                lyra_ai.memory._is_dirty = True
+                # Shared-memory mode: stream summary cũng đi vào long-term episodic memory.
+                lyra_ai.memory.add_item("episodic", f"[Stream] {summary}", weight=1.1, limit=12)
+                # Đồng thời cache tạm trong session để tăng phản xạ theo buổi stream hiện tại.
+                try:
+                    lyra_ai.memory.add_session_item(f"[Stream vibe] {summary[:160]}", kind="session")
+                except Exception:
+                    pass
                 print(f"[Stream] Summary: {summary}")
 
         except Exception as e:
@@ -904,9 +909,17 @@ def stream_start():
         if not live_chat_id:
             return jsonify({"error": "Provide live_chat_id or video_id"}), 400
 
+        # ── WARM-UP: Clear old session data & prime AI ──────────────
+        platform   = data.get("platform", "youtube")
+        channel_id = data.get("channel_id", "default")
+        
+        viewer_tracker.clear_session_stats(platform, channel_id)
+        chat_analyzer.reset_session_patterns(channel_id, platform)
+        lyra_ai.prepare_for_stream()
+
         result = yt_poller.start(credentials, live_chat_id)
 
-        # ── IDEA-02: Stream greeting ───────────────────────────────────────────
+        # ── IDEA-02: Stream greeting ──────────────────────────
         # Generate câu chào mở màn và broadcast qua SSE
         def _send_greeting():
             try:
@@ -973,6 +986,9 @@ def stream_stop():
     # Clear L2 Session Memory khi stream kết thúc
     lyra_ai.memory.clear_session_memory()
 
+    # Viết nhật ký bí mật sau buổi stream
+    threading.Thread(target=lyra_ai.write_diary_entry, daemon=True).start()
+
     # Reset greeted set cho session tiếp theo
     with _greeted_lock:
         _greeted_viewers_this_session.clear()
@@ -1005,6 +1021,7 @@ def stream_stop():
         print(f"[Stream] Milestone check error: {e}")
 
     result = yt_poller.stop()
+    lyra_ai.is_streaming = False
     result["promoted_viewers"] = promoted
     result["promoted_count"] = len(promoted)
     return jsonify(result)
@@ -1149,6 +1166,12 @@ def oauth2callback():
         'scopes': list(credentials.scopes) if credentials.scopes else [],
     }
     return "Xác thực thành công! Lyra đã có quyền truy cập YouTube."
+
+@app.route("/secret/diary")
+def view_diary():
+    """Trang xem nhật ký bí mật"""
+    entries = lyra_ai.memory.get_diary_entries(limit=30)
+    return render_template("diary.html", entries=entries)
 
 # ========================
 # MAIN

@@ -5,8 +5,7 @@ import sqlite3
 import threading
 import math
 from datetime import datetime
-
-DB_PATH = "memory.db"
+from memory import DB_PATH, DB_LOCK
 
 # Chỉ lưu message của viewer đủ "quen" để tránh DB phình to
 SAVE_MESSAGE_MIN_COUNT = 3      # message_count >= 3 mới lưu message history
@@ -29,7 +28,7 @@ class ViewerTracker:
 
     def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
-        self.db_lock = threading.Lock()
+        self.db_lock = DB_LOCK
         self._init_tables()
         # Cache regular_viewers để tránh DB lookup mỗi message
         self._regular_cache: dict = {}   # viewer_id+platform → dict
@@ -317,6 +316,21 @@ class ViewerTracker:
             print(f"[ViewerTracker] promote_regular_viewers error: {e}")
 
         return promoted
+    
+    def clear_session_stats(self, platform: str, channel_id: str):
+        """Xóa sạch bảng viewer_stats để bắt đầu buổi stream mới (giữ lại regular_viewers)"""
+        try:
+            conn = self._get_conn()
+            with self.db_lock:
+                conn.execute(
+                    "DELETE FROM viewer_stats WHERE platform=? AND channel_id=?",
+                    (platform, channel_id)
+                )
+                conn.commit()
+            conn.close()
+            print(f"[ViewerTracker] Session stats cleared for {platform}/{channel_id}")
+        except Exception as e:
+            print(f"[ViewerTracker] clear_session_stats error: {e}")
 
     def get_regular_viewers(self, platform: str = None, limit: int = 50) -> list:
         """Trả về danh sách regular viewers, sắp xếp theo affection giảm dần"""
@@ -470,7 +484,7 @@ class ChatPatternAnalyzer:
 
     def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
-        self.db_lock = threading.Lock()
+        self.db_lock = DB_LOCK
         self._message_counter = 0   # đếm messages trong session hiện tại
         self._word_freq: collections.Counter = collections.Counter()
         self._emoji_freq: collections.Counter = collections.Counter()
@@ -573,6 +587,26 @@ class ChatPatternAnalyzer:
             self._style_cache_dirty = True
         except Exception as e:
             print(f"[ChatPattern] flush_patterns error: {e}")
+
+    def reset_session_patterns(self, channel_id: str, platform: str):
+        """Reset sạch các pattern cũ để nhận diện vibe mới của buổi stream"""
+        try:
+            self._word_freq.clear()
+            self._emoji_freq.clear()
+            self._message_counter = 0
+            self._style_cache_dirty = True
+            
+            conn = self._get_conn()
+            with self.db_lock:
+                conn.execute(
+                    "DELETE FROM chat_patterns WHERE channel_id=? AND platform=?",
+                    (channel_id, platform)
+                )
+                conn.commit()
+            conn.close()
+            print(f"[ChatPattern] session patterns reset for {platform}/{channel_id}")
+        except Exception as e:
+            print(f"[ChatPattern] reset_session_patterns error: {e}")
 
     # ------------------------------------------------------------------
     # 2. Style hints cho prompt

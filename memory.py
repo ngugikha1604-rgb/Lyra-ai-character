@@ -21,6 +21,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH  = os.path.join(BASE_DIR, "memory.db")
 MEMORY_PATH = os.path.join(BASE_DIR, "memory.json")
 MODELS_DIR  = os.path.join(BASE_DIR, "models")
+# Global lock cho SQLite để tránh "database is locked" giữa các thread/class
+DB_LOCK = threading.Lock()
 
 # Layer constants
 LAYER_USER    = "user"     # L1 — bất biến, luôn inject
@@ -100,8 +102,21 @@ class PineconeLayer:
         self.index_name = PINECONE_INDEX
         self._host: str | None = None  # lazy-loaded
         self._enabled = bool(self.api_key)
+        self.dimension = None # Auto-detected
         if not self._enabled:
             print("[Pinecone] No API key — L3 vector search disabled.")
+        else:
+            self._detect_dimension()
+
+    def _detect_dimension(self):
+        """Tự động detect dimension bằng cách probe embedding model."""
+        try:
+            sample_vec = _get_ollama_embedding("probe")
+            if sample_vec is not None:
+                self.dimension = len(sample_vec)
+                print(f"[Pinecone] Auto-detected dimension: {self.dimension}")
+        except Exception as e:
+            print(f"[Pinecone] Dimension detection error: {e}")
 
     def _get_host(self) -> str | None:
         """Lấy host URL của index (lazy, cache lại)."""
@@ -223,7 +238,7 @@ class PineconeLayer:
 class MemorySystem:
     def __init__(self, max_summaries=8):
         self._db_connection = None
-        self.db_lock = threading.Lock()
+        self.db_lock = DB_LOCK # Dùng chung khóa toàn cục
         self._basic_context_cache  = None
         self._rag_context_cache    = None
         self._rag_cache_key        = None
@@ -264,6 +279,7 @@ class MemorySystem:
             c = conn.cursor()
             c.executescript("""
                 CREATE TABLE IF NOT EXISTS profile (key TEXT PRIMARY KEY, value TEXT);
+                CREATE TABLE IF NOT EXISTS self_profile (key TEXT PRIMARY KEY, value TEXT);
                 CREATE TABLE IF NOT EXISTS preferences (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     type TEXT NOT NULL, value TEXT NOT NULL, UNIQUE(type, value)
@@ -318,6 +334,13 @@ class MemorySystem:
                     resolved_at TEXT NOT NULL,
                     note        TEXT DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS diaries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    content TEXT NOT NULL,
+                    mood_score REAL,
+                    affection_score REAL,
+                    timestamp TEXT DEFAULT (datetime('now'))
+                );
             """)
             # Migration: thêm columns mới nếu DB cũ chưa có
             existing_cols = {row[1] for row in c.execute("PRAGMA table_info(memory_items)")}
@@ -358,6 +381,7 @@ class MemorySystem:
             "time_tracking": {"last_message_time": None, "time_gap_hours": 0, "first_greeting_sent": False, "greeting_history": []},
             "preferences_ai": {"preferred_response_style": "neutral", "tone_preference": "casual", "length_preference": "short"},
             "analytics": {"emotion_distribution": {}, "mood_history": [], "daily_stats": {}, "topic_frequency": {}},
+            "identity": {"name": "Lyra", "gender": "Nữ", "occupation": "VTuber"},
         }
 
 
@@ -402,6 +426,10 @@ class MemorySystem:
 
         def get_profile(key):
             r = c.execute("SELECT value FROM profile WHERE key=?", (key,)).fetchone()
+            return r[0] if r else None
+
+        def get_self_profile(key):
+            r = c.execute("SELECT value FROM self_profile WHERE key=?", (key,)).fetchone()
             return r[0] if r else None
 
         # Chỉ load L1 User Memory vào RAM — L3 Temporal được query on-demand
@@ -454,6 +482,11 @@ class MemorySystem:
             "user_profile": {
                 "name": get_profile("name"), "location": get_profile("location"),
                 "age_range": get_profile("age_range"), "occupation": get_profile("occupation"),
+            },
+            "identity": {
+                "name": get_self_profile("name") or "Lyra",
+                "gender": get_self_profile("gender") or "Nữ",
+                "occupation": get_self_profile("occupation") or "VTuber",
             },
             "preferences": {"likes": likes, "dislikes": dislikes, "interests": [], "hobbies": []},
             "facts": {"personal": [], "topics": topics, "achievements": [], "goals": goals, "inside_jokes": inside_jokes},
@@ -809,6 +842,10 @@ class MemorySystem:
                 if v:
                     c.execute("INSERT OR REPLACE INTO profile VALUES (?,?)", (k, str(v)))
 
+            for k, v in self.memory.get("identity", {}).items():
+                if v:
+                    c.execute("INSERT OR REPLACE INTO self_profile VALUES (?,?)", (k, str(v)))
+
             for item in self.memory["preferences"].get("likes", []):
                 c.execute("INSERT OR IGNORE INTO preferences (type,value) VALUES ('like',?)", (item,))
             for item in self.memory["preferences"].get("dislikes", []):
@@ -878,14 +915,50 @@ class MemorySystem:
         self._relevant_items_cache = None
 
 
-    # ── Context building (layered) ─────────────────────────────────────────────
-    def get_context(self, user_input=""):
+    def get_context(self, user_input: str, intent: str = None, is_public: bool = False):
         """
-        L1 User Memory context — luôn inject, compact.
-        Không thay đổi theo user_input (cached).
+        Build prompt context (L1 profiling + L2 session + L3 Temporal RAG).
+        Nếu is_public=True (Stream mode), sẽ lọc bỏ các thông tin nhạy cảm.
+        Đồng thời 'touch' (update access_count) cho các memory được inject để tránh bị xóa nhầm.
         """
+        # Tránh dùng cache nếu role (public/private) thay đổi
+        cache_key = f"basic_{is_public}"
+        if hasattr(self, "_last_context_role") and self._last_context_role != is_public:
+            self._basic_context_cache = None
+        self._last_context_role = is_public
+
         if self._basic_context_cache is not None:
             return self._basic_context_cache
+
+        full = self.memory
+        
+        # 1. Thu thập danh sách (kind, value) để 'touch'
+        to_touch = []
+        
+        # L1 Profile
+        up = full.get("user_profile", {})
+        for k, v in up.items():
+            if v: to_touch.append(("profile", v))
+        
+        # Identity (Lyra's own info)
+        ident = full.get("identity", {})
+        for k, v in ident.items():
+             if v: to_touch.append(("identity", v))
+
+        # L1 Facts/Preferences
+        for k in ["likes", "dislikes"]:
+            for v in full.get("preferences", {}).get(k, []):
+                to_touch.append((k.rstrip('s'), v))
+        
+        for k in ["topics", "goals", "inside_jokes"]:
+            for v in full.get("facts", {}).get(k, []):
+                to_touch.append((k.rstrip('s'), v))
+
+        # Thực hiện touch ngầm (background) để ko cản trở build prompt
+        if to_touch:
+            threading.Thread(target=self.touch_items, args=(to_touch,), daemon=True).start()
+
+        # 2. Build parts
         try:
             profile = self.memory.get("user_profile", {})
             prefs   = self.memory.get("preferences", {})
@@ -894,10 +967,14 @@ class MemorySystem:
             parts   = []
 
             profile_bits = []
+            # LỌC THÔNG TIN: Nếu đang public, có thể ẩn đi các thông tin quá chi tiết
             if profile.get("name"):       profile_bits.append(profile["name"])
             if profile.get("age_range"):  profile_bits.append(profile["age_range"])
-            if profile.get("occupation"): profile_bits.append(profile["occupation"])
-            if profile.get("location"):   profile_bits.append(f"from {profile['location']}")
+            
+            if not is_public:
+                if profile.get("occupation"): profile_bits.append(profile["occupation"])
+                if profile.get("location"):   profile_bits.append(f"from {profile['location']}")
+            
             if profile_bits:
                 parts.append("They are: " + ", ".join(profile_bits))
 
@@ -907,16 +984,21 @@ class MemorySystem:
             if topics:              parts.append("Into: "  + ", ".join(topics[:6]))
             if facts.get("goals"):  parts.append("Goals: " + ", ".join(facts["goals"][:3]))
 
-            # Restore lost context: Inside Jokes and Relational bond
+            # Inside Jokes and Relational bond
             jokes = facts.get("inside_jokes", [])
             if jokes: parts.append("Jokes: " + ", ".join(jokes[:3]))
-            rel = self.memory.get("memory_items", {}).get("relational", [])
-            if rel: parts.append("Bond: " + ", ".join(rel[:4]))
+            
+            # Chỉ hiện Bond (affection/notes) ở private chat
+            if not is_public:
+                rel = self.memory.get("memory_items", {}).get("relational", [])
+                if rel: parts.append("Bond: " + ", ".join(rel[:4]))
 
             if not parts:
                 self._basic_context_cache = ""
                 return ""
-            self._basic_context_cache = "What you know about them:\n" + "\n".join(f"- {p}" for p in parts)
+            
+            header = "What you know about them:\n" if not is_public else "Stream Context (Viewer/Creator Info):\n"
+            self._basic_context_cache = header + "\n".join(f"- {p}" for p in parts)
             return self._basic_context_cache
         except Exception as e:
             print(f"[Memory] get_context error: {e}")
@@ -1249,6 +1331,36 @@ class MemorySystem:
             print(f"[Memory] get_stream_milestones error: {e}")
             return []
 
+    # ── Secret Diary ──────────────────────────────────────────────────────────
+    def add_diary_entry(self, content: str, mood: float = 0.0, affection: float = 50.0):
+        try:
+            conn = self._get_db()
+            if not conn:
+                return
+            with self.db_lock:
+                conn.execute(
+                    "INSERT INTO diaries (content, mood_score, affection_score) VALUES (?,?,?)",
+                    (content, mood, affection)
+                )
+                conn.commit()
+                print(f"[Memory] New diary entry saved.")
+        except Exception as e:
+            print(f"[Memory] add_diary_entry error: {e}")
+
+    def get_diary_entries(self, limit: int = 10) -> list:
+        try:
+            conn = self._get_db()
+            if not conn:
+                return []
+            rows = conn.execute(
+                "SELECT id, content, mood_score, affection_score, timestamp FROM diaries ORDER BY id DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            print(f"[Memory] get_diary_entries error: {e}")
+            return []
+
     # ── In-memory fallback (khi DB locked) ────────────────────────────────────
     def _get_in_memory_fallback(self):
         class _FallbackDB:
@@ -1268,3 +1380,10 @@ class MemorySystem:
             self._fallback_conn = _FallbackDB()
             print("[Memory] Using in-memory fallback mode")
         return self._fallback_conn
+
+    def set_self_info(self, key: str, value: str):
+        """Lưu thông tin bản diện của LYRA (Identity)"""
+        if not value: return
+        if "identity" not in self.memory: self.memory["identity"] = {}
+        self.memory["identity"][key] = value
+        self._is_dirty = True
