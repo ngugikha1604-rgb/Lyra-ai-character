@@ -1,6 +1,7 @@
 # Conversation State Machine + Rhythm Detection for Lyra
 
 import re
+import random
 from collections import deque
 
 
@@ -30,12 +31,20 @@ _GOODBYE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Topic-shift: semantic distance is expensive, so we use a cheap heuristic —
-# a sudden short message after a long exchange, or explicit transition words.
+# Vocabulary / Complexity Patterns
+_SLANG_PATTERNS = re.compile(
+    r"\b(vl|cl|vãi|đỉnh|chúa hề|vibe|chill|mlem|gấu|crush|cringe|phốt|drama|quẩy|xịn|mướt)\b",
+    re.IGNORECASE
+)
+
+_INTELLECTUAL_PATTERNS = re.compile(
+    r"\b(thuật toán|tâm lý|vĩ mô|vi mô|logic|phân tích|triết học|hệ tư tưởng|entropy|nhận thức|đồng bộ|kiến trúc|vận hành|hệ thống|mô hình|trừu tượng)\b",
+    re.IGNORECASE
+)
+
 _SHIFT_PATTERNS = re.compile(
-    r"\b(anyway|btw|by the way|oh wait|à mà|ừ mà|thôi chuyển sang|"
-    r"nói chuyện khác|đổi chủ đề|nhân tiện)\b",
-    re.IGNORECASE,
+    r"\b(mà nè|à mà|đổi chủ đề|chuyện khác|sang chuyện|nhân tiện|by the way|anyway)\b",
+    re.IGNORECASE
 )
 
 
@@ -50,6 +59,13 @@ class ConversationStateDetector:
         self._user_lengths: deque[int] = deque(maxlen=window)
         self._state: str = STATE_GREETING
         self._turn: int = 0
+        
+        # Style / Complexity scores
+        self._slang_count: int = 0
+        self._intellectual_count: int = 0
+        
+        # Reward Schedule (Variable Ratio Reinforcement)
+        self._last_reward_turn: int = 0
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -64,7 +80,33 @@ class ConversationStateDetector:
         """
         self._turn += 1
         text = (user_input or "").strip()
-        self._user_lengths.append(len(text))
+        # Only track lengths of substantial messages to avoid the "brevity death spiral"
+        if len(text) > 3:
+            self._user_lengths.append(len(text))
+
+        # Update scoring (simple additive with slow decay)
+        if _SLANG_PATTERNS.search(text):
+            self._slang_count = min(self._slang_count + 2, 10)
+        else:
+            self._slang_count = max(0, self._slang_count - 1)
+
+        if _INTELLECTUAL_PATTERNS.search(text):
+            self._intellectual_count = min(self._intellectual_count + 2, 10)
+        else:
+            self._intellectual_count = max(0, self._intellectual_count - 1)
+
+        # ── Vocabulary Scoring 2.0 (spec refinement) ──
+        words = [w for w in re.findall(r"\w+", text.lower()) if len(w) >= 2]
+        if len(words) >= 5:
+            unique_ratio = len(set(words)) / len(words)
+            avg_word_len = sum(len(w) for w in words) / len(words)
+            
+            # If user uses many unique, long words -> increase intellectual score
+            if unique_ratio > 0.8 and avg_word_len > 4.5:
+                self._intellectual_count = min(self._intellectual_count + 1, 10)
+            # If user uses short, repetitive words -> increase slang/casual score
+            elif avg_word_len < 3.5:
+                self._slang_count = min(self._slang_count + 1, 10)
 
         self._state = self._detect_state(text, messages)
         return self._state
@@ -78,14 +120,21 @@ class ConversationStateDetector:
             return ""
 
         avg = sum(self._user_lengths) / len(self._user_lengths)
+        
+        # Complexity Hint (Mirroring)
+        complexity_note = ""
+        if self._intellectual_count >= 4:
+            complexity_note = " User's vocabulary is intellectual/deep. Match their depth, be more philosophical."
+        elif self._slang_count >= 4:
+            complexity_note = " User is using teen slang/casual vibe. Match their zoomer energy, use casual Vietnamese."
 
         if avg <= 15:
-            return "User writes very short messages. Match their brevity — 1 sentence max."
+            return f"User writes very short messages. Match their brevity — 1 sentence max.{complexity_note}"
         if avg <= 40:
-            return "User writes short-to-medium messages. Keep replies to 1-2 sentences."
+            return f"User writes short-to-medium messages. Keep replies to 1-2 sentences.{complexity_note}"
         if avg <= 100:
-            return "User writes medium-length messages. 2 sentences is fine."
-        return "User writes longer messages. You can be slightly more expressive, but still concise."
+            return f"User writes medium-length messages. 2 sentences is fine.{complexity_note}"
+        return f"User writes longer messages. You can be slightly more expressive, but still concise.{complexity_note}"
 
     def get_state_hint(self) -> str:
         """
@@ -166,3 +215,17 @@ class ConversationStateDetector:
 
         # Default: keep previous state (stability)
         return self._state
+
+    def should_trigger_reward(self, probability: float = 0.07) -> bool:
+        """
+        Implements Variable Ratio Reinforcement schedule.
+        Returns True if a 'micro-reward' (compliment, debate, etc.) should be triggered.
+        """
+        # Cooldown of at least 3 turns to keep it surprising but not spammy
+        if self._turn - self._last_reward_turn < 3:
+            return False
+            
+        if random.random() < probability:
+            self._last_reward_turn = self._turn
+            return True
+        return False

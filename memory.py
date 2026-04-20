@@ -10,6 +10,7 @@ import json
 import sqlite3
 import threading
 import requests
+import random
 from datetime import datetime, timedelta
 
 try:
@@ -1164,7 +1165,7 @@ class MemorySystem:
             })
 
         # ── Collect L3 Candidates (Temporal RAG) ──────────────────────────────
-        query_vec = _get_ollama_embedding(user_input)
+        query_vec = self._get_embedding(user_input)
         if query_vec is not None and self.pinecone._enabled:
             try:
                 matches = self.pinecone.query(query_vec.tolist(), top_k=6)
@@ -1392,6 +1393,33 @@ class MemorySystem:
                         (now, kind, value)
                     )
             conn.commit()
+
+    def get_rare_memory(self) -> str:
+        """
+        Retrieves a 'rare' memory: highly salient but rarely accessed.
+        Used for the Unpredictable Reward (Dopamine) system.
+        """
+        conn = self._get_db()
+        if not conn:
+            return ""
+            
+        try:
+            with self.db_lock:
+                # strategy: saliency >= 6, least accessed first, oldest first
+                query = """
+                    SELECT value FROM memory_items 
+                    WHERE kind IN ('like', 'dislike', 'goal', 'episodic', 'relational', 'inside_joke')
+                    AND saliency >= 6
+                    ORDER BY access_count ASC, RANDOM()
+                    LIMIT 20
+                """
+                res = conn.execute(query).fetchall()
+                if res:
+                    return random.choice(res)[0]
+        except Exception as e:
+            print(f"[Memory] get_rare_memory error: {e}")
+            
+        return ""
 
     def consolidate_episodic_to_semantic(self):
         """

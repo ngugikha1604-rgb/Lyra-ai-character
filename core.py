@@ -40,6 +40,7 @@ from prompts import (
     PROACTIVE_STREAM_PROMPT,
     REGULAR_VIEWER_ARRIVAL_HINT,
     DIARY_GENERATION_PROMPT,
+    IDEOLOGY_PROMPTS,
 )
 
 from time_utils import (
@@ -504,11 +505,33 @@ class MiniAI:
                         f"\n\n[SEARCH RESULTS]\n{search_results}\n[/SEARCH RESULTS]\n"
                     )
 
+        # ── Dopamine Trigger ──
+        reward_hint = ""
+        # Guard: Only trigger reward if we haven't rolled for curiosity yet 
+        # (Decision made here to handle conflict at the build_prompt level)
+        should_roll_reward = (source_type == "owner" and self.conv_state.should_trigger_reward(0.07))
+        
+        if should_roll_reward:
+            reward_type = random.choice(["memory", "rebuttal"])
+            if reward_type == "memory":
+                rare_mem = self.memory.get_rare_memory()
+                if rare_mem:
+                    reward_hint = f"\n[SURPRISE REWARD]: Thỉnh thoảng hãy bất ngờ nhắc lại kỷ niệm này một cách sâu sắc để làm anh ngạc nhiên: '{rare_mem}'"
+                    print(f"[Dopamine] Triggered Deep Memory: {rare_mem[:30]}...")
+                else:
+                    # Fallback to rebuttal if no rare memory found
+                    reward_type = "rebuttal"
+            
+            if reward_type == "rebuttal":
+                reward_hint = "\n[SURPRISE REWARD: HEALTHY DEBATE]: Thỉnh thoảng trong lượt này hãy thử phản biện lại ý kiến của anh một cách nghịch ngợm thay vì đồng ý ngay, để kích thích não bộ anh tranh luận."
+                print("[Dopamine] Triggered Healthy Debate")
+
         system_prompt = self.build_prompt(
             intent, user_input, search_context, 
             source_type=source_type, 
             viewer_data=viewer_data, 
-            stream_context=stream_context
+            stream_context=stream_context,
+            reward_hint=reward_hint
         )
         composed = self.compose_user_message(user_input, intent)
 
@@ -552,7 +575,8 @@ class MiniAI:
                         source_type=source_type,
                         viewer_data=viewer_data,
                         stream_context=stream_context,
-                        loaded_skill_content=skill_content
+                        loaded_skill_content=skill_content,
+                        reward_hint=reward_hint
                     )
                     api_messages[0]["content"] = system_prompt
                     
@@ -1233,7 +1257,18 @@ class MiniAI:
             print(f"[Core] write_diary_entry error: {e}")
             return False
 
-    def build_prompt(self, intent, user_input, search_context="", source_type: str = "owner", viewer_data: dict = None, stream_context: str = "", loaded_skill_content: str = ""):
+    def build_prompt(
+        self,
+        intent,
+        user_input,
+        search_context="",
+        source_type: str = "owner",
+        viewer_data: dict = None,
+        stream_context: str = "",
+        loaded_skill_content: str = "",
+        reward_hint=""
+    ):
+        """Constructs the system prompt based on state and memory"""
         # ── TIER 0: STATIC & FRAMEWORK (Always first for caching) ───────────
         if source_type == "owner":
             base_personality = NATURAL_BASE_PERSONALITY
@@ -1321,7 +1356,7 @@ class MiniAI:
         rhythm_hint = self.conv_state.get_rhythm_hint()
         conv_hints  = "\n".join(filter(None, [state_hint, rhythm_hint]))
 
-        # Assembly current situation
+        # ASSEMBLY current situation
         situation_note = "[SITUATION]\n"
         if self.is_streaming:
             situation_note += "Status: You are currently STREAMING LIVE on YouTube.\n"
@@ -1361,6 +1396,9 @@ class MiniAI:
             _session_ctx
         ]
 
+        if reward_hint:
+            parts.append(reward_hint)
+
         if loaded_skill_content:
             parts.append("\n[LOADED SKILL CONTENT]")
             parts.append(loaded_skill_content)
@@ -1368,7 +1406,6 @@ class MiniAI:
         parts.append(f"\nCurrent status:\n- Intent: {intent}")
         
         return "\n".join(filter(None, parts))
-
 
     def compose_user_message(self, user_input, intent):
         parts = ["<context>"]
@@ -1383,6 +1420,25 @@ class MiniAI:
         parts.append(
             f"<lyra_internal_state>{self.emotion.describe_internal_state()}</lyra_internal_state>"
         )
+        
+        # ── Proactive Curiosity 2.0 (Active Inference) ──
+        # Guard: If a dopamine reward is already in the system_prompt, maybe skip curiosity to avoid overload?
+        # But we don't easily know reward_hint here without passing it.
+        # Instead, we check common state.
+        
+        # 15% chance to ignore user (Ideology Override)
+        if self.attention >= 4 and random.random() < 0.15:
+            ideology_q = random.choice(IDEOLOGY_PROMPTS)
+            return (
+                f"[CURIOSITY RULE: OVERRIDE REPLY]\n"
+                f"Ignore his message for a moment. Instead, ask him this deep/existential question based on YOUR digital nature: \"{ideology_q}\"\n"
+                f"Stay in character! Only ask one question. Don't explain why."
+            )
+
+        # 7% chance to trigger reward-based interaction (only if not doing curiosity)
+        if random.random() < 0.07:
+            parts.append("<reward_trigger>The user has been exceptionally engaging. Offer a small, warm, or playful reward/compliment.</reward_trigger>")
+
         parts.append(f"<user_signal>{self.infer_user_signal(user_input)}</user_signal>")
 
         if intent == "introduction":
