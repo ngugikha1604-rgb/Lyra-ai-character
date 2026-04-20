@@ -18,6 +18,7 @@ from config import STREAM_TITLE, STREAM_GAME, STREAM_GOALS, STREAM_NOTES
 from config import STREAM_REPLY_COOLDOWN, STREAM_NEW_VIEWER_INTERVAL, STREAM_REGULAR_MIN_MESSAGES
 from dotenv import load_dotenv
 import google_auth_oauthlib.flow
+from vts_api import vts_bridge
 
 # Đường dẫn tới file bạn tải từ Google Cloud
 CLIENT_SECRETS_FILE = "client_secret.json"
@@ -117,6 +118,9 @@ viewer_tracker = ViewerTracker()
 chat_analyzer = ChatPatternAnalyzer()
 yt_poller = YouTubeChatPoller(viewer_tracker=viewer_tracker)
 
+# Start VTube Studio Bridge
+vts_bridge.start()
+
 # ========================
 # ROUTES
 # ========================
@@ -181,6 +185,13 @@ def chat():
         )
 
         response_payload = build_state_payload(lyra_ai, result=result)
+
+        # Sync with VTube Studio
+        if result:
+            if result.get("emotion"):
+                vts_bridge.trigger_emotion(result["emotion"])
+            if result.get("action"):
+                vts_bridge.trigger_action(result["action"])
 
         return jsonify(response_payload)
 
@@ -839,6 +850,14 @@ def _handle_stream_event(chat_event: dict):
             "viewer_message_count": viewer_info.get("message_count", 1),
             "viewer_affinity": viewer_info.get("affinity_score", 1.0),
         })
+        
+        # Sync with VTube Studio
+        if result:
+            if result.get("emotion"):
+                vts_bridge.trigger_emotion(result["emotion"])
+            if result.get("action"):
+                vts_bridge.trigger_action(result["action"])
+
         _sse_broadcast(payload)
 
     except Exception as e:

@@ -44,9 +44,14 @@ Lyra uses a structured, three-layer memory system to balance personality consist
 #### Memory Layers:
 | Layer | Content | Storage | Injection Logic |
 |-------|---------|---------|-----------------|
-| **L1 — User Memory** | Core identity (Profile, Likes, Goals, Relational bond). | SQLite | Always injected (compact format) |
+| **L1 — Shared Long-term Memory** | Cross-session memory learned from owner + stream (topics, goals, relational signals, recurring events). | SQLite | Injected for owner and stream (compact + relevant) |
 | **L2 — Session Memory** | Context from the current stream/chat session. | In-memory | Always injected during session |
 | **L3 — Temporal** | Episodic summaries and historical events. | SQLite + Pinecone | Semantic search (RAG) match only |
+
+**Memory scope policy (VERY IMPORTANT):**
+* **Shared-memory-first:** Stream/viewer interactions are a primary memory source for Lyra and can be saved into long-term memory.
+* **Creator-private memory:** Owner-specific private identity and diary-style internal notes must remain private and should not be injected to public stream viewers.
+* When in doubt: keep memory shared for learning, but never leak creator-private details in viewer-facing replies.
 
 **Key Features**:
 * **Layered Retrieval**: Prevents context bloat by only pulling what's necessary.
@@ -251,14 +256,16 @@ Lyra operates in two modes:
 
 Every `chat()` call carries a `source_type` that changes Lyra's behavior:
 
-| source_type | Who | Affection | Memory saved? |
-|-------------|-----|-----------|---------------|
-| `owner` | Streamer via STT | From `memory.db` | ✅ Full |
-| `regular_viewer` | Known viewer | From `regular_viewers` table | ❌ |
-| `new_viewer` | Unknown viewer | Fixed at 10 | ❌ |
-| `donor` | Super Chat sender | Boosted +20 temporarily | ❌ |
+| source_type | Who | Affection | Memory write policy |
+|-------------|-----|-----------|---------------------|
+| `owner` | Streamer via STT | From `memory.db` | ✅ Full (shared + creator-private) |
+| `regular_viewer` | Known viewer | From `regular_viewers` table | ✅ Shared memory (selective) |
+| `new_viewer` | Unknown viewer | Fixed at 10 | ✅ Shared memory (more selective) |
+| `donor` | Super Chat sender | Boosted +20 temporarily | ✅ Shared memory (event-aware) |
 
-**Critical rule:** Only `owner` chat saves to `memory.db`. Viewer chat never pollutes the owner's long-term memory.
+**Critical rule (updated):**
+* Memory is **shared across owner + stream** by default because stream is the main learning channel.
+* Do **not** expose creator-private memory (owner profile details/diary internals) in viewer-facing prompts/replies.
 
 ---
 
