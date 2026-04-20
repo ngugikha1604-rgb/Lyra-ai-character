@@ -78,7 +78,9 @@
       font-weight: 700;
       background: linear-gradient(90deg, var(--accent-primary), var(--accent-secondary));
       -webkit-background-clip: text;
+      background-clip: text;
       -webkit-text-fill-color: transparent;
+      color: transparent;
       letter-spacing: 1px;
     }
 
@@ -377,10 +379,14 @@
         </div>
       </div>
 
-      <div class="card" style="flex: 1;">
+      <div class="card" style="flex: 1; display: flex; flex-direction: column;">
         <div class="card-title">Stream Info</div>
-        <div id="streamDetails" style="font-size: 13px; color: var(--text-dim); line-height: 1.6;">
+        <div id="streamDetails" style="font-size: 13px; color: var(--text-dim); line-height: 1.6; margin-bottom: 15px;">
           Chưa bắt đầu stream...
+        </div>
+        <div id="rollingSummaryContainer" style="display:none; border-top: 1px solid var(--glass-border); padding-top: 15px; margin-top: auto;">
+          <div class="card-title" style="font-size: 11px;">Tóm tắt diễn biến</div>
+          <div id="rollingSummary" style="font-size: 12px; color: var(--accent-primary); line-height: 1.4; font-style: italic;"></div>
         </div>
       </div>
     </aside>
@@ -479,6 +485,17 @@
       }
     }
 
+    function updateCommonStats(data) {
+      if (data.emotion !== undefined) valEmotion.innerText = data.emotion;
+      if (data.affection !== undefined) valAffection.innerText = data.affection;
+      if (data.mood !== undefined) valMood.innerText = data.mood;
+      
+      if (data.rolling_stream_summary) {
+        document.getElementById("rollingSummaryContainer").style.display = "block";
+        document.getElementById("rollingSummary").innerText = data.rolling_stream_summary;
+      }
+    }
+
     function handleAIResponse(data) {
       if (data.reply) {
         appendMessage("assistant", data.reply);
@@ -487,11 +504,7 @@
       if (data.monologue) {
         showMonologue(data.monologue);
       }
-      
-      // Update Stats
-      valEmotion.innerText = data.emotion || "Neutral";
-      valAffection.innerText = data.affection || "50";
-      valMood.innerText = data.mood || "0";
+      updateCommonStats(data);
     }
 
     // --- STREAM CONTROLS ---
@@ -565,10 +578,7 @@
       }
       
       if (data.monologue) showMonologue(data.monologue);
-      
-      // Update stats
-      valEmotion.innerText = data.emotion || valEmotion.innerText;
-      valAffection.innerText = data.affection || valAffection.innerText;
+      updateCommonStats(data);
     };
 
     // --- INTERACTION ---

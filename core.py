@@ -90,6 +90,7 @@ class MiniAI:
         self._thread_local = __import__("threading").local()  # per-thread flags
         self.memory.load()
         self.is_streaming = False
+        self.stream_turn_counter = 0
 
         # Khởi tạo messages từ lịch sử đã lưu trong memory sau khi memory đã load xong
         self.messages = self.memory.memory.get("conversation", {}).get("conversation_thread", [])
@@ -450,9 +451,14 @@ class MiniAI:
 
         # Ghi L2 Session Memory khi stream (viewer chat)
         if source_type != "owner" and stream_context:
+            self.stream_turn_counter += 1
             viewer_name = (viewer_data or {}).get("viewer_name", "")
             if viewer_name:
                 self.memory.add_session_item(f"{viewer_name} nhắn: {user_input[:80]}", kind="session")
+            
+            # Tự động tóm tắt stream mỗi N tin nhắn (Dùng Light Model)
+            if self.stream_turn_counter % STREAM_SUMMARY_THRESHOLD == 0:
+                threading.Thread(target=self.update_stream_summary, daemon=True).start()
             # Selective viewer memory (temporary): extract a few high-signal hints into L2 cache.
             # This matches: keep viewer memory per stream and free it on stream stop.
             try:
@@ -509,11 +515,12 @@ class MiniAI:
 
         api_messages = [{"role": "system", "content": system_prompt}]
 
-        # Owner dùng full history, viewer chỉ dùng ít context hơn để tiết kiệm tokens
+        # Owner dùng full history, viewer dùng cửa sổ (Focus Window) sâu hơn để nhớ dai hơn
         if source_type == "owner":
             history = self.messages[-MAX_HISTORY * 2:]
         else:
-            history = self.messages[-4:]
+            # Tăng từ 4 lên 8 tin nhắn gần nhất cho viewer hội thoại mạch lạc
+            history = self.messages[-8:]
         api_messages.extend(history)
         api_messages.append({"role": "user", "content": composed})
 
@@ -1619,11 +1626,35 @@ class MiniAI:
         self.emotion.attention = 10
         self.memory.clear_session_memory()
         self.is_streaming = True
+        self.stream_turn_counter = 0
 
     def save_memory(self):
         """Save memory to database"""
         self.memory._is_dirty = True
         self.memory.save()
+
+    def update_stream_summary(self):
+        """Tóm tắt diễn biến stream dựa trên các sự kiện L2 gần đây."""
+        try:
+            # Lấy toàn bộ item trong L2 session memory
+            session_items = self.memory._session_items
+            if not session_items:
+                return
+            
+            events_str = "\n".join([f"- {i['value']}" for i in session_items])
+            
+            from prompts import STREAM_ROLLING_SUMMARY_PROMPT, STREAM_EVENT_SYSTEM
+            
+            messages = [
+                {"role": "system", "content": STREAM_EVENT_SYSTEM},
+                {"role": "user", "content": STREAM_ROLLING_SUMMARY_PROMPT.format(events=events_str)},
+            ]
+            
+            summary = self._call_light_model(messages, temperature=0.7, max_tokens=150)
+            if summary:
+                self.memory.update_rolling_stream_summary(summary)
+        except Exception as e:
+            print(f"[Core] update_stream_summary error: {e}")
 
     def generate_stream_event_reply(self, event_type: str, context: dict = None) -> str:
         """

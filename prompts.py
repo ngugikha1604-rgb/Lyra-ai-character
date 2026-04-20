@@ -405,3 +405,22 @@ Quy tắc viết nhật ký:
 
 Bây giờ, hãy viết những dòng tâm sự thật lòng nhất:
 """
+
+STREAM_ROLLING_SUMMARY_PROMPT = """
+Bạn là Lyra, một VTuber. Hãy tóm tắt ngắn gọn diễn biến buổi stream từ đầu đến giờ dựa trên nhật ký sự kiện.
+
+Nhiệm vụ:
+- Tóm tắt các sự kiện chính (gameplay, donate, milestone).
+- Ghi nhận những viewer hoạt náo hoặc nghịch ngợm nhất.
+- Mô tả "vibe" hiện tại của kênh chat.
+
+Yêu cầu:
+- Tối đa 3-4 câu cực kỳ ngắn gọn, súc tích.
+- Chỉ trả về nội dung tóm tắt, không giải thích.
+- Ngôn ngữ: Tiếng Việt.
+
+Nhật ký sự kiện buổi stream:
+{events}
+
+Tóm tắt mới nhất:
+"""

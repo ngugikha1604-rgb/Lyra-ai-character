@@ -98,6 +98,7 @@ def build_state_payload(ai, result=None):
         "action": result.get("action") or "NONE",
         "monologue": result.get("monologue") or "",
         "reply": result.get("reply") or "",
+        "rolling_stream_summary": ai.memory._rolling_stream_summary or "",
         "time_period": result.get("time_period")
         or getattr(ai, "time_period", "afternoon"),
         "time_gap_hours": result.get("time_gap_hours")

@@ -256,6 +256,7 @@ class MemorySystem:
         # Session memory (L2) — in-memory, cleared on stream stop
         self._session_items: list[dict] = []
         self._session_last_activity_at: str | None = None
+        self._rolling_stream_summary: str = ""
 
     # ── dict-like access (backward compat) ────────────────────────────────────
     def __getitem__(self, key):  return self.memory[key]
@@ -668,21 +669,39 @@ class MemorySystem:
         if len(self._session_items) > 30:
             self._session_items.pop(0)
 
+    def update_rolling_stream_summary(self, summary: str):
+        """Cập nhật tóm tắt nén của buổi stream hiện tại."""
+        self._rolling_stream_summary = summary
+        print(f"[Memory] Updated rolling stream summary: {summary[:50]}...")
+
     def clear_session_memory(self):
         """Xóa L2 Session — gọi khi stream stop hoặc sau 4h không chat."""
         count = len(self._session_items)
         self._session_items.clear()
+        self._rolling_stream_summary = ""
         self._session_last_activity_at = None
         if count:
-            print(f"[Memory] Cleared {count} session items (L2).")
+            print(f"[Memory] Cleared {count} session items and rolling summary (L2).")
 
     def get_session_context(self) -> str:
-        """Trả về L2 Session context để inject vào prompt."""
+        """
+        Trả về L2 Session context để inject vào prompt.
+        Kết hợp tóm tắt nén (Rolling Summary) và các sự kiện gần nhất.
+        """
         self._expire_session_memory_if_idle()
-        if not self._session_items:
+        if not self._session_items and not self._rolling_stream_summary:
             return ""
-        items = [f"- {i['value']}" for i in self._session_items[-10:]]
-        return "[Session context]\n" + "\n".join(items)
+        
+        parts = []
+        if self._rolling_stream_summary:
+            parts.append(f"[Tóm tắt stream đến giờ]\n{self._rolling_stream_summary}")
+        
+        if self._session_items:
+            # Lấy 5 items cuối cùng để giữ độ tươi mới
+            recent = [f"- {i['value']}" for i in self._session_items[-5:]]
+            parts.append("[Diễn biến mới nhất]\n" + "\n".join(recent))
+            
+        return "[Session context (L2)]\n" + "\n\n".join(parts)
 
     def _expire_session_memory_if_idle(self, idle_hours: float = 4.0):
         """Auto-clear L2 session memory nếu bị bỏ quá lâu."""
