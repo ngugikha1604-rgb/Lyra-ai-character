@@ -153,9 +153,41 @@ Advanced features implemented to make Lyra "human":
 *   **Working Memory (Attention Control)**: A ranking module prioritized context based on semantic relevance, allowing her to stay "on topic" during complex discussions.
 *   **Sleep-phase Consolidation (CLS)**: Post-stream distillation of episodic events into semantic core traits, enabling her personality to evolve naturally over time.
 *   **Weekend Context**: Time-aware prompts dynamically switch her to a "lazy/gaming" vibe on weekends.
-*   **Proactive Curiosity**: 15% random chance to override her response and force her to proactively ask the user about past `goals` or `topics`.
 *   **Dynamic Persona Tiers**: Prompt injections override behavior based on affection (<30: cold/distant, 30-75: teasing/normal, >75: clingy/demanding).
-*   **Dynamic Auto-Tokens**: Modifies the `max_tokens` API param dynamically. If she's tired (`attention < 3`), it locks to 40 max tokens (short, cold texts). If energized, it expands to 180 tokens.
+*   **Dynamic Auto-Tokens**: Base `max_tokens` from `EmotionEngine.get_dynamic_max_tokens()` (35/70/100 based on attention), then scaled by `ConversationStateDetector.get_pace_max_tokens()` based on user's avg message length. Clamps to [30, 180]. Scale-up only allowed when Lyra is not tired (base >= 70).
+
+---
+
+### 8a. 🧠 Psychological Layer (PLAN.md — Implemented)
+
+Four psychological systems layered on top of the base engine. All live in `conversation_state.py` + `core.py`. **Owner-only** unless noted.
+
+#### 2. Dopaminergic Feedback Loop
+Variable Ratio Reinforcement — keeps engagement unpredictable.
+
+*   **Deep Recalls** (`get_rare_memory()` in `memory.py`): 7% chance per turn (via `should_trigger_reward()`), cooldown 3 turns. Fetches a high-saliency (`>= 3`), least-accessed L1 memory item and injects `[SURPRISE REWARD]` into system prompt. Lyra references it naturally.
+*   **Healthy Debate**: Fallback when no rare memory found. Injects `[SURPRISE REWARD: HEALTHY DEBATE]` — Lyra pushes back on user's opinion instead of agreeing.
+*   **Filler Words** (`_maybe_add_filler()` in `core.py`): 12% chance, only when user asks a complex/reflective question (regex match on Vietnamese + English keywords). Prepends "hmmm...", "à thì...", etc. to reply. Applied AFTER `clean_reply()`, BEFORE saving to `original_reply` (so DB history stays clean).
+
+#### 3. Cognitive Entrainment (Mirroring)
+Lyra synchronizes her style and pace to the user.
+
+*   **Vibe Sync** (`get_vibe_tier()` → `get_rhythm_hint()`): Tracks `_slang_count` and `_intellectual_count` per turn (additive +2 on hit, -1 decay on miss). Tier thresholds: `>= 4` → `"slang"` or `"intellectual"`. Injects `[VIBE SYNC]` instruction into system prompt via `conv_hints`.
+*   **Pace Sync** (`get_pace_max_tokens()`): Adjusts token limit based on user's rolling avg message length. Scale-down freely (mirror brevity), scale-up only when Lyra is energized.
+*   **Temperature Sync** (`get_temperature()`): Slang tier → +0.08 temp (raw, casual). Intellectual tier → -0.08 temp (precise, consistent). Layered on top of state + emotion adjustments.
+
+#### 4. Active Inference & Epistemic Foraging
+Lyra proactively disrupts predictable patterns.
+
+All decisions are made at **one single point** in `chat()` before calling `build_prompt()` and `compose_user_message()`. Priority order: `reward > ideology > surprise` — never 2 modes in the same turn.
+
+*   **Ideological Proactivity** (`should_trigger_ideology()`): 15% chance (internal roll), cooldown 5 turns, no-repeat tracking across session (cycles after all 8 prompts used). Requires `attention >= 4`. When triggered: `compose_user_message()` returns early with `[CURIOSITY RULE: OVERRIDE REPLY]` + `user_input` prepended so model still sees the original message.
+*   **Predictive Surprise** (`should_trigger_surprise()`): 5% chance, cooldown 5 turns. Injects `[PREDICTIVE SURPRISE]` into system prompt — Lyra subverts her current mood pattern (happy → cold, angry → warm, neutral → extreme). Cross-cooldown: when ideology triggers, `_last_surprise_turn` is reset to prevent back-to-back active inference turns.
+
+**Key invariants to preserve:**
+- `reward_hint` blocks both ideology and surprise (set in `chat()` before the Active Inference block).
+- `_ideology_idx` and `active_inference_mode` are computed once and passed to both `build_prompt(active_inference_mode=...)` and `compose_user_message(ideology_idx=...)`.
+- Never call `should_trigger_ideology()` or `should_trigger_surprise()` inside `build_prompt()` or `compose_user_message()` — they must only be called from `chat()`.
 
 ---
 
@@ -166,11 +198,18 @@ File: `conversation_state.py` — `ConversationStateDetector`
 States: `greeting → building → deepening → shifting → closing → goodbye`
 
 Features:
-* **Rhythm Detection**: Tracks avg user message length (rolling window 10 turns) → injects length hint into prompt
-* **Dynamic Temperature**: Maps emotion state + conversation state to LLM temperature (0.60–1.10)
-  * closing/goodbye → 0.60 (safe, predictable)
+* **Rhythm Detection**: Tracks avg user message length (rolling window 10 turns) → injects length hint into prompt via `get_rhythm_hint()`
+* **Vibe Tier Tracking**: `_slang_count` / `_intellectual_count` updated every turn. Exposed via `get_vibe_tier()` → `"slang"` | `"intellectual"` | `"neutral"`
+* **Dynamic Temperature** (`get_temperature()`): Maps emotion state + conversation state + vibe tier to LLM temperature (0.55–1.10)
+  * closing/goodbye → 0.60
   * deepening → 0.75
-  * bored/angry → +0.10 (rawer responses)
+  * bored/angry → +0.10
+  * slang tier → +0.08
+  * intellectual tier → -0.08
+* **Pace Max Tokens** (`get_pace_max_tokens(base)`): Scales base token limit by user message pace. Scale-up gated by Lyra's energy level.
+* **Reward Schedule** (`should_trigger_reward()`): 7% chance, cooldown 3 turns.
+* **Ideology Trigger** (`should_trigger_ideology()`): 15% internal roll, cooldown 5 turns, no-repeat index tracking.
+* **Surprise Trigger** (`should_trigger_surprise()`): 5% chance, cooldown 5 turns. Cross-cooldown with ideology.
 
 ---
 
