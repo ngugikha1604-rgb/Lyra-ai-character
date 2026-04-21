@@ -541,6 +541,8 @@ class MiniAI:
                 )
             if _ideology_idx >= 0:
                 active_inference_mode = "ideology"
+                # Cross-cooldown: reset surprise timer để tránh 2 lượt liên tiếp
+                self.conv_state._last_surprise_turn = self.conv_state._turn
             elif self.conv_state.should_trigger_surprise(probability=0.05, min_cooldown=5):
                 active_inference_mode = "surprise"
 
