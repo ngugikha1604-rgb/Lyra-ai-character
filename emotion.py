@@ -9,6 +9,10 @@ class EmotionEngine:
 
     OUTBURST_THRESHOLD: float = 0.85  # Irritability level that triggers emotional outburst
 
+    # ── Homeostasis constants ──────────────────────────────────────────────────
+    MOOD_DECAY_RATE: float = 0.08        # mood → 0 per turn (~12 turns to halve)
+    DOMINANCE_DECAY_RATE: float = 0.05   # dominance → 0.5 per turn (~10 turns to halve gap)
+
     def __init__(self):
         self.mood = 0           # Valence proxy: -10 → +10
         self.previous_mood = 0
@@ -240,9 +244,36 @@ class EmotionEngine:
             self._outburst_this_turn = True
             print("[Emotion] OUTBURST triggered — irritability reset")
 
+        # ── Homeostasis (Hedonic Adaptation) ──────────────────────────────────
+        # Per-turn micro-decay về baseline — chạy sau outburst để không dampen spike
+        self._apply_homeostasis()
+
         self.mood = round(self.mood, 1)
 
         return self.get_state()
+
+    def _apply_homeostasis(self):
+        """
+        Emotional Homeostasis (Hedonic Adaptation) — per-turn micro-decay toward baseline.
+
+        Prevents Lyra from getting "stuck" in an emotional state after the triggering
+        event has passed. Runs at the end of update(), after all deltas and outburst.
+
+        Decays:
+          - mood → 0 (neutral baseline) at MOOD_DECAY_RATE
+          - dominance → 0.5 (neutral baseline) at DOMINANCE_DECAY_RATE
+
+        Does NOT decay:
+          - irritability — already handled by Hydraulic drain (-0.04/turn)
+          - affection — long-term metric, only decays via time_gap
+          - attention — has its own drain/recover logic
+        """
+        self.mood += (0.0 - self.mood) * self.MOOD_DECAY_RATE
+        self.dominance += (0.5 - self.dominance) * self.DOMINANCE_DECAY_RATE
+        # Clamp after decay
+        self.dominance = max(0.0, min(1.0, self.dominance))
+        # Sync previous_mood để smooth_transition không "bounce back" lại giá trị trước homeostasis
+        self.previous_mood = self.mood
 
     def _appraise(
         self,

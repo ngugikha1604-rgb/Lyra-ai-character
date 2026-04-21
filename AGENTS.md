@@ -93,18 +93,24 @@ Rules:
 
 Variables:
 
-* `mood` (-10 → +10)
-* `affection` (0 → 100)
-* `attention` (0 → 10)
+* `mood` (-10 → +10) — Valence proxy
+* `affection` (0 → 100) — Relationship depth, persisted to DB
+* `attention` (0 → 10) — Arousal proxy
+* `dominance` (0.0 → 1.0) — Confidence/control level *(new — VAD)*
+* `irritability` (0.0 → 1.0) — Emotional reservoir, session-level *(new — Hydraulic)*
 
 Effects:
 
 * Changes tone of responses
 * Influences behavior (playful vs calm)
-* Persisted partially (affection)
+* Persisted partially (affection only — dominance/irritability are session-level)
 * **Fatigue System**: `attention` drains per chat (-0.3) and recovers during silence (+2.0/hr). Low attention triggers tired, short responses.
 * **Emotion Decay**: Long periods of silence (>12h) decay `mood` by 50% towards 0 (neutral).
 * **Affection Cap**: Caps relationship spikes at +/- 5 per turn for natural progression.
+* **Homeostasis**: Per-turn micro-decay — `mood` → 0 at 8%/turn, `dominance` → 0.5 at 5%/turn.
+* **Outburst**: When `irritability >= 0.85`, Lyra reacts with raw frustration (`mood -= 4`, `dominance -= 0.2`).
+
+> See section 8b for full emotion architecture details.
 
 ---
 
@@ -191,7 +197,7 @@ All decisions are made at **one single point** in `chat()` before calling `build
 
 ---
 
-### 8b. 🧬 Emotion Architecture Upgrade (PLAN.md — 4/5 Implemented)
+### 8b. 🧬 Emotion Architecture Upgrade (PLAN.md — 5/5 Implemented ✅)
 
 Advanced emotion model layered on top of `EmotionEngine`. All changes live in `emotion.py` unless noted.
 
@@ -291,15 +297,17 @@ Note: Upper bounds on `v` for Love and Awe prevent hiding `ecstatic`. Remorse lo
 
 `Contempt` is the only secondary emotion that uses `self.irritability` — creating a cross-system dependency between Hydraulic Model and Plutchik. This is intentional: contempt requires sustained irritation, not just a single negative event.
 
-#### Emotional Homeostasis (Hedonic Adaptation) 📋 Not Yet Implemented
+#### Emotional Homeostasis (Hedonic Adaptation) ✅ Done
 
-Per-turn micro-decay toward baseline. Planned for `emotion.py`:
-- `mood` decays toward 0 at rate 0.08/turn
-- `dominance` decays toward 0.5 at rate 0.05/turn
-- `irritability` drain already handled by Hydraulic Model (-0.04/turn)
-- `affection` and `attention` excluded — they have their own decay logic
+Per-turn micro-decay toward baseline. Prevents Lyra from getting "stuck" in an emotional state.
 
-When implemented: add `_apply_homeostasis()` called at end of `update()`.
+- `MOOD_DECAY_RATE = 0.08`, `DOMINANCE_DECAY_RATE = 0.05` — class constants
+- `_apply_homeostasis()` — called at end of `update()`, **after** outburst trigger
+- `mood` decays toward 0 at 8%/turn (~12 turns to halve from peak)
+- `dominance` decays toward 0.5 at 5%/turn (~10 turns to halve gap from baseline)
+- `irritability` excluded — Hydraulic already drains it (-0.04/turn)
+- `affection` and `attention` excluded — have their own decay logic
+- `previous_mood` is synced to `mood` after decay — prevents `smooth_transition()` from "bouncing back" mood toward the pre-homeostasis value on the next turn
 
 ---
 
