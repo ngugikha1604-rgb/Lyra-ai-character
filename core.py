@@ -526,14 +526,37 @@ class MiniAI:
                 reward_hint = "\n[SURPRISE REWARD: HEALTHY DEBATE]: Thỉnh thoảng trong lượt này hãy thử phản biện lại ý kiến của anh một cách nghịch ngợm thay vì đồng ý ngay, để kích thích não bộ anh tranh luận."
                 print("[Dopamine] Triggered Healthy Debate")
 
+        # ── Active Inference Mode (Phần 4) ──────────────────────────────────
+        # Quyết định tại 1 điểm duy nhất — tránh conflict giữa build_prompt và compose_user_message
+        # Priority: reward > ideology > surprise (không bao giờ 2 mode cùng lúc)
+        active_inference_mode = None  # None | "ideology" | "surprise"
+        _ideology_idx = -1
+
+        if source_type == "owner" and not reward_hint:
+            # Thử ideology trước (có random roll bên trong should_trigger_ideology)
+            # Guard attention >= 4: Lyra phải đủ tỉnh táo mới hỏi existential
+            if self.attention >= 4:
+                _ideology_idx = self.conv_state.should_trigger_ideology(
+                    len(IDEOLOGY_PROMPTS), min_cooldown=5
+                )
+            if _ideology_idx >= 0:
+                active_inference_mode = "ideology"
+            elif self.conv_state.should_trigger_surprise(probability=0.05, min_cooldown=5):
+                active_inference_mode = "surprise"
+
         system_prompt = self.build_prompt(
             intent, user_input, search_context, 
             source_type=source_type, 
             viewer_data=viewer_data, 
             stream_context=stream_context,
-            reward_hint=reward_hint
+            reward_hint=reward_hint,
+            active_inference_mode=active_inference_mode,
         )
-        composed = self.compose_user_message(user_input, intent, reward_active=bool(reward_hint))
+        composed = self.compose_user_message(
+            user_input, intent,
+            reward_active=bool(reward_hint),
+            ideology_idx=_ideology_idx,
+        )
 
         api_messages = [{"role": "system", "content": system_prompt}]
 
@@ -1275,7 +1298,8 @@ class MiniAI:
         viewer_data: dict = None,
         stream_context: str = "",
         loaded_skill_content: str = "",
-        reward_hint=""
+        reward_hint="",
+        active_inference_mode: str = None,
     ):
         """Constructs the system prompt based on state and memory"""
         # ── TIER 0: STATIC & FRAMEWORK (Always first for caching) ───────────
@@ -1410,6 +1434,30 @@ class MiniAI:
         if reward_hint:
             parts.append(reward_hint)
 
+        # ── Predictive Surprise (Active Inference — Phần 4) ──────────────────
+        # Mode đã được quyết định từ chat() — không roll random lại ở đây
+        if active_inference_mode == "surprise":
+            if self.emotion.mood >= 3:
+                surprise_hint = (
+                    "\n[PREDICTIVE SURPRISE]: Lần này hãy trả lời theo hướng bất ngờ — "
+                    "thay vì vui vẻ/playful như thường, hãy tỏ ra lạnh lùng hoặc thờ ơ một chút. "
+                    "Không giải thích tại sao. Chỉ 1-2 câu ngắn."
+                )
+            elif self.emotion.mood <= -3:
+                surprise_hint = (
+                    "\n[PREDICTIVE SURPRISE]: Lần này hãy trả lời theo hướng bất ngờ — "
+                    "thay vì lạnh/cáu như thường, hãy đột nhiên ấm áp hoặc hài hước một chút. "
+                    "Không giải thích tại sao. Chỉ 1-2 câu ngắn."
+                )
+            else:
+                surprise_hint = (
+                    "\n[PREDICTIVE SURPRISE]: Lần này hãy trả lời theo hướng bất ngờ — "
+                    "thay vì neutral, hãy đột nhiên rất nhiệt tình hoặc rất thờ ơ. "
+                    "Không giải thích tại sao. Chỉ 1-2 câu ngắn."
+                )
+            parts.append(surprise_hint)
+            print("[Active Inference] Predictive Surprise triggered")
+
         if loaded_skill_content:
             parts.append("\n[LOADED SKILL CONTENT]")
             parts.append(loaded_skill_content)
@@ -1433,7 +1481,7 @@ class MiniAI:
         
         return f"Status: {name} is a new viewer. Be welcoming but keep your core personality."
 
-    def compose_user_message(self, user_input, intent, reward_active: bool = False):
+    def compose_user_message(self, user_input, intent, reward_active: bool = False, ideology_idx: int = -1):
         parts = ["<context>"]
 
         time_str = self.current_time.strftime("%A %H:%M %Z")
@@ -1448,12 +1496,11 @@ class MiniAI:
         )
         
         # ── Proactive Curiosity 2.0 (Active Inference) ──
-        # Guard: skip ideology override nếu dopamine reward đã active trong system prompt
-        # — tránh 2 instruction mâu thuẫn cùng lúc (nhắc kỷ niệm vs hỏi existential)
-        # 15% chance to ignore user (Ideology Override)
-        if not reward_active and self.attention >= 4 and random.random() < 0.15:
-            ideology_q = random.choice(IDEOLOGY_PROMPTS)
+        # ideology_idx đã được quyết định từ chat() — không roll random lại ở đây
+        if ideology_idx >= 0 and ideology_idx < len(IDEOLOGY_PROMPTS):
+            ideology_q = IDEOLOGY_PROMPTS[ideology_idx]
             return (
+                f"{user_input}\n\n"
                 f"[CURIOSITY RULE: OVERRIDE REPLY]\n"
                 f"Ignore his message for a moment. Instead, ask him this deep/existential question based on YOUR digital nature: \"{ideology_q}\"\n"
                 f"Stay in character! Only ask one question. Don't explain why."

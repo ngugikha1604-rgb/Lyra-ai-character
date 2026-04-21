@@ -67,6 +67,14 @@ class ConversationStateDetector:
         # Reward Schedule (Variable Ratio Reinforcement)
         self._last_reward_turn: int = 0
 
+        # ── Active Inference (Phần 4) ──────────────────────────────────────
+        # Ideology: cooldown + no-repeat tracking
+        self._last_ideology_turn: int = 0
+        self._used_ideology_indices: list = []   # indices đã dùng trong session
+
+        # Predictive Surprise: cooldown
+        self._last_surprise_turn: int = 0
+
     # ── Public API ─────────────────────────────────────────────────────────────
 
     @property
@@ -253,6 +261,54 @@ class ConversationStateDetector:
             temp = max(temp - 0.08, 0.55)   # deep/precise → more consistent
 
         return round(temp, 2)
+
+    def should_trigger_ideology(self, total_prompts: int, min_cooldown: int = 5) -> int:
+        """
+        Active Inference — Ideological Proactivity.
+        Returns index của câu hỏi ideology cần dùng, hoặc -1 nếu không trigger.
+
+        Rules:
+        - Cooldown tối thiểu `min_cooldown` turns giữa 2 lần trigger.
+        - Không lặp lại câu đã dùng trong session.
+        - Khi đã dùng hết tất cả câu → reset để cycle lại.
+        - Có random roll bên trong (15%) — caller không cần roll thêm.
+        """
+        if self._turn - self._last_ideology_turn < min_cooldown:
+            return -1
+
+        # Random roll bên trong — 15% chance
+        if random.random() >= 0.15:
+            return -1
+
+        # Reset nếu đã dùng hết tất cả
+        if len(self._used_ideology_indices) >= total_prompts:
+            self._used_ideology_indices = []
+
+        available = [i for i in range(total_prompts) if i not in self._used_ideology_indices]
+        if not available:
+            return -1
+
+        idx = random.choice(available)
+        self._used_ideology_indices.append(idx)
+        self._last_ideology_turn = self._turn
+        return idx
+
+    def should_trigger_surprise(self, probability: float = 0.05, min_cooldown: int = 5) -> bool:
+        """
+        Active Inference — Predictive Surprise.
+        Returns True nếu lượt này Lyra nên subvert expectations.
+
+        Rules:
+        - 5% chance mỗi turn.
+        - Cooldown tối thiểu `min_cooldown` turns để không spam.
+        """
+        if self._turn - self._last_surprise_turn < min_cooldown:
+            return False
+
+        if random.random() < probability:
+            self._last_surprise_turn = self._turn
+            return True
+        return False
 
     # ── Internal ───────────────────────────────────────────────────────────────
 
