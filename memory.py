@@ -1405,11 +1405,13 @@ class MemorySystem:
             
         try:
             with self.db_lock:
-                # Lấy top 5 ít được access nhất (saliency cao) — ưu tiên đúng intent "rare"
+                # Threshold >= 3 để bao gồm goal/relational (saliency 5) và
+                # like/dislike có strong word (saliency 4+).
+                # Threshold >= 6 quá cao — hầu hết items thông thường không đạt.
                 query = """
                     SELECT value FROM memory_items 
                     WHERE kind IN ('like', 'dislike', 'goal', 'episodic', 'relational', 'inside_joke')
-                    AND saliency >= 6
+                    AND saliency >= 3
                     ORDER BY access_count ASC, saliency DESC
                     LIMIT 5
                 """

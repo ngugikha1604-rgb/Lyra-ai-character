@@ -533,7 +533,7 @@ class MiniAI:
             stream_context=stream_context,
             reward_hint=reward_hint
         )
-        composed = self.compose_user_message(user_input, intent)
+        composed = self.compose_user_message(user_input, intent, reward_active=bool(reward_hint))
 
         api_messages = [{"role": "system", "content": system_prompt}]
 
@@ -546,7 +546,9 @@ class MiniAI:
         api_messages.extend(history)
         api_messages.append({"role": "user", "content": composed})
 
-        dynamic_max_tokens = self.emotion.get_dynamic_max_tokens()
+        # ── Pace Sync: base tokens từ emotion, sau đó điều chỉnh theo user pace ──
+        _base_tokens = self.emotion.get_dynamic_max_tokens()
+        dynamic_max_tokens = self.conv_state.get_pace_max_tokens(_base_tokens)
         dynamic_temperature = self.conv_state.get_temperature(
             self.emotion.mood, self.emotion.attention
         )
@@ -1431,7 +1433,7 @@ class MiniAI:
         
         return f"Status: {name} is a new viewer. Be welcoming but keep your core personality."
 
-    def compose_user_message(self, user_input, intent):
+    def compose_user_message(self, user_input, intent, reward_active: bool = False):
         parts = ["<context>"]
 
         time_str = self.current_time.strftime("%A %H:%M %Z")
@@ -1446,12 +1448,10 @@ class MiniAI:
         )
         
         # ── Proactive Curiosity 2.0 (Active Inference) ──
-        # Guard: If a dopamine reward is already in the system_prompt, maybe skip curiosity to avoid overload?
-        # But we don't easily know reward_hint here without passing it.
-        # Instead, we check common state.
-        
+        # Guard: skip ideology override nếu dopamine reward đã active trong system prompt
+        # — tránh 2 instruction mâu thuẫn cùng lúc (nhắc kỷ niệm vs hỏi existential)
         # 15% chance to ignore user (Ideology Override)
-        if self.attention >= 4 and random.random() < 0.15:
+        if not reward_active and self.attention >= 4 and random.random() < 0.15:
             ideology_q = random.choice(IDEOLOGY_PROMPTS)
             return (
                 f"[CURIOSITY RULE: OVERRIDE REPLY]\n"
@@ -1623,10 +1623,11 @@ class MiniAI:
     ]
 
     # Chỉ trigger filler khi câu hỏi/phức tạp — không trigger khi user nhắn ngắn/casual
-    # Không dùng \b vì \b không hoạt động với ký tự Unicode có dấu tiếng Việt
+    # Tiếng Việt có dấu: không dùng \b (không hoạt động với Unicode)
+    # Tiếng Anh: dùng \b bình thường để tránh false positive (how → somehow, show...)
     _FILLER_TRIGGER = re.compile(
-        r"(tại sao|vì sao|như thế nào|thế nào|nghĩ gì|ý kiến|cảm thấy|"
-        r"why|how|what do you think|opinion|feel|explain|giải thích|phân tích)",
+        r"(tại sao|vì sao|như thế nào|thế nào|nghĩ gì|ý kiến|cảm thấy|giải thích|phân tích"
+        r"|\bwhy\b|\bhow\b|\bwhat do you think\b|\bopinion\b|\bfeel\b|\bexplain\b)",
         re.IGNORECASE,
     )
 

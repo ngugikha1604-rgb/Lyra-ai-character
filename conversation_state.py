@@ -111,6 +111,20 @@ class ConversationStateDetector:
         self._state = self._detect_state(text, messages)
         return self._state
 
+    def get_vibe_tier(self) -> str:
+        """
+        Cognitive Entrainment — Vibe Sync.
+        Returns the current detected communication style of the user.
+        'slang'        → teen/casual Vietnamese (vl, chúa hề, chill...)
+        'intellectual' → formal/academic/deep (thuật toán, triết học...)
+        'neutral'      → default mixed style
+        """
+        if self._intellectual_count >= 4:
+            return "intellectual"
+        if self._slang_count >= 4:
+            return "slang"
+        return "neutral"
+
     def get_rhythm_hint(self) -> str:
         """
         Returns a short instruction string for the system prompt based on
@@ -120,21 +134,69 @@ class ConversationStateDetector:
             return ""
 
         avg = sum(self._user_lengths) / len(self._user_lengths)
-        
-        # Complexity Hint (Mirroring)
-        complexity_note = ""
-        if self._intellectual_count >= 4:
-            complexity_note = " User's vocabulary is intellectual/deep. Match their depth, be more philosophical."
-        elif self._slang_count >= 4:
-            complexity_note = " User is using teen slang/casual vibe. Match their zoomer energy, use casual Vietnamese."
+        tier = self.get_vibe_tier()
+
+        # ── Vibe Sync: tier-specific mirroring instruction ──────────────────
+        if tier == "slang":
+            vibe_note = (
+                " [VIBE SYNC — SLANG]: User đang dùng ngôn ngữ teen/casual (vl, đỉnh, chill...). "
+                "Mirror their energy: dùng từ lóng tự nhiên, viết tắt, emoji nếu hợp. "
+                "Đừng formal, đừng giải thích dài dòng."
+            )
+        elif tier == "intellectual":
+            vibe_note = (
+                " [VIBE SYNC — DEEP]: User đang dùng từ ngữ học thuật/sâu sắc. "
+                "Match their depth: dùng từ chính xác, có thể đặt câu hỏi triết học, "
+                "tránh dùng slang hoặc emoji."
+            )
+        else:
+            vibe_note = ""
+
+        # ── Pace Sync: length-based instruction ─────────────────────────────
+        if avg <= 15:
+            return f"User writes very short messages. Match their brevity — 1 sentence max.{vibe_note}"
+        if avg <= 40:
+            return f"User writes short-to-medium messages. Keep replies to 1-2 sentences.{vibe_note}"
+        if avg <= 100:
+            return f"User writes medium-length messages. 2 sentences is fine.{vibe_note}"
+        return f"User writes longer messages. You can be slightly more expressive, but still concise.{vibe_note}"
+
+    def get_pace_max_tokens(self, base_tokens: int) -> int:
+        """
+        Cognitive Entrainment — Pace Sync.
+        Adjusts the base token limit (from EmotionEngine) based on the user's
+        current message pace (avg length from rolling window).
+
+        Design rule: attention (Lyra's fatigue) is a SOFT ceiling.
+        - Scale DOWN freely to mirror user brevity (always safe).
+        - Scale UP only when Lyra is energized (attention tracked via base_tokens >= 100),
+          preventing a tired Lyra from being forced to write long replies.
+
+        Logic:
+          - avg <= 15  → base * 0.7   (user very brief → mirror)
+          - avg <= 40  → base         (unchanged)
+          - avg <= 100 → base * 1.2   (medium — only if base >= 70, i.e. not tired)
+          - avg > 100  → base * 1.5   (long — only if base >= 100, i.e. energized)
+
+        Always clamps to [30, 180].
+        """
+        if not self._user_lengths:
+            return base_tokens
+
+        avg = sum(self._user_lengths) / len(self._user_lengths)
 
         if avg <= 15:
-            return f"User writes very short messages. Match their brevity — 1 sentence max.{complexity_note}"
-        if avg <= 40:
-            return f"User writes short-to-medium messages. Keep replies to 1-2 sentences.{complexity_note}"
-        if avg <= 100:
-            return f"User writes medium-length messages. 2 sentences is fine.{complexity_note}"
-        return f"User writes longer messages. You can be slightly more expressive, but still concise.{complexity_note}"
+            adjusted = int(base_tokens * 0.7)
+        elif avg <= 40:
+            adjusted = base_tokens
+        elif avg <= 100:
+            # Chỉ mở rộng nếu Lyra không mệt (base >= 70)
+            adjusted = int(base_tokens * 1.2) if base_tokens >= 70 else base_tokens
+        else:
+            # Chỉ mở rộng tối đa nếu Lyra hào hứng (base >= 100)
+            adjusted = int(base_tokens * 1.5) if base_tokens >= 100 else base_tokens
+
+        return max(30, min(180, adjusted))
 
     def get_state_hint(self) -> str:
         """
@@ -153,7 +215,7 @@ class ConversationStateDetector:
 
     def get_temperature(self, base_mood: float, base_attention: float) -> float:
         """
-        Dynamic temperature based on emotion state + conversation state.
+        Dynamic temperature based on emotion state + conversation state + vibe tier.
 
         Ranges:
           - closing / goodbye  → lower (more predictable, safe)
@@ -161,6 +223,8 @@ class ConversationStateDetector:
           - bored (low attn)   → slightly higher (seek variety)
           - angry (mood < -5)  → higher (allow rawness)
           - excited (mood > 5) → slightly higher (more expressive)
+          - slang vibe         → +0.08 (casual, raw, less filtered)
+          - intellectual vibe  → -0.08 (precise, consistent, thoughtful)
           - default            → 0.80
         """
         temp = 0.80
@@ -180,6 +244,13 @@ class ConversationStateDetector:
             temp = min(temp + 0.10, 1.10)   # angry → rawer
         if base_mood >= 6:
             temp = min(temp + 0.05, 1.00)   # excited → slightly more expressive
+
+        # ── Vibe Sync: mirror user's communication energy ──────────────────
+        tier = self.get_vibe_tier()
+        if tier == "slang":
+            temp = min(temp + 0.08, 1.10)   # casual/raw → less filtered
+        elif tier == "intellectual":
+            temp = max(temp - 0.08, 0.55)   # deep/precise → more consistent
 
         return round(temp, 2)
 
