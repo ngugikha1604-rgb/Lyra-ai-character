@@ -143,12 +143,21 @@ class EmotionEngine:
         has_positive = any(w in text_lower for w in positive)
         has_negative = any(w in text_lower for w in negative)
 
+        # ── Cognitive Appraisal (Lazarus, 1991) ───────────────────────────────
+        # Đánh giá sự kiện theo 2 chiều trước khi apply delta:
+        # congruence: CONGRUENT / INCONGRUENT / IRRELEVANT
+        # control:    HIGH / LOW
+        # → trả về multiplier để scale mood/dominance delta
+        mood_multiplier, dom_multiplier = self._appraise(
+            intent, has_positive, has_negative, len(text)
+        )
+
         if has_positive:
-            self.mood = min(10, self.mood + 2)
+            self.mood = min(10, self.mood + 2 * mood_multiplier)
             self.affection = min(100, self.affection + 3)
 
         if has_negative:
-            self.mood = max(-10, self.mood - 3)
+            self.mood = max(-10, self.mood - 3 * mood_multiplier)
             self.affection = max(0, self.affection - 4)
 
         if "?" in text:
@@ -187,7 +196,7 @@ class EmotionEngine:
             # Mệt mỏi → ít tự tin hơn
             dominance_delta -= 0.04
 
-        self.dominance = max(0.0, min(1.0, self.dominance + dominance_delta))
+        self.dominance = max(0.0, min(1.0, self.dominance + dominance_delta * dom_multiplier))
 
         self.smooth_transition()
 
@@ -197,6 +206,81 @@ class EmotionEngine:
         self.mood = round(self.mood, 1)
 
         return self.get_state()
+
+    def _appraise(
+        self,
+        intent: str,
+        has_positive: bool,
+        has_negative: bool,
+        text_len: int,
+    ) -> tuple:
+        """
+        Cognitive Appraisal (Lazarus, 1991) — heuristic-based, no LLM call.
+
+        Đánh giá sự kiện theo 2 chiều:
+          - congruence: CONGRUENT / INCONGRUENT / IRRELEVANT (với mục tiêu của Lyra)
+          - control:    HIGH / LOW (Lyra có handle được không)
+
+        Mục tiêu của Lyra:
+          1. Competence: trả lời được, được coi là thông minh/hữu ích
+          2. Connection: được khen, không bị chỉ trích, không bị bỏ qua
+          3. Autonomy: không bị ép buộc liên tục
+
+        Returns:
+          (mood_multiplier, dom_multiplier) — scale factor cho mood/dominance delta.
+          > 1.0 = amplify, < 1.0 = dampen, 1.0 = neutral (no appraisal effect)
+        """
+        # ── Xác định congruence ────────────────────────────────────────────────
+        if intent == "compliment" or (has_positive and not has_negative):
+            congruence = "CONGRUENT"
+        elif intent == "complaint" or (has_negative and not has_positive):
+            congruence = "INCONGRUENT"
+        elif has_positive and has_negative:
+            # Mixed signal → ambiguous, treat as mildly incongruent
+            congruence = "INCONGRUENT"
+        elif intent in ("greeting", "suggestion"):
+            congruence = "CONGRUENT"
+        elif intent == "question":
+            # Câu hỏi ngắn → CONGRUENT (Lyra có thể trả lời → competence goal)
+            # Câu hỏi dài → INCONGRUENT (phức tạp, có thể không trả lời được)
+            congruence = "INCONGRUENT" if text_len > 60 else "CONGRUENT"
+        elif intent == "statement" and not has_positive and not has_negative:
+            congruence = "IRRELEVANT"
+        else:
+            congruence = "IRRELEVANT"
+
+        # ── Xác định control level ─────────────────────────────────────────────
+        # LOW control khi: câu hỏi dài (phức tạp), Lyra mệt, hoặc affection thấp (người lạ)
+        is_complex_question = (intent == "question" and text_len > 60)
+        is_tired = (self.attention <= 2)
+        is_stranger = (self.affection < 25)
+
+        if is_complex_question or is_tired or is_stranger:
+            control = "LOW"
+        else:
+            control = "HIGH"
+
+        # ── Ma trận multiplier ─────────────────────────────────────────────────
+        # CONGRUENT + HIGH   → Joy/Pride: amplify positive reaction
+        # CONGRUENT + LOW    → Relief/Gratitude: dampen (unexpected positive)
+        # INCONGRUENT + HIGH → Anger: amplify negative mood, boost dominance (defensive)
+        # INCONGRUENT + LOW  → Anxiety/Guilt: amplify negative mood, crush dominance
+        # IRRELEVANT         → neutral, slight curiosity boost (handled separately)
+
+        if congruence == "CONGRUENT" and control == "HIGH":
+            return (1.3, 1.3)   # Joy/Pride — amplify cả mood lẫn dominance
+        elif congruence == "CONGRUENT" and control == "LOW":
+            return (0.8, 0.8)   # Relief — dampen (unexpected positive, uncertain)
+        elif congruence == "INCONGRUENT" and control == "HIGH":
+            # Anger/Frustration: mood amplified, dominance KHÔNG bị crush (defensive)
+            # dom_multiplier = 0.0 → dominance delta bị cancel, giữ nguyên
+            return (1.3, 0.0)
+        elif congruence == "INCONGRUENT" and control == "LOW":
+            return (1.5, 1.8)   # Anxiety/Guilt — strongly amplify cả 2 negative reactions
+        elif congruence == "IRRELEVANT" and control == "LOW":
+            return (0.3, 0.3)   # Neutral + uncertain → dampen mạnh hơn
+        else:  # IRRELEVANT + HIGH
+            return (0.5, 0.5)   # Dampen — neutral events không nên move nhiều
 
     def emotion_from_state(self):
         """Map VAD state to Live2D emotion label."""

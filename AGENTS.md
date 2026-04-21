@@ -191,6 +191,63 @@ All decisions are made at **one single point** in `chat()` before calling `build
 
 ---
 
+### 8b. 🧬 Emotion Architecture Upgrade (PLAN.md — Partially Implemented)
+
+Advanced emotion model layered on top of `EmotionEngine`. All changes live in `emotion.py` unless noted.
+
+#### VAD Model (Valence-Arousal-Dominance) ✅ Done
+
+`EmotionEngine` now operates on a 3D emotion space:
+
+| Variable | Range | Role |
+|----------|-------|------|
+| `mood` | -10 → +10 | Valence proxy (primary) |
+| `attention` | 0 → 10 | Arousal proxy (primary) |
+| `dominance` | 0.0 → 1.0 | NEW — confidence/control level |
+
+New properties and methods:
+- `valence` → `mood / 10.0` (computed, read-only)
+- `arousal` → `attention / 10.0` (computed, read-only)
+- `get_vad()` → `(valence, arousal, dominance)` tuple for Live2D
+- `load_state(mood, attention, affection, dominance=0.5)` — backward compat
+- `get_state()` — now includes `"dominance"` key
+- `update(text, time_gap_hours, intent="statement")` — `intent` param added; `dominance` updated per turn based on intent + keywords + attention + affection
+- `emotion_from_state()` — rewritten using VAD coordinates; uses `dominance` to distinguish `furious` vs `disappointed`, `cold` vs `sad`
+- `describe_internal_state()` — includes dominance description
+
+`core.py` changes:
+- `emotion.update()` receives `intent=intent`
+- `_original_dominance` saved/restored around viewer turns (same pattern as `_original_affection`)
+- `conv_state.get_temperature()` receives `dominance` → low dominance → -0.05 temp, high → +0.05
+- Return dict includes `"dominance"` and `"vad"` keys
+
+#### Cognitive Appraisal Theory (Lazarus, 1991) ✅ Done
+
+`_appraise(intent, has_positive, has_negative, text_len)` — pure function inside `EmotionEngine`, no LLM call, no new state.
+
+Classifies each input on 2 axes:
+- **Congruence**: `CONGRUENT` / `INCONGRUENT` / `IRRELEVANT` (vs Lyra's goals)
+- **Control**: `HIGH` / `LOW` (can Lyra handle it?)
+
+Returns `(mood_multiplier, dom_multiplier)` — scales existing mood/dominance deltas:
+
+| Appraisal | mood_mult | dom_mult | Emotion |
+|-----------|-----------|----------|---------|
+| CONGRUENT + HIGH | 1.3 | 1.3 | Joy/Pride |
+| CONGRUENT + LOW | 0.8 | 0.8 | Relief |
+| INCONGRUENT + HIGH | 1.3 | 0.0 | Anger (dom delta cancelled) |
+| INCONGRUENT + LOW | 1.5 | 1.8 | Anxiety/Guilt |
+| IRRELEVANT + HIGH | 0.5 | 0.5 | Neutral |
+| IRRELEVANT + LOW | 0.3 | 0.3 | Neutral + uncertain |
+
+Control is LOW when: `text_len > 60` (complex question), `attention <= 2` (tired), or `affection < 25` (stranger).
+
+**Key invariant**: appraisal *scales* existing keyword-based deltas — it does not replace them. Keyword matching ("gut reaction") still runs first.
+
+**Known architecture limitation**: `emotion.update()` is called before viewer `affection` override in `chat()`, so `is_stranger` check uses owner affection for viewer turns. Not a crash — just means stranger detection doesn't fire for viewers.
+
+---
+
 ### 9. Conversation State Machine
 
 File: `conversation_state.py` — `ConversationStateDetector`
