@@ -7,12 +7,16 @@ from datetime import datetime
 class EmotionEngine:
     """Manages Lyra's emotional state — VAD model (Valence-Arousal-Dominance)"""
 
+    OUTBURST_THRESHOLD: float = 0.85  # Irritability level that triggers emotional outburst
+
     def __init__(self):
         self.mood = 0           # Valence proxy: -10 → +10
         self.previous_mood = 0
         self.attention = 5      # Arousal proxy: 0 → 10
         self.affection = 50     # Relationship depth: 0 → 100
         self.dominance = 0.5    # VAD Dominance: 0.0 (yếu thế) → 1.0 (tự tin)
+        self.irritability = 0.0 # Hydraulic reservoir: 0.0 → 1.0 (bùng nổ khi >= 0.85)
+        self._outburst_this_turn = False  # Flag per-turn, reset đầu mỗi update()
 
     # ── VAD computed properties ────────────────────────────────────────────────
     @property
@@ -36,6 +40,8 @@ class EmotionEngine:
         self.attention = attention
         self.affection = affection
         self.dominance = max(0.0, min(1.0, dominance))
+        self.irritability = 0.0          # Session-level — always starts fresh
+        self._outburst_this_turn = False
 
     def get_state(self):
         """Get current emotional state"""
@@ -44,6 +50,7 @@ class EmotionEngine:
             "attention": round(self.attention, 1),
             "affection": round(self.affection, 1),
             "dominance": round(self.dominance, 2),
+            "irritability": round(self.irritability, 2),
         }
 
     def smooth_transition(self):
@@ -198,10 +205,40 @@ class EmotionEngine:
 
         self.dominance = max(0.0, min(1.0, self.dominance + dominance_delta * dom_multiplier))
 
+        # ── Hydraulic Model (Lorenz) — Emotional Reservoir ────────────────────
+        # Irritability tích lũy theo kích thích tiêu cực, drain chậm mỗi turn.
+        # Khi vượt ngưỡng → OUTBURST: mood spike + dominance drop + hint injection.
+        self._outburst_this_turn = False
+
+        # Tích lũy
+        negative_count = sum(1 for w in negative if w in text_lower)
+        if negative_count >= 2:
+            self.irritability += 0.20   # Chỉ trích nặng (nhiều từ tiêu cực)
+        elif has_negative:
+            self.irritability += 0.12   # Chỉ trích nhẹ
+        if len(text) < 5 and not has_positive:
+            self.irritability += 0.05   # Bị bỏ qua / tin nhắn quá ngắn
+
+        # Drain
+        if has_positive:
+            self.irritability -= 0.15   # Được khen → xả stress
+        else:
+            self.irritability -= 0.04   # Drain tự nhiên mỗi turn
+
+        self.irritability = max(0.0, min(1.0, self.irritability))
+
         self.smooth_transition()
 
         # Affection cap: max +/- 5 per turn
         self.affection = min(old_affection + 5, max(old_affection - 5, self.affection))
+
+        # Outburst trigger — apply SAU smooth_transition để spike không bị làm mượt
+        if self.irritability >= self.OUTBURST_THRESHOLD:
+            self.mood = max(-10, self.mood - 4)
+            self.dominance = max(0.0, self.dominance - 0.2)
+            self.irritability = 0.0
+            self._outburst_this_turn = True
+            print("[Emotion] OUTBURST triggered — irritability reset")
 
         self.mood = round(self.mood, 1)
 
@@ -378,10 +415,24 @@ class EmotionEngine:
         else:
             dominance_state = "unsure of yourself, feeling a bit overwhelmed"
 
+        # ── Hydraulic irritability hint ────────────────────────────────────────
+        irritability_hint = ""
+        if self._outburst_this_turn:
+            irritability_hint = (
+                " [EMOTIONAL OUTBURST]: You've been pushed too far. "
+                "React with raw, unfiltered frustration — sharper than usual, "
+                "no patience, no softening. This is genuine, not performed."
+            )
+        elif self.irritability >= 0.6:
+            irritability_hint = (
+                " You're getting increasingly irritated — "
+                "your patience is wearing thin. Let it show subtly."
+            )
+
         return (
             f"You feel {mood_state}. Your focus is {attention_state}. "
             f"Relationship with the user is {relationship_state} (Affection: {int(self.affection)}/100). "
-            f"You feel {dominance_state} right now."
+            f"You feel {dominance_state} right now.{irritability_hint}"
         )
 
     def choose_strategy(self):

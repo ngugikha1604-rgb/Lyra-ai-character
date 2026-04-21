@@ -246,6 +246,35 @@ Control is LOW when: `text_len > 60` (complex question), `attention <= 2` (tired
 
 **Known architecture limitation**: `emotion.update()` is called before viewer `affection` override in `chat()`, so `is_stranger` check uses owner affection for viewer turns. Not a crash — just means stranger detection doesn't fire for viewers.
 
+#### Hydraulic Model (Lorenz) ✅ Done
+
+`EmotionEngine` now has an emotional reservoir that accumulates irritability over time and triggers outbursts when overloaded.
+
+New state:
+- `irritability: float` — reservoir 0.0 → 1.0, session-level (resets on `load_state()`, not persisted)
+- `_outburst_this_turn: bool` — per-turn flag, reset at start of each `update()` hydraulic block
+- `OUTBURST_THRESHOLD: float = 0.85` — class constant
+
+Accumulation logic (inside `update()`):
+- 2+ negative keywords → `+0.20`
+- 1 negative keyword → `+0.12`
+- text < 5 chars (ignored) → `+0.05`
+- positive keyword → `-0.15` (stress relief)
+- neutral turn → `-0.04` (natural drain)
+
+Outburst trigger runs **after** `smooth_transition()` so the mood spike is not dampened:
+- `mood -= 4`, `dominance -= 0.2`, `irritability = 0.0`, `_outburst_this_turn = True`
+
+`describe_internal_state()` injects:
+- `irritability >= 0.6` → subtle warning ("patience wearing thin")
+- `_outburst_this_turn` → `[EMOTIONAL OUTBURST]` strong hint
+
+`core.py` return dict includes `"irritability"` key.
+
+**Key invariants**:
+- `irritability` is intentionally NOT save/restored for viewer turns — it's session-level state that accumulates across all turns
+- Outburst + Predictive Surprise can theoretically conflict (both inject contradictory tone hints) — probability is very low (5% × outburst chance) and not currently guarded
+
 ---
 
 ### 9. Conversation State Machine

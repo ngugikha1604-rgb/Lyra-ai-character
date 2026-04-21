@@ -737,6 +737,7 @@ class MiniAI:
             "mood": self.emotion.mood,
             "affection": self.emotion.affection,
             "dominance": round(self.emotion.dominance, 2),
+            "irritability": round(self.emotion.irritability, 2),
             "vad": self.emotion.get_vad(),
             "time_period": self.time_period,
             "time_gap_hours": self.time_gap_hours,
