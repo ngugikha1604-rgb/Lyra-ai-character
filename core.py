@@ -447,7 +447,7 @@ class MiniAI:
         self.turn_counter += 1
         intent = self.detect_intent(user_input)
 
-        self.emotion.update(user_input, self.time_gap_hours)
+        self.emotion.update(user_input, self.time_gap_hours, intent=intent)
 
         # Ghi L2 Session Memory khi stream (viewer chat)
         if source_type != "owner" and stream_context:
@@ -474,6 +474,7 @@ class MiniAI:
 
         # Override affection tạm thời theo source_type
         _original_affection = self.emotion.affection
+        _original_dominance = self.emotion.dominance  # Save dominance — restore sau viewer turn
         if source_type == "owner":
             pass  # dùng affection từ DB chính
         elif source_type == "regular_viewer":
@@ -575,7 +576,7 @@ class MiniAI:
         _base_tokens = self.emotion.get_dynamic_max_tokens()
         dynamic_max_tokens = self.conv_state.get_pace_max_tokens(_base_tokens)
         dynamic_temperature = self.conv_state.get_temperature(
-            self.emotion.mood, self.emotion.attention
+            self.emotion.mood, self.emotion.attention, self.emotion.dominance
         )
 
         content = self._call_model(
@@ -673,9 +674,10 @@ class MiniAI:
 
         reply = self._translate_response(reply)
 
-        # Restore affection gốc của owner sau khi xử lý viewer
+        # Restore affection và dominance gốc của owner sau khi xử lý viewer
         if source_type != "owner":
             self.emotion.affection = _original_affection
+            self.emotion.dominance = _original_dominance
 
         milestone = self.check_milestone()
         if milestone:
@@ -734,6 +736,8 @@ class MiniAI:
             "action": action,
             "mood": self.emotion.mood,
             "affection": self.emotion.affection,
+            "dominance": round(self.emotion.dominance, 2),
+            "vad": self.emotion.get_vad(),
             "time_period": self.time_period,
             "time_gap_hours": self.time_gap_hours,
             "intent": intent,

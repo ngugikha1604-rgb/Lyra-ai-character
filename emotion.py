@@ -5,20 +5,37 @@ from datetime import datetime
 
 
 class EmotionEngine:
-    """Manages Lyra's emotional state"""
+    """Manages Lyra's emotional state — VAD model (Valence-Arousal-Dominance)"""
 
     def __init__(self):
-        self.mood = 0
+        self.mood = 0           # Valence proxy: -10 → +10
         self.previous_mood = 0
-        self.attention = 5
-        self.affection = 50
+        self.attention = 5      # Arousal proxy: 0 → 10
+        self.affection = 50     # Relationship depth: 0 → 100
+        self.dominance = 0.5    # VAD Dominance: 0.0 (yếu thế) → 1.0 (tự tin)
 
-    def load_state(self, mood, attention, affection):
+    # ── VAD computed properties ────────────────────────────────────────────────
+    @property
+    def valence(self) -> float:
+        """Normalized valence: -1.0 → +1.0 (derived from mood)"""
+        return round(self.mood / 10.0, 3)
+
+    @property
+    def arousal(self) -> float:
+        """Normalized arousal: 0.0 → 1.0 (derived from attention)"""
+        return round(self.attention / 10.0, 3)
+
+    def get_vad(self) -> tuple:
+        """Returns (valence, arousal, dominance) for Live2D or external use."""
+        return (self.valence, self.arousal, round(self.dominance, 3))
+
+    def load_state(self, mood, attention, affection, dominance=0.5):
         """Load state from memory"""
         self.mood = mood
         self.previous_mood = mood
         self.attention = attention
         self.affection = affection
+        self.dominance = max(0.0, min(1.0, dominance))
 
     def get_state(self):
         """Get current emotional state"""
@@ -26,6 +43,7 @@ class EmotionEngine:
             "mood": round(self.mood, 1),
             "attention": round(self.attention, 1),
             "affection": round(self.affection, 1),
+            "dominance": round(self.dominance, 2),
         }
 
     def smooth_transition(self):
@@ -36,8 +54,8 @@ class EmotionEngine:
         )
         self.previous_mood = self.mood
 
-    def update(self, text, time_gap_hours=None):
-        """Update emotion based on user input"""
+    def update(self, text, time_gap_hours=None, intent: str = "statement"):
+        """Update emotion based on user input. intent từ detect_intent() trong core.py."""
         old_affection = self.affection
 
         if time_gap_hours is not None and time_gap_hours > 12:
@@ -122,11 +140,14 @@ class EmotionEngine:
             "khổ",
         ]
 
-        if any(w in text_lower for w in positive):
+        has_positive = any(w in text_lower for w in positive)
+        has_negative = any(w in text_lower for w in negative)
+
+        if has_positive:
             self.mood = min(10, self.mood + 2)
             self.affection = min(100, self.affection + 3)
 
-        if any(w in text_lower for w in negative):
+        if has_negative:
             self.mood = max(-10, self.mood - 3)
             self.affection = max(0, self.affection - 4)
 
@@ -140,6 +161,34 @@ class EmotionEngine:
         if len(text) < 5:
             self.attention = max(0, self.attention - 1)
 
+        # ── VAD Dominance update ───────────────────────────────────────────────
+        # Dominance phản ánh mức độ Lyra cảm thấy "in control" trong tình huống
+        dominance_delta = 0.0
+
+        if intent == "compliment" or has_positive:
+            # Được khen / tích cực → tự tin hơn
+            dominance_delta += 0.08
+        if intent == "complaint" or has_negative:
+            # Bị chỉ trích / tiêu cực → yếu thế hơn
+            dominance_delta -= 0.10
+        if intent == "question" and len(text) > 60:
+            # Câu hỏi dài/phức tạp → Lyra không chắc có trả lời được không
+            dominance_delta -= 0.05
+        if intent == "greeting":
+            # Chào hỏi → neutral, hơi tự tin vì quen thuộc
+            dominance_delta += 0.03
+        if intent == "request":
+            # Được nhờ vả → có vai trò rõ ràng → tự tin hơn
+            dominance_delta += 0.04
+        if self.affection >= 70:
+            # Quan hệ thân thiết → baseline dominance cao hơn
+            dominance_delta += 0.02
+        if self.attention <= 2:
+            # Mệt mỏi → ít tự tin hơn
+            dominance_delta -= 0.04
+
+        self.dominance = max(0.0, min(1.0, self.dominance + dominance_delta))
+
         self.smooth_transition()
 
         # Affection cap: max +/- 5 per turn
@@ -150,37 +199,64 @@ class EmotionEngine:
         return self.get_state()
 
     def emotion_from_state(self):
-        """Map state to Live2D emotion"""
-        if self.mood >= 8:
+        """Map VAD state to Live2D emotion label."""
+        v = self.valence    # -1.0 → +1.0
+        a = self.arousal    # 0.0 → 1.0
+        d = self.dominance  # 0.0 → 1.0
+
+        # ── High arousal states ────────────────────────────────────────────────
+        if v >= 0.8 and a >= 0.6:
             return "ecstatic"
-        if self.mood >= 5:
+        if v >= 0.5 and a >= 0.5:
             return "happy"
-        if self.mood >= 2:
-            return "content"
-        if self.mood <= -8:
-            return "furious"
-        if self.mood <= -5:
+
+        # ── Anger vs Frustration: cùng valence âm nhưng dominance khác nhau ──
+        # Angry (high dominance): tức giận chủ động, muốn phản công
+        # Frustrated (low dominance): bực bội thụ động, cảm thấy bất lực
+        if v <= -0.5 and a >= 0.5:
+            return "furious" if d >= 0.6 else "disappointed"
+
+        # ── Sad vs Cold: valence âm, arousal thấp ─────────────────────────────
+        # Cold (high dominance): lạnh lùng có chủ ý, kiểm soát được
+        # Sad (low dominance): buồn thật sự, không kiểm soát được
+        # Nếu affection thấp (người lạ) → luôn cold bất kể dominance
+        if v <= -0.5 and a < 0.5:
+            if self.affection <= 30 or d >= 0.55:
+                return "cold"
             return "sad"
-        if self.mood <= -2:
+
+        # ── Mild negative ──────────────────────────────────────────────────────
+        if v <= -0.2:
             return "disappointed"
-        if self.attention < 1:
+
+        # ── Attention/arousal based ────────────────────────────────────────────
+        if a < 0.1:
             return "sleeping"
-        if self.attention < 3:
+        if a < 0.3:
             return "bored"
-        if self.attention >= 9:
+        if a >= 0.9:
             return "thinking"
+
+        # ── Affection-based (relationship depth) ──────────────────────────────
         if self.affection >= 90:
             return "loving"
         if self.affection >= 75:
             return "friendly"
         if self.affection <= 20:
             return "cold"
-        if abs(self.mood) < 0.5 and 45 <= self.affection <= 55 and self.attention >= 3:
+
+        # ── Mild positive ──────────────────────────────────────────────────────
+        if v >= 0.2:
+            return "content"
+
+        # ── True neutral ──────────────────────────────────────────────────────
+        if abs(v) < 0.05 and 45 <= self.affection <= 55 and a >= 0.3:
             return "neutral"
+
         return "observing"
 
     def describe_internal_state(self):
-        """Convert to natural language cues"""
+        """Convert VAD state to natural language cues for LLM prompt injection."""
         if self.mood >= 6:
             mood_state = "bright and a little more playful than usual"
         elif self.mood >= 2:
@@ -208,9 +284,20 @@ class EmotionEngine:
         else:
             relationship_state = "still building rhythm with them"
 
+        # ── Dominance description ──────────────────────────────────────────────
+        if self.dominance >= 0.75:
+            dominance_state = "confident and in control of the conversation"
+        elif self.dominance >= 0.55:
+            dominance_state = "comfortable and at ease"
+        elif self.dominance >= 0.35:
+            dominance_state = "a little uncertain, slightly on the back foot"
+        else:
+            dominance_state = "unsure of yourself, feeling a bit overwhelmed"
+
         return (
             f"You feel {mood_state}. Your focus is {attention_state}. "
-            f"Relationship with the user is {relationship_state} (Affection: {int(self.affection)}/100)."
+            f"Relationship with the user is {relationship_state} (Affection: {int(self.affection)}/100). "
+            f"You feel {dominance_state} right now."
         )
 
     def choose_strategy(self):

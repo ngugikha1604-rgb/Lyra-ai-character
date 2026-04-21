@@ -221,9 +221,9 @@ class ConversationStateDetector:
         }
         return hints.get(self._state, "")
 
-    def get_temperature(self, base_mood: float, base_attention: float) -> float:
+    def get_temperature(self, base_mood: float, base_attention: float, dominance: float = 0.5) -> float:
         """
-        Dynamic temperature based on emotion state + conversation state + vibe tier.
+        Dynamic temperature based on emotion state + conversation state + vibe tier + dominance.
 
         Ranges:
           - closing / goodbye  → lower (more predictable, safe)
@@ -233,6 +233,8 @@ class ConversationStateDetector:
           - excited (mood > 5) → slightly higher (more expressive)
           - slang vibe         → +0.08 (casual, raw, less filtered)
           - intellectual vibe  → -0.08 (precise, consistent, thoughtful)
+          - low dominance      → -0.05 (uncertain → more careful, less random)
+          - high dominance     → +0.05 (confident → more expressive)
           - default            → 0.80
         """
         temp = 0.80
@@ -259,6 +261,12 @@ class ConversationStateDetector:
             temp = min(temp + 0.08, 1.10)   # casual/raw → less filtered
         elif tier == "intellectual":
             temp = max(temp - 0.08, 0.55)   # deep/precise → more consistent
+
+        # ── VAD Dominance: confidence level affects output randomness ──────
+        if dominance <= 0.3:
+            temp = max(temp - 0.05, 0.55)   # uncertain → more careful
+        elif dominance >= 0.75:
+            temp = min(temp + 0.05, 1.10)   # confident → more expressive
 
         return round(temp, 2)
 
