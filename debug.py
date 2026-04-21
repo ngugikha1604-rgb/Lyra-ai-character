@@ -7,28 +7,8 @@ from config import BASE_URL, USE_OLLAMA, DEFAULT_MODEL
 def main():
     print("========================================")
     print("Lyra AI - Terminal Debug Mode")
-    print("Mode:", "OLLAMA" if USE_OLLAMA else "GROQ")
-    print("Model:", DEFAULT_MODEL)
     print("Type 'exit' or 'quit' to stop.")
     print("========================================\n")
-
-    # 1. Connection Check
-    if USE_OLLAMA:
-        pass
-        """
-        print(f"[Check] Verifying Ollama at {BASE_URL}...")
-        try:
-            tags_url = BASE_URL.replace("/api/chat", "/api/tags")
-            res = requests.get(tags_url, timeout=5)
-            if res.status_code == 200:
-                print("✓ Ollama is online.")
-            else:
-                print(
-                    f"! Ollama returned status {res.status_code}. Check if it is running correctly."
-                )
-        except Exception as e:
-            print(f"! Could not connect to Ollama: {e}")
-            print("  Make sure Ollama is started and reachable at localhost:11434")"""
 
     try:
         # 2. Khởi tạo AI engine

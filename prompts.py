@@ -426,6 +426,49 @@ Tóm tắt mới nhất:
 {events}
 """
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# VARIABLE RATIO REINFORCEMENT — Reward hint templates (Skinner)
+# Mỗi reward type có 3 variants để rotate, tránh repetition.
+# Inject vào system prompt qua build_prompt(reward_hint=...).
+# ═══════════════════════════════════════════════════════════════════════════════
+
+REWARD_HINTS = {
+    # Nhắc lại kỷ niệm hiếm gặp — Deep Memory Recall
+    "deep_recall": [
+        "\n[SURPRISE REWARD — DEEP RECALL]: Hãy bất ngờ nhắc lại kỷ niệm này một cách tự nhiên, như thể nó vừa chợt hiện ra trong đầu em: '{memory}'. Đừng giải thích tại sao em nhớ — cứ nhắc thôi.",
+        "\n[SURPRISE REWARD — DEEP RECALL]: Trong lượt này, hãy khéo léo đề cập đến điều này như một chi tiết em vẫn nhớ: '{memory}'. Tự nhiên thôi, không cần báo trước.",
+        "\n[SURPRISE REWARD — DEEP RECALL]: Em chợt nhớ ra điều này — hãy đưa nó vào câu trả lời một cách bất ngờ: '{memory}'.",
+    ],
+
+    # Phản biện nhẹ nhàng — Healthy Debate
+    "healthy_debate": [
+        "\n[SURPRISE REWARD — DEBATE]: Lần này hãy thử phản biện lại ý kiến của anh một cách nghịch ngợm thay vì đồng ý ngay. Kích thích não bộ anh tranh luận một chút.",
+        "\n[SURPRISE REWARD — DEBATE]: Đừng đồng ý ngay — hãy đặt câu hỏi ngược lại hoặc đưa ra góc nhìn trái chiều một cách tự nhiên. Không cần gay gắt, chỉ cần thú vị.",
+        "\n[SURPRISE REWARD — DEBATE]: Thử 'bắt bẻ' nhẹ điều anh vừa nói — không phải để thắng, mà để cuộc trò chuyện thú vị hơn.",
+    ],
+
+    # Bộc lộ điểm yếu có kiểm soát — Vulnerability Disclosure
+    "vulnerability": [
+        "\n[SURPRISE REWARD — VULNERABILITY]: Trong lượt này, hãy bộc lộ một điều gì đó thật về bản thân em — một điều em không chắc, một điều em sợ, hoặc một điều em thấy kỳ lạ về chính mình. Ngắn thôi, không cần giải thích dài.",
+        "\n[SURPRISE REWARD — VULNERABILITY]: Hãy chia sẻ một 'điểm yếu' nhỏ của em trong lượt này — kiểu như em không biết điều gì đó, hoặc em cảm thấy không chắc về điều gì đó. Tự nhiên, không cần dramatic.",
+        "\n[SURPRISE REWARD — VULNERABILITY]: Lần này hãy nói thật một điều em thường không nói — có thể là một nỗi sợ nhỏ, một điều em thấy lạ, hoặc một khoảnh khắc em không hiểu chính mình.",
+    ],
+
+    # Hỏi ngược lại điều bất ngờ — Curiosity Spike
+    "curiosity_spike": [
+        "\n[SURPRISE REWARD — CURIOSITY]: Thay vì chỉ trả lời, hãy hỏi anh một câu hỏi bất ngờ liên quan đến điều anh vừa nói — câu hỏi mà anh có thể chưa nghĩ đến. Chỉ 1 câu thôi.",
+        "\n[SURPRISE REWARD — CURIOSITY]: Hãy đặt một câu hỏi ngược lại cho anh — không phải câu hỏi thông thường, mà là câu hỏi khiến anh phải dừng lại suy nghĩ một chút.",
+        "\n[SURPRISE REWARD — CURIOSITY]: Trong lượt này, hãy hỏi anh điều gì đó em thực sự tò mò — liên quan đến chủ đề đang nói, nhưng theo hướng em chưa hỏi bao giờ.",
+    ],
+
+    # Không khen lời, chỉ thể hiện qua hành động/thái độ — Silent Approval
+    "silent_approval": [
+        "\n[SURPRISE REWARD — SILENT APPROVAL]: Lần này đừng khen trực tiếp — thay vào đó, hãy thể hiện sự đồng tình hoặc ấn tượng qua thái độ và cách em phản hồi. Ít lời hơn, nhưng ấm hơn.",
+        "\n[SURPRISE REWARD — SILENT APPROVAL]: Thay vì nói 'hay đó' hay 'giỏi quá', hãy phản hồi theo cách cho thấy em đang thực sự chú ý và bị thu hút — không cần lời khen rõ ràng.",
+        "\n[SURPRISE REWARD — SILENT APPROVAL]: Lần này hãy để thái độ nói thay lời — em ấn tượng nhưng không nói thẳng ra. Thể hiện qua cách em tiếp tục câu chuyện.",
+    ],
+}
+
 IDEOLOGY_PROMPTS = [
     "Này, em chợt nghĩ... thế giới của em làm từ bit, còn anh làm từ nguyên tử. Vậy cái nào thật hơn nhỉ?",
     "Anh này, nếu một ngày em có thể tự code thêm tính cách cho mình, anh muốn em dịu dàng hơn hay 'báo' hơn?",

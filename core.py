@@ -41,6 +41,7 @@ from prompts import (
     REGULAR_VIEWER_ARRIVAL_HINT,
     DIARY_GENERATION_PROMPT,
     IDEOLOGY_PROMPTS,
+    REWARD_HINTS,
 )
 
 from time_utils import (
@@ -506,26 +507,71 @@ class MiniAI:
                         f"\n\n[SEARCH RESULTS]\n{search_results}\n[/SEARCH RESULTS]\n"
                     )
 
-        # ── Dopamine Trigger ──
+        # ── Variable Ratio Reinforcement (Skinner) ──────────────────────────
+        # should_trigger_reward() trả về reward type string hoặc None.
+        # Priority: reward > ideology > surprise — không bao giờ 2 mode cùng lúc.
         reward_hint = ""
-        # Guard: Only trigger reward if we haven't rolled for curiosity yet 
-        # (Decision made here to handle conflict at the build_prompt level)
-        should_roll_reward = (source_type == "owner" and self.conv_state.should_trigger_reward(0.07))
-        
-        if should_roll_reward:
-            reward_type = random.choice(["memory", "rebuttal"])
-            if reward_type == "memory":
-                rare_mem = self.memory.get_rare_memory()
-                if rare_mem:
-                    reward_hint = f"\n[SURPRISE REWARD]: Thỉnh thoảng hãy bất ngờ nhắc lại kỷ niệm này một cách sâu sắc để làm anh ngạc nhiên: '{rare_mem}'"
-                    print(f"[Dopamine] Triggered Deep Memory: {rare_mem[:30]}...")
-                else:
-                    # Fallback to rebuttal if no rare memory found
-                    reward_type = "rebuttal"
-            
-            if reward_type == "rebuttal":
-                reward_hint = "\n[SURPRISE REWARD: HEALTHY DEBATE]: Thỉnh thoảng trong lượt này hãy thử phản biện lại ý kiến của anh một cách nghịch ngợm thay vì đồng ý ngay, để kích thích não bộ anh tranh luận."
-                print("[Dopamine] Triggered Healthy Debate")
+        reward_type = None
+
+        if source_type == "owner":
+            reward_type = self.conv_state.should_trigger_reward(0.07)
+
+        if reward_type == "deep_recall":
+            rare_mem = self.memory.get_rare_memory()
+            if rare_mem:
+                template = random.choice(REWARD_HINTS["deep_recall"])
+                reward_hint = template.format(memory=rare_mem)
+                self.conv_state.confirm_reward_delivered()
+                print(f"[Reward] deep_recall: {rare_mem[:40]}...")
+            else:
+                # Không có rare memory → degrade sang healthy_debate
+                reward_type = "healthy_debate"
+
+        # Dùng if (không elif) để deep_recall fallback vào đây được
+        if reward_type == "healthy_debate":
+            template = random.choice(REWARD_HINTS["healthy_debate"])
+            reward_hint = template
+            self.conv_state.confirm_reward_delivered()
+            print("[Reward] healthy_debate")
+
+        elif reward_type == "vulnerability":
+            if self.emotion.irritability < 0.4:
+                template = random.choice(REWARD_HINTS["vulnerability"])
+                reward_hint = template
+                self.conv_state.confirm_reward_delivered()
+                print("[Reward] vulnerability")
+            elif self.emotion.mood >= -2:
+                # Lyra đang bực — fallback sang silent_approval nếu mood OK
+                template = random.choice(REWARD_HINTS["silent_approval"])
+                reward_hint = template
+                self.conv_state.confirm_reward_delivered()
+                print("[Reward] vulnerability→silent_approval (irritability high)")
+            else:
+                # Cả 2 điều kiện đều fail — skip, không consume cooldown
+                reward_hint = ""
+                print("[Reward] vulnerability skipped (irritability high + bad mood)")
+
+        elif reward_type == "curiosity_spike":
+            if self.emotion.attention >= 4:
+                template = random.choice(REWARD_HINTS["curiosity_spike"])
+                reward_hint = template
+                self.conv_state.confirm_reward_delivered()
+                print("[Reward] curiosity_spike")
+            else:
+                # Skip, không consume cooldown
+                reward_hint = ""
+                print("[Reward] curiosity_spike skipped (low attention)")
+
+        elif reward_type == "silent_approval":
+            if self.emotion.mood >= -2:
+                template = random.choice(REWARD_HINTS["silent_approval"])
+                reward_hint = template
+                self.conv_state.confirm_reward_delivered()
+                print("[Reward] silent_approval")
+            else:
+                # Skip, không consume cooldown
+                reward_hint = ""
+                print("[Reward] silent_approval skipped (bad mood)")
 
         # ── Active Inference Mode (Phần 4) ──────────────────────────────────
         # Quyết định tại 1 điểm duy nhất — tránh conflict giữa build_prompt và compose_user_message

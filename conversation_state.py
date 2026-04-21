@@ -64,8 +64,12 @@ class ConversationStateDetector:
         self._slang_count: int = 0
         self._intellectual_count: int = 0
         
-        # Reward Schedule (Variable Ratio Reinforcement)
-        self._last_reward_turn: int = 0
+        # ── Variable Ratio Reinforcement (Skinner) ────────────────────────
+        self._last_reward_turn: int = 0       # turn khi reward được DELIVER (set bởi confirm)
+        self._last_reward_attempt_turn: int = 0  # turn khi reward được ATTEMPT (set bởi should_trigger)
+        # Behavioral shaping: đếm hành vi tích cực liên tiếp của user
+        # Tăng xác suất reward khi user engage sâu (tin nhắn dài, câu hỏi, liên tiếp)
+        self._positive_behavior_streak: int = 0  # 0 → N, reset khi user passive
 
         # ── Active Inference (Phần 4) ──────────────────────────────────────
         # Ideology: cooldown + no-repeat tracking
@@ -117,6 +121,20 @@ class ConversationStateDetector:
                 self._slang_count = min(self._slang_count + 1, 10)
 
         self._state = self._detect_state(text, messages)
+
+        # ── Behavioral Shaping: track positive engagement streak ──────────
+        # Positive behavior: tin nhắn dài (>40 chars), có câu hỏi, hoặc intellectual
+        is_engaged = (
+            len(text) > 40
+            or "?" in text
+            or _INTELLECTUAL_PATTERNS.search(text)
+        )
+        if is_engaged:
+            self._positive_behavior_streak = min(self._positive_behavior_streak + 1, 8)
+        else:
+            # Decay chậm — không reset ngay khi 1 tin nhắn ngắn
+            self._positive_behavior_streak = max(0, self._positive_behavior_streak - 1)
+
         return self._state
 
     def get_vibe_tier(self) -> str:
@@ -351,16 +369,72 @@ class ConversationStateDetector:
         # Default: keep previous state (stability)
         return self._state
 
-    def should_trigger_reward(self, probability: float = 0.07) -> bool:
+    def should_trigger_reward(self, probability: float = 0.07) -> "str | None":
         """
-        Implements Variable Ratio Reinforcement schedule.
-        Returns True if a 'micro-reward' (compliment, debate, etc.) should be triggered.
+        Variable Ratio Reinforcement (Skinner) — trả về reward type hoặc None.
+
+        Behavioral shaping: xác suất tăng theo positive_behavior_streak.
+        Mỗi streak level +1 thêm 1.5% vào base probability (cap ở streak=8 → +12%).
+
+        Reward weights:
+          deep_recall:    40% — nhắc kỷ niệm hiếm
+          healthy_debate: 25% — phản biện nhẹ
+          vulnerability:  15% — bộc lộ điểm yếu (chỉ khi deepening)
+          curiosity_spike: 10% — hỏi ngược bất ngờ
+          silent_approval: 10% — im lặng tán thưởng
+
+        NOTE: Cooldown (_last_reward_turn) KHÔNG được set ở đây.
+        Caller (core.py) phải gọi confirm_reward_delivered() sau khi
+        reward thực sự được inject vào prompt. Tránh consume cooldown
+        khi reward bị skip do điều kiện context không thỏa.
+
+        Returns: reward type string hoặc None nếu không trigger.
         """
-        # Cooldown of at least 3 turns to keep it surprising but not spammy
         if self._turn - self._last_reward_turn < 3:
-            return False
-            
-        if random.random() < probability:
-            self._last_reward_turn = self._turn
-            return True
-        return False
+            return None
+        # Tránh re-roll liên tục khi reward bị skip — cooldown attempt 1 turn
+        if self._turn - self._last_reward_attempt_turn < 1:
+            return None
+
+        # Behavioral shaping: tăng xác suất theo streak
+        shaped_probability = probability + self._positive_behavior_streak * 0.015
+        shaped_probability = min(shaped_probability, 0.22)  # cap ở 22%
+
+        if random.random() >= shaped_probability:
+            return None
+
+        # Weighted selection — chỉ include candidates có weight > 0
+        # vulnerability chỉ available khi state == "deepening"
+        candidates = [
+            ("deep_recall",     0.40),
+            ("healthy_debate",  0.25),
+            ("curiosity_spike", 0.10),
+            ("silent_approval", 0.10),
+        ]
+        if self._state == "deepening":
+            candidates.append(("vulnerability", 0.15))
+
+        # Normalize weights để tổng luôn = 1.0 (tránh overflow → fallback bias)
+        total = sum(w for _, w in candidates)
+        # total luôn > 0 vì candidates không bao giờ rỗng
+
+        roll = random.random() * total
+        cumulative = 0.0
+        chosen = candidates[-1][0]  # fallback = phần tử cuối (tránh hardcode)
+        for reward_type, weight in candidates:
+            cumulative += weight
+            if roll <= cumulative:
+                chosen = reward_type
+                break
+
+        # Set attempt turn — tránh re-roll cùng turn nếu caller gọi lại
+        # Cooldown deliver (_last_reward_turn) chỉ set bởi confirm_reward_delivered()
+        self._last_reward_attempt_turn = self._turn
+        return chosen
+
+    def confirm_reward_delivered(self):
+        """
+        Gọi từ core.py sau khi reward_hint đã được set thành công.
+        Chỉ khi này mới consume cooldown — tránh lãng phí slot khi reward bị skip.
+        """
+        self._last_reward_turn = self._turn
