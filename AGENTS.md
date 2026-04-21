@@ -191,7 +191,7 @@ All decisions are made at **one single point** in `chat()` before calling `build
 
 ---
 
-### 8b. 🧬 Emotion Architecture Upgrade (PLAN.md — Partially Implemented)
+### 8b. 🧬 Emotion Architecture Upgrade (PLAN.md — 4/5 Implemented)
 
 Advanced emotion model layered on top of `EmotionEngine`. All changes live in `emotion.py` unless noted.
 
@@ -274,6 +274,32 @@ Outburst trigger runs **after** `smooth_transition()` so the mood spike is not d
 **Key invariants**:
 - `irritability` is intentionally NOT save/restored for viewer turns — it's session-level state that accumulates across all turns
 - Outburst + Predictive Surprise can theoretically conflict (both inject contradictory tone hints) — probability is very low (5% × outburst chance) and not currently guarded
+
+#### Plutchik's Wheel — Secondary Emotions ✅ Done
+
+`emotion_from_state()` now checks secondary emotions **before** primary emotions. 5 secondary emotions mapped to existing Live2D labels:
+
+| Secondary | Plutchik | Conditions | Label |
+|-----------|----------|------------|-------|
+| Love | Joy + Trust | `0.3 <= v < 0.8`, affection >= 75 | `loving` |
+| Contempt | Anger + Disgust | v <= -0.4, a 0.5-0.8, d >= 0.6, **irritability >= 0.4** | `furious` |
+| Awe | Surprise + Fear | `0.2 <= v < 0.8`, a >= 0.7, d <= 0.4 | `thinking` |
+| Remorse | Sadness + Disgust | -0.5 <= v <= -0.2, `0.3 < a <= 0.4`, d <= 0.35 | `sad` |
+| Alarm | Fear + Surprise | `v <= -0.3`, a >= 0.7, d <= 0.35 | `disappointed` |
+
+Note: Upper bounds on `v` for Love and Awe prevent hiding `ecstatic`. Remorse lower bound on `a` prevents conflict with `bored`. Alarm threshold raised to avoid triggering on mildly negative mood.
+
+`Contempt` is the only secondary emotion that uses `self.irritability` — creating a cross-system dependency between Hydraulic Model and Plutchik. This is intentional: contempt requires sustained irritation, not just a single negative event.
+
+#### Emotional Homeostasis (Hedonic Adaptation) 📋 Not Yet Implemented
+
+Per-turn micro-decay toward baseline. Planned for `emotion.py`:
+- `mood` decays toward 0 at rate 0.08/turn
+- `dominance` decays toward 0.5 at rate 0.05/turn
+- `irritability` drain already handled by Hydraulic Model (-0.04/turn)
+- `affection` and `attention` excluded — they have their own decay logic
+
+When implemented: add `_apply_homeostasis()` called at end of `update()`.
 
 ---
 

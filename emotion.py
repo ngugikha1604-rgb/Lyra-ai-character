@@ -320,12 +320,43 @@ class EmotionEngine:
             return (0.5, 0.5)   # Dampen — neutral events không nên move nhiều
 
     def emotion_from_state(self):
-        """Map VAD state to Live2D emotion label."""
+        """Map VAD state to Live2D emotion label.
+
+        Check order: Secondary emotions (Plutchik) → Primary emotions (VAD)
+        Secondary emotions use all 4 dimensions: valence, arousal, dominance, irritability.
+        """
         v = self.valence    # -1.0 → +1.0
         a = self.arousal    # 0.0 → 1.0
         d = self.dominance  # 0.0 → 1.0
 
-        # ── High arousal states ────────────────────────────────────────────────
+        # ── Secondary Emotions (Plutchik's Wheel) — check TRƯỚC primary ───────
+        # Love (Joy + Trust): vui + thân thiết → ấm áp sâu sắc
+        # Chỉ trigger khi mood đủ tích cực (v >= 0.3) để phân biệt với "friendly"
+        # Không trigger khi ecstatic (v >= 0.8) để không che primary ecstatic
+        if 0.3 <= v < 0.8 and self.affection >= 75:
+            return "loving"
+
+        # Contempt (Anger + Disgust): tức giận + chán ghét — irritability cao + dominance cao
+        if v <= -0.4 and 0.5 <= a <= 0.8 and d >= 0.6 and self.irritability >= 0.4:
+            return "furious"  # Map sang "furious" với context irritability
+
+        # Awe (Surprise + Fear): bất ngờ + kính phục — arousal cao nhưng dominance thấp
+        # Chỉ trigger khi valence không quá cao (không che ecstatic)
+        if 0.2 <= v < 0.8 and a >= 0.7 and d <= 0.4:
+            return "thinking"  # Map sang "thinking" — trạng thái bị choáng ngợp
+
+        # Remorse (Sadness + Disgust): hối hận lặng lẽ — valence âm nhẹ, arousal thấp, dominance thấp
+        # a > 0.3 để không conflict với "bored" (a < 0.3)
+        if -0.5 <= v <= -0.2 and 0.3 < a <= 0.4 and d <= 0.35:
+            return "sad"  # Map sang "sad" — hối hận không bùng nổ
+
+        # Alarm (Fear + Surprise): lo lắng đột ngột — arousal cao, dominance thấp, valence âm rõ
+        # v <= -0.3 để tránh trigger với mood chỉ hơi âm nhẹ
+        if v <= -0.3 and a >= 0.7 and d <= 0.35:
+            return "disappointed"  # Map sang "disappointed" — lo lắng bất lực
+
+        # ── Primary Emotions (VAD) ─────────────────────────────────────────────
+        # High arousal states
         if v >= 0.8 and a >= 0.6:
             return "ecstatic"
         if v >= 0.5 and a >= 0.5:
