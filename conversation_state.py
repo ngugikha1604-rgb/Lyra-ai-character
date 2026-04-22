@@ -489,8 +489,8 @@ class ConversationStateDetector:
         """
         if self._turn - self._last_reward_turn < 3:
             return None
-        # Tránh re-roll liên tục khi reward bị skip — cooldown attempt 1 turn
-        if self._turn - self._last_reward_attempt_turn < 1:
+        # Tránh re-roll liên tục khi reward bị skip — cooldown attempt 2 turns
+        if self._turn - self._last_reward_attempt_turn < 2:
             return None
 
         # Behavioral shaping: tăng xác suất theo streak

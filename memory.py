@@ -1526,14 +1526,31 @@ class MemorySystem:
             return False
 
     def get_stream_count(self) -> int:
-        """Đếm số lượng buổi stream đã lưu (thread-safe)."""
+        """Đếm số lượng buổi stream đã lưu (thread-safe).
+        Dùng metadata key 'stream_session_count' — tăng mỗi lần stream/stop.
+        """
         try:
             conn = self._get_db()
             if not conn: return 0
             with self.db_lock:
-                row = conn.execute("SELECT COUNT(*) FROM stream_milestones WHERE event_type LIKE 'stream_%'").fetchone()
-                return row[0] if row else 0
+                row = conn.execute("SELECT value FROM metadata WHERE key='stream_session_count'").fetchone()
+                return int(row[0]) if row else 0
         except Exception:
+            return 0
+
+    def increment_stream_count(self) -> int:
+        """Tăng stream session count lên 1 và trả về giá trị mới."""
+        try:
+            conn = self._get_db()
+            if not conn: return 0
+            with self.db_lock:
+                row = conn.execute("SELECT value FROM metadata WHERE key='stream_session_count'").fetchone()
+                new_count = (int(row[0]) if row else 0) + 1
+                conn.execute("INSERT OR REPLACE INTO metadata VALUES ('stream_session_count', ?)", (str(new_count),))
+                conn.commit()
+                return new_count
+        except Exception as e:
+            print(f"[Memory] increment_stream_count error: {e}")
             return 0
 
     def get_stream_milestones(self, limit: int = 5) -> list:

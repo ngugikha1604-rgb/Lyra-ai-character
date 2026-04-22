@@ -530,6 +530,7 @@ def stream_chat():
                 "viewer_name": sender_name,
                 "affection": regular["affection"] if regular else 40,
                 "amount": data.get("donate_amount", ""),
+                "gender": data.get("gender", "male"),
             }
         elif regular:
             source_type_val = "regular_viewer"
@@ -537,10 +538,11 @@ def stream_chat():
                 "viewer_name": sender_name,
                 "affection": regular["affection"],
                 "total_streams": regular["total_streams"],
+                "gender": data.get("gender", "male"),
             }
         else:
             source_type_val = "new_viewer"
-            viewer_data = {"viewer_name": sender_name}
+            viewer_data = {"viewer_name": sender_name, "gender": data.get("gender", "male")}
 
         result = lyra_ai.chat(composed_input, source_type=source_type_val, viewer_data=viewer_data, stream_context=stream_ctx)
 
@@ -771,7 +773,9 @@ def _process_queue_loop():
                 continue
 
             _handle_stream_event(event)
-            _mark_replied()
+            # Owner bypasses cooldown — chỉ set cooldown cho non-owner tiers
+            if event.get("_tier") != "owner":
+                _mark_replied()
 
         except Exception as e:
             print(f"[Stream Consumer] Error: {e}")
@@ -832,6 +836,8 @@ def _handle_stream_event(chat_event: dict):
             lyra_ai._thread_local.skip_memory_extraction = True
 
         regular_data = chat_event.get("_regular_data")
+        # gender từ chat_event (YouTube API không cung cấp — default male)
+        _gender = chat_event.get("gender", "male")
 
         if tier == "owner":
             source_type_val = "owner"
@@ -842,6 +848,7 @@ def _handle_stream_event(chat_event: dict):
                 "viewer_name": sender_name,
                 "affection": regular_data["affection"] if regular_data else 40,
                 "amount": chat_event.get("donate_amount", ""),
+                "gender": _gender,
             }
         elif tier == "regular_viewer":
             source_type_val = "regular_viewer"
@@ -849,10 +856,11 @@ def _handle_stream_event(chat_event: dict):
                 "viewer_name": sender_name,
                 "affection": regular_data["affection"] if regular_data else 35,
                 "total_streams": regular_data["total_streams"] if regular_data else 1,
+                "gender": _gender,
             }
         else:
             source_type_val = "new_viewer"
-            viewer_data = {"viewer_name": sender_name}
+            viewer_data = {"viewer_name": sender_name, "gender": _gender}
 
         result = lyra_ai.chat(composed_input, source_type=source_type_val, viewer_data=viewer_data, stream_context=stream_ctx)
 
@@ -1038,9 +1046,8 @@ def stream_stop():
 
     # ── IDEA-03: Check stream milestones ──────────────────────────────────────
     try:
-        stream_count_row = None
-        # Thay vì mở connection mới, dùng helper từ memory system để tránh race condition
-        stream_num = lyra_ai.memory.get_stream_count() + 1
+        # Tăng stream count trước khi check milestone — trả về số buổi stream hiện tại
+        stream_num = lyra_ai.memory.increment_stream_count()
 
         from config import STREAM_TITLE
         # Debut (lần đầu tiên)
