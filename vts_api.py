@@ -87,6 +87,68 @@ class VTSController:
         action_hotkey = f"ACT_{action.upper()}"
         asyncio.run_coroutine_threadsafe(self._trigger_hotkey(action_hotkey), self.loop)
 
+    def update_vad_params(self, valence: float, arousal: float, dominance: float):
+        """
+        VAD → Live2D Parameter Mapper (Paralinguistics — Module 5).
+
+        Map 3 chiều cảm xúc VAD sang Live2D parameters để tạo biểu cảm
+        liên tục thay vì chỉ trigger expression preset.
+
+        Mapping:
+          valence  (-1.0 → +1.0) → ParamBrowLY / ParamBrowRY
+            - Positive valence: lông mày nhẹ nhàng (raised slightly)
+            - Negative valence: lông mày cau lại (lowered/furrowed)
+
+          arousal  (0.0 → 1.0) → ParamEyeOpenL / ParamEyeOpenR
+            - High arousal: mắt mở to (excited/alert)
+            - Low arousal: mắt nửa nhắm (tired/calm)
+
+          dominance (0.0 → 1.0) → ParamBodyAngleX (head tilt)
+            - High dominance: đầu thẳng hoặc hơi ngẩng (confident)
+            - Low dominance: đầu hơi cúi (uncertain/shy)
+
+        Tất cả values được normalize về range của từng parameter.
+        Fire-and-forget — không block Flask response.
+        """
+        if not self.is_connected or not self.loop:
+            return
+
+        # ── Normalize VAD → Live2D param ranges ──────────────────────────
+        # ParamBrowLY / ParamBrowRY: thường -1.0 → 1.0 trong VTS
+        # valence -1.0 → brow = -0.5 (furrowed), valence +1.0 → brow = 0.3 (raised)
+        brow_value = valence * 0.4  # scale: -0.4 → +0.4
+
+        # ParamEyeOpenL / ParamEyeOpenR: 0.0 → 1.0
+        # arousal 0.0 → eye = 0.4 (half-closed), arousal 1.0 → eye = 1.0 (wide open)
+        eye_value = 0.4 + arousal * 0.6  # scale: 0.4 → 1.0
+
+        # ParamBodyAngleX: thường -30 → +30 degrees trong VTS
+        # dominance 0.0 → angle = -5 (slight bow), dominance 1.0 → angle = +5 (upright)
+        body_angle = (dominance - 0.5) * 10.0  # scale: -5.0 → +5.0
+
+        asyncio.run_coroutine_threadsafe(
+            self._update_vad_params_async(brow_value, eye_value, body_angle),
+            self.loop
+        )
+
+    async def _update_vad_params_async(self, brow: float, eye: float, body_angle: float):
+        """Async helper để update nhiều params cùng lúc."""
+        if self.vts is None:
+            return
+        try:
+            params = [
+                ("ParamBrowLY",     brow),
+                ("ParamBrowRY",     brow),
+                ("ParamEyeOpenL",   eye),
+                ("ParamEyeOpenR",   eye),
+                ("ParamBodyAngleX", body_angle),
+            ]
+            for name, value in params:
+                req = self.vts.vts_request.requestSetParameterValue(name, value)
+                await self.vts.request(req)
+        except Exception as e:
+            print(f"[VTS] VAD params update error: {e}")
+
     async def _trigger_hotkey(self, hotkey_id):
         try:
             # Gửi yêu cầu trigger hotkey

@@ -193,6 +193,10 @@ def chat():
                 vts_bridge.trigger_emotion(result["emotion"])
             if result.get("action"):
                 vts_bridge.trigger_action(result["action"])
+            # ── VAD → Live2D params (Paralinguistics — Module 5) ─────────────
+            if result.get("vad"):
+                v, a, d = result["vad"]
+                vts_bridge.update_vad_params(v, a, d)
 
         return jsonify(response_payload)
 
@@ -231,13 +235,27 @@ def speak():
             return jsonify({"error": "Empty text"}), 400
         print(f"[TTS] Request text: {text[:120]!r}")
 
+        # ── Prosody Speed Mapping (Paralinguistics — Module 5) ───────────────
+        # Map attention (arousal proxy) → FPT speed string
+        # FPT speed: "-3" (rất chậm) → "0" (bình thường) → "3" (rất nhanh)
+        # attention: 0 → 10 (từ EmotionEngine)
+        attention = lyra_ai.emotion.attention
+        if attention <= 2:
+            tts_speed = "-2"    # Lyra mệt → nói chậm, kéo dài
+        elif attention <= 4:
+            tts_speed = "-1"    # Hơi mệt → hơi chậm
+        elif attention >= 8:
+            tts_speed = "1"     # Hào hứng → nói nhanh hơn
+        else:
+            tts_speed = "0"     # Bình thường
+
         response = requests.post(
             FPT_TTS_URL,
             data=text.encode("utf-8"),
             headers={
                 "api-key": FPT_API_KEY,
                 "voice": FPT_TTS_VOICE,
-                "speed": "",
+                "speed": tts_speed,
                 "Content-Type": "application/octet-stream",
             },
             timeout=15,
@@ -858,6 +876,10 @@ def _handle_stream_event(chat_event: dict):
                 vts_bridge.trigger_emotion(result["emotion"])
             if result.get("action"):
                 vts_bridge.trigger_action(result["action"])
+            # ── VAD → Live2D params (Paralinguistics — Module 5) ─────────────
+            if result.get("vad"):
+                v, a, d = result["vad"]
+                vts_bridge.update_vad_params(v, a, d)
 
         _sse_broadcast(payload)
 

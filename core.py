@@ -42,6 +42,8 @@ from prompts import (
     DIARY_GENERATION_PROMPT,
     IDEOLOGY_PROMPTS,
     REWARD_HINTS,
+    ILLOCUTION_HINTS,
+    SELF_DISCLOSURE_TEMPLATES,
 )
 
 from time_utils import (
@@ -99,6 +101,7 @@ class MiniAI:
         self.recent_responses = []
         self.last_intent = None
         self._user_mood_today = None
+        self._last_disclosure_turn = 0  # Self-Disclosure Engine cooldown tracker
 
         self.emotion.affection = self.memory.memory.get("relationship", {}).get(
             "current_affection", 50
@@ -448,7 +451,25 @@ class MiniAI:
         self.turn_counter += 1
         intent = self.detect_intent(user_input)
 
+        # ── Speech Act Classifier (Austin/Searle) ────────────────────────────
+        # Chỉ classify cho owner — không tốn context cho viewer
+        # illocution_type dùng để log; perlocution_hint inject vào build_prompt
+        if source_type == "owner":
+            _illocution_type, _perlocution_hint = self.classify_illocution(user_input, intent)
+        else:
+            _illocution_type, _perlocution_hint = "neutral", ""
+
         self.emotion.update(user_input, self.time_gap_hours, intent=intent)
+
+        # ── Self-Disclosure Engine (Walther — SIP Theory) ────────────────────
+        # Gọi SAU emotion.update() để dùng emotion state đã cập nhật
+        # Chỉ owner chat; _illocution_type từ Speech Act Classifier làm input signal
+        # Guard: không trigger khi reward_hint đã được set (tránh conflict directive)
+        # NOTE: reward_hint chưa được tính ở đây — guard sẽ được apply sau reward block
+        if source_type == "owner":
+            _self_disclosure_hint = self._get_self_disclosure_hint(intent, _illocution_type)
+        else:
+            _self_disclosure_hint = ""
 
         # Ghi L2 Session Memory khi stream (viewer chat)
         if source_type != "owner" and stream_context:
@@ -573,6 +594,12 @@ class MiniAI:
                 reward_hint = ""
                 print("[Reward] silent_approval skipped (bad mood)")
 
+        # ── Guard: self-disclosure vs reward conflict ─────────────────────────
+        # Nếu reward đã được deliver, clear self-disclosure để tránh 2 directive mâu thuẫn
+        if reward_hint and _self_disclosure_hint:
+            _self_disclosure_hint = ""
+            print("[Self-Disclosure] Skipped due to reward conflict")
+
         # ── Active Inference Mode (Phần 4) ──────────────────────────────────
         # Quyết định tại 1 điểm duy nhất — tránh conflict giữa build_prompt và compose_user_message
         # Priority: reward > ideology > surprise (không bao giờ 2 mode cùng lúc)
@@ -593,6 +620,12 @@ class MiniAI:
             elif self.conv_state.should_trigger_surprise(probability=0.05, min_cooldown=5):
                 active_inference_mode = "surprise"
 
+        # ── Guard: self-disclosure vs active_inference conflict ───────────────
+        # Ideology override và surprise cũng là behavioral directives — không inject cùng lúc
+        if active_inference_mode and _self_disclosure_hint:
+            _self_disclosure_hint = ""
+            print("[Self-Disclosure] Skipped due to active_inference conflict")
+
         system_prompt = self.build_prompt(
             intent, user_input, search_context, 
             source_type=source_type, 
@@ -600,6 +633,8 @@ class MiniAI:
             stream_context=stream_context,
             reward_hint=reward_hint,
             active_inference_mode=active_inference_mode,
+            perlocution_hint=_perlocution_hint,
+            self_disclosure_hint=_self_disclosure_hint,
         )
         composed = self.compose_user_message(
             user_input, intent,
@@ -650,7 +685,9 @@ class MiniAI:
                         viewer_data=viewer_data,
                         stream_context=stream_context,
                         loaded_skill_content=skill_content,
-                        reward_hint=reward_hint
+                        reward_hint=reward_hint,
+                        perlocution_hint=_perlocution_hint,
+                        self_disclosure_hint=_self_disclosure_hint,
                     )
                     api_messages[0]["content"] = system_prompt
                     
@@ -788,6 +825,7 @@ class MiniAI:
             "time_period": self.time_period,
             "time_gap_hours": self.time_gap_hours,
             "intent": intent,
+            "illocution": _illocution_type,
             "conv_state": self.conv_state.state,
             "source_type": source_type,
         }
@@ -1019,6 +1057,176 @@ class MiniAI:
             return "frustrated"
 
         return None
+
+    def classify_illocution(self, text: str, intent: str) -> tuple:
+        """
+        Speech Act Classifier — Layer 2: Illocution + Perlocution (Austin/Searle).
+
+        Phân tích *mục đích thực sự* đằng sau câu nói (Illocution) và trả về
+        behavioral directive (Perlocution hint) để inject vào system prompt.
+
+        Không thay thế detect_intent() — bổ sung thêm một lớp hiểu ngữ nghĩa.
+        Heuristic-based, không LLM call, không state mới.
+
+        Args:
+            text:   raw user input
+            intent: kết quả từ detect_intent() — dùng làm signal phụ
+
+        Returns:
+            (illocution_type: str, perlocution_hint: str)
+            illocution_type: "expressive" | "directive" | "commissive" |
+                             "assertive" | "declarative" | "neutral"
+            perlocution_hint: string để inject vào system prompt, hoặc ""
+        """
+        text_lower = text.lower().strip()
+        text_len = len(text_lower)
+
+        # ── Expressive: chia sẻ cảm xúc, than thở, không cần giải pháp ──────
+        # Signals: từ cảm xúc tiêu cực/tích cực + không có dấu hỏi + không request
+        expressive_signals = [
+            # Tiêu cực
+            "mệt", "mệt quá", "mệt rồi", "buồn", "chán", "stress", "áp lực",
+            "tệ quá", "tệ thật", "khó chịu", "bực", "tức", "đau", "khổ",
+            "cô đơn", "nhớ anh", "nhớ em", "nhớ bạn", "nhớ nhà",  # "nhớ" cụ thể hơn
+            "thất vọng", "nản", "chán nản",
+            # Tích cực (chia sẻ cảm xúc vui)
+            "vui quá", "vui ghê", "sướng", "phấn khích", "hạnh phúc",
+            "tuyệt quá", "hay quá", "thích quá",
+            # English
+            "so tired", "so sad", "so happy", "so excited", "feel like",
+            "i'm tired", "i'm sad", "i'm happy", "i feel",
+        ]
+        has_expressive = any(s in text_lower for s in expressive_signals)
+
+        # Expressive thêm: câu ngắn + kết thúc bằng "quá", "ghê", "thật", "vậy"
+        expressive_endings = re.search(
+            r"(quá|ghê|thật|vậy|luôn|á|ơi)\s*[.!]*$", text_lower
+        )
+
+        # Guard: không classify expressive nếu là question hoặc request
+        is_question = "?" in text or intent in ("question", "choice")
+        is_request = intent == "request"
+
+        if has_expressive and not is_question and not is_request:
+            return ("expressive", ILLOCUTION_HINTS["expressive"])
+
+        # ── Commissive: hứa hẹn, kế hoạch, cam kết ──────────────────────────
+        commissive_signals = [
+            "mình sẽ", "tôi sẽ", "em sẽ", "anh sẽ",
+            "mình sẽ cố", "mình sẽ thử", "mình sẽ làm",
+            "lần này mình", "lần sau mình", "từ nay mình",
+            "mình quyết định", "mình đã quyết",
+            "i will", "i'll", "i'm going to", "i plan to",
+            "gonna", "i promise", "i'll try",
+        ]
+        if any(s in text_lower for s in commissive_signals) and not is_question:
+            return ("commissive", ILLOCUTION_HINTS["commissive"])
+
+        # Expressive fallback: câu ngắn + ending particle + không hỏi
+        # Đặt SAU commissive để "lần này mình làm thật" không bị classify nhầm
+        if (
+            expressive_endings
+            and text_len < 50
+            and not is_question
+            and not is_request
+            and intent not in ("greeting", "introduction")
+        ):
+            return ("expressive", ILLOCUTION_HINTS["expressive"])
+
+        # ── Assertive: thông báo thành tích, chia sẻ sự kiện ────────────────
+        assertive_signals = [
+            "xong rồi", "làm xong", "hoàn thành",
+            "mình vừa", "vừa xong", "vừa làm", "vừa giải",
+            "mình đã xong", "mình đã làm được", "mình đã giải được",  # cụ thể hơn "mình đã"
+            "đã làm được", "đã xong", "đã giải được",
+            "cuối cùng", "cuối cùng rồi", "finally",
+            "i just", "i did it", "i finished", "i completed",
+            "done!", "finished!", "got it!",
+        ]
+        if any(s in text_lower for s in assertive_signals) and not is_question:
+            return ("assertive", ILLOCUTION_HINTS["assertive"])
+
+        # ── Declarative: kết luận, đóng chủ đề, tuyên bố dứt khoát ─────────
+        declarative_signals = [
+            "thôi kệ", "kệ đi", "thôi vậy", "vậy là xong",
+            "mình quyết rồi", "quyết định rồi", "không cần nữa",
+            "forget it", "never mind", "that's it", "it's decided",
+            "i've decided", "i made up my mind",
+        ]
+        if any(s in text_lower for s in declarative_signals) and not is_question:
+            return ("declarative", ILLOCUTION_HINTS["declarative"])
+
+        # ── Directive: yêu cầu hành động, câu hỏi cần trả lời thực sự ──────
+        # Map từ intent đã có — directive là superset của question + request
+        if intent in ("question", "request", "choice"):
+            return ("directive", ILLOCUTION_HINTS["directive"])
+
+        # ── Neutral: không classify được rõ ràng ────────────────────────────
+        return ("neutral", "")
+
+    def _get_self_disclosure_hint(self, intent: str, illocution: str) -> str:
+        """
+        Self-Disclosure Engine — Social Information Processing Theory (Walther, 1992).
+
+        Lyra bộc lộ bản thân một cách chiến thuật để tạo intimacy. Khi Lyra "mở lòng"
+        về trạng thái nội tâm, user có xu hướng bộc lộ lại (reciprocal disclosure).
+
+        Conditions để trigger:
+          - affection >= 50 (đủ thân để mở lòng)
+          - irritability < 0.4 (không đang bực — không mở lòng khi bực)
+          - Cooldown: không trigger trong 8 turns gần nhất
+          - Base probability: 12%
+
+        Disclosure type được chọn dựa trên context:
+          - "processing_state": intent == "question" + text phức tạp (directive illocution)
+          - "preference":       affection >= 65 + illocution in (expressive, assertive)
+          - "uncertainty":      dominance <= 0.35 (Lyra đang không chắc)
+          - "aesthetic_reaction": illocution == "assertive" (user chia sẻ thành tích/creative)
+
+        Returns: hint string để inject vào system prompt, hoặc "" nếu không trigger.
+        """
+        # ── Guard conditions ──────────────────────────────────────────────
+        if self.emotion.affection < 50:
+            return ""
+        if self.emotion.irritability >= 0.4:
+            return ""
+
+        # Cooldown: dùng turn_counter để track
+        if self.turn_counter - self._last_disclosure_turn < 8:
+            return ""
+
+        # Base probability: 12%
+        if random.random() >= 0.12:
+            return ""
+
+        # ── Chọn disclosure type theo context ────────────────────────────
+        disclosure_type = None
+
+        if illocution == "directive" and intent == "question":
+            # Câu hỏi phức tạp → Lyra chia sẻ trạng thái xử lý
+            disclosure_type = "processing_state"
+        elif self.emotion.dominance <= 0.35:
+            # Lyra đang không chắc → thừa nhận sự không chắc
+            disclosure_type = "uncertainty"
+        elif illocution == "assertive" and self.emotion.affection >= 60:
+            # User chia sẻ thành tích/creative → Lyra phản ứng thật
+            disclosure_type = "aesthetic_reaction"
+        elif self.emotion.affection >= 65 and illocution in ("expressive", "assertive", "commissive"):
+            # Affection cao + user đang chia sẻ → Lyra chia sẻ lại
+            disclosure_type = "preference"
+
+        if not disclosure_type:
+            return ""
+
+        # ── Chọn template và set cooldown ────────────────────────────────
+        templates = SELF_DISCLOSURE_TEMPLATES.get(disclosure_type, [])
+        if not templates:
+            return ""
+
+        self._last_disclosure_turn = self.turn_counter
+        hint = random.choice(templates)
+        print(f"[Self-Disclosure] Triggered: {disclosure_type}")
+        return hint
 
     def extract_memory(self, text, intent, source_type="owner"):
         # Skip extraction nếu viewer không đủ quen (set per-thread)
@@ -1353,6 +1561,8 @@ class MiniAI:
         loaded_skill_content: str = "",
         reward_hint="",
         active_inference_mode: str = None,
+        perlocution_hint: str = "",
+        self_disclosure_hint: str = "",
     ):
         """Constructs the system prompt based on state and memory"""
         # ── TIER 0: STATIC & FRAMEWORK (Always first for caching) ───────────
@@ -1440,7 +1650,9 @@ class MiniAI:
         # Conversation state & rhythm hints
         state_hint  = self.conv_state.get_state_hint()
         rhythm_hint = self.conv_state.get_rhythm_hint()
-        conv_hints  = "\n".join(filter(None, [state_hint, rhythm_hint]))
+        # LSM chỉ áp dụng cho owner chat — viewer chat không cần style matching
+        lsm_hint    = self.conv_state.get_lsm_directive(dominance=self.emotion.dominance) if source_type == "owner" else ""
+        conv_hints  = "\n".join(filter(None, [state_hint, rhythm_hint, lsm_hint]))
 
         # ASSEMBLY current situation
         situation_note = "[SITUATION]\n"
@@ -1483,6 +1695,12 @@ class MiniAI:
             full_memory_context,
             _session_ctx
         ]
+
+        if perlocution_hint:
+            parts.append(perlocution_hint)
+
+        if self_disclosure_hint:
+            parts.append(self_disclosure_hint)
 
         if reward_hint:
             parts.append(reward_hint)

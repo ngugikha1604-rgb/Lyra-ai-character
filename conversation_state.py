@@ -71,6 +71,12 @@ class ConversationStateDetector:
         # Tăng xác suất reward khi user engage sâu (tin nhắn dài, câu hỏi, liên tiếp)
         self._positive_behavior_streak: int = 0  # 0 → N, reset khi user passive
 
+        # ── LSM Tracker (Communication Accommodation Theory) ──────────────
+        # Chiều expressiveness: track mức độ biểu cảm của user (emoji, !!!, cảm xúc mạnh)
+        # Các chiều khác (slang/intellectual/brevity) đã được cover bởi _slang_count,
+        # _intellectual_count, và _user_lengths — không duplicate.
+        self._expressiveness_score: float = 0.0  # 0.0 → 10.0, decay mỗi turn
+
         # ── Active Inference (Phần 4) ──────────────────────────────────────
         # Ideology: cooldown + no-repeat tracking
         self._last_ideology_turn: int = 0
@@ -135,6 +141,31 @@ class ConversationStateDetector:
             # Decay chậm — không reset ngay khi 1 tin nhắn ngắn
             self._positive_behavior_streak = max(0, self._positive_behavior_streak - 1)
 
+        # ── LSM Expressiveness tracking ───────────────────────────────────
+        # Signals: emoji, nhiều dấu !, ALL CAPS, từ cảm xúc mạnh
+        _emoji_count = len(re.findall(
+            r"[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF"
+            r"\U0001F680-\U0001F6FF\U0001F900-\U0001F9FF"
+            r"\U0001FA70-\U0001FAFF]", text
+        ))
+        _exclaim_count = text.count("!")
+        _has_caps = bool(re.search(r"[A-Z]{3,}", text))  # 3+ chữ hoa liên tiếp
+        _expressive_words = bool(re.search(
+            r"\b(omg|wow|wtf|lol|haha|hihi|hehe|ơi trời|trời ơi|ôi|ối|ồ)\b",
+            text.lower()
+        ))
+
+        expressiveness_delta = (
+            min(_emoji_count, 3) * 1.5      # tối đa +4.5 từ emoji
+            + min(_exclaim_count, 3) * 0.8  # tối đa +2.4 từ !
+            + (1.0 if _has_caps else 0.0)
+            + (1.0 if _expressive_words else 0.0)
+            - 0.5                           # natural drain mỗi turn
+        )
+        self._expressiveness_score = max(0.0, min(10.0,
+            self._expressiveness_score + expressiveness_delta
+        ))
+
         return self._state
 
     def get_vibe_tier(self) -> str:
@@ -186,6 +217,72 @@ class ConversationStateDetector:
         if avg <= 100:
             return f"User writes medium-length messages. 2 sentences is fine.{vibe_note}"
         return f"User writes longer messages. You can be slightly more expressive, but still concise.{vibe_note}"
+
+    def get_lsm_directive(self, dominance: float = 0.5) -> str:
+        """
+        LSM Tracker — Communication Accommodation Theory (Giles/Pennebaker).
+
+        Tổng hợp tất cả style dimensions thành 1 directive string để inject
+        vào system prompt. Quyết định Lyra nên CONVERGE (mirror user) hay
+        DIVERGE (giữ nét riêng) dựa trên:
+          - Vibe tier (slang/intellectual) — từ _slang_count/_intellectual_count
+          - Expressiveness — từ _expressiveness_score
+          - Conversation depth — từ _state
+          - Lyra's confidence — từ dominance (VAD)
+
+        Divergence trigger khi:
+          - User đang ở extreme style (score >= 8) VÀ conversation đã deepening
+          - Lyra đủ tự tin (dominance >= 0.65) để giữ nét riêng
+
+        Returns: directive string hoặc "" nếu không có signal đủ mạnh.
+        """
+        # Cần ít nhất 3 turns để có signal đáng tin cậy
+        if self._turn < 3:
+            return ""
+
+        tier = self.get_vibe_tier()
+        parts = []
+
+        # ── Divergence check — tính trước để guard EXPRESSIVE ────────────
+        # Chỉ diverge khi: style extreme + đủ sâu + Lyra tự tin
+        # Dùng raw scores thay vì tier để có ngưỡng cao hơn (>= 8 thay vì >= 4)
+        is_extreme_style = (
+            self._slang_count >= 8
+            or self._intellectual_count >= 8
+            or self._expressiveness_score >= 8.0
+        )
+        is_deep_enough = self._state in (STATE_DEEPENING, STATE_SHIFTING)
+        is_confident = dominance >= 0.65
+        will_diverge = is_extreme_style and is_deep_enough and is_confident
+
+        # ── Expressiveness dimension ──────────────────────────────────────
+        if self._expressiveness_score >= 6.0 and not will_diverge:
+            # User rất expressive — converge: Lyra cũng expressive hơn
+            # Guard: không inject khi DIVERGE sẽ trigger (2 hints mâu thuẫn)
+            parts.append(
+                "[LSM — EXPRESSIVE]: User đang rất biểu cảm (emoji, dấu cảm, năng lượng cao). "
+                "Match their energy — phản hồi sôi nổi hơn bình thường một chút."
+            )
+        elif (
+            self._expressiveness_score <= 1.0
+            and self._turn >= 8           # đủ data để kết luận user thực sự flat
+            and tier not in ("slang", "intellectual")  # slang/intellectual không dùng emoji → không phải "flat"
+        ):
+            # User rất flat — converge: Lyra cũng bình tĩnh hơn
+            parts.append(
+                "[LSM — FLAT]: User đang nói chuyện rất bình tĩnh, ít biểu cảm. "
+                "Tone down — đừng quá sôi nổi hay dùng nhiều emoji."
+            )
+
+        # ── Divergence inject ─────────────────────────────────────────────
+        if will_diverge:
+            parts.append(
+                "[LSM — DIVERGE]: Conversation đã đủ sâu và bạn đủ tự tin. "
+                "Đừng mirror hoàn toàn — giữ nét riêng của mình. "
+                "Có thể dùng style khác một chút để thể hiện bản sắc."
+            )
+
+        return "\n".join(parts)
 
     def get_pace_max_tokens(self, base_tokens: int) -> int:
         """

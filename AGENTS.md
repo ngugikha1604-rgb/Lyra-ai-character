@@ -197,6 +197,128 @@ All decisions are made at **one single point** in `chat()` before calling `build
 
 ---
 
+### 8c. 🧠 Behavioral Psychology Layer (PLAN.md — 5/5 Implemented ✅)
+
+Five behavioral/linguistic systems layered on top of the emotion engine. All owner-only unless noted. Files: `core.py`, `conversation_state.py`, `prompts.py`, `vts_api.py`, `web.py`.
+
+#### Module 1 — Variable Ratio Reinforcement (Skinner) ✅ Done
+
+`should_trigger_reward()` in `conversation_state.py` — returns reward type string or `None`.
+
+**5 reward types** with weighted selection:
+
+| Type | Weight | Context guard | Effect |
+|------|--------|--------------|--------|
+| `deep_recall` | 40% | Rare memory must exist | Nhắc kỷ niệm hiếm |
+| `healthy_debate` | 25% | Always available | Phản biện nhẹ |
+| `vulnerability` | 15% | `state == "deepening"` only | Bộc lộ điểm yếu |
+| `curiosity_spike` | 10% | `attention >= 4` | Hỏi ngược bất ngờ |
+| `silent_approval` | 10% | `mood >= -2` | Im lặng tán thưởng |
+
+**Behavioral shaping**: `_positive_behavior_streak` tracks engaged turns (long msg / question / intellectual). Each streak level adds +1.5% to base 7% probability, capped at 22%.
+
+**Cooldown split**: `_last_reward_attempt_turn` (set on roll) vs `_last_reward_turn` (set only on deliver via `confirm_reward_delivered()`). Skipped rewards don't consume the deliver cooldown.
+
+**Key invariant**: `reward_hint` blocks ideology, surprise, AND self-disclosure — set before all three in `chat()`.
+
+#### Module 2 — Speech Act Classifier (Austin/Searle) ✅ Done
+
+`classify_illocution(text, intent)` in `core.py` — returns `(illocution_type, perlocution_hint)`.
+
+**5 illocution types** (heuristic, no LLM call):
+
+| Type | Signals | Perlocution directive |
+|------|---------|----------------------|
+| `expressive` | Emotion words, ending particles | Empathy first, no advice |
+| `directive` | Questions, requests | Direct and helpful |
+| `commissive` | "mình sẽ", plans | Support and encourage |
+| `assertive` | "xong rồi", achievements | Acknowledge naturally |
+| `declarative` | "thôi kệ", conclusions | Brief acknowledgment |
+
+**Check order**: expressive (keyword) → commissive → expressive (ending fallback) → assertive → declarative → directive (from intent) → neutral.
+
+`perlocution_hint` injected into `build_prompt()` before reward_hint. Owner-only. `illocution` key added to `chat()` return dict.
+
+#### Module 3 — LSM Tracker (Giles/Pennebaker) ✅ Done
+
+`get_lsm_directive(dominance)` in `conversation_state.py` — returns convergence/divergence directive.
+
+**New state**: `_expressiveness_score` (0.0 → 10.0) — tracks emoji, `!`, ALL CAPS, expressive words. Natural drain -0.5/turn.
+
+**3 directive types**:
+- `[LSM — EXPRESSIVE]`: score >= 6.0 AND not diverging → mirror user's energy
+- `[LSM — FLAT]`: score <= 1.0 AND turn >= 8 AND tier not in (slang, intellectual) → tone down
+- `[LSM — DIVERGE]`: raw score >= 8 AND state in (deepening, shifting) AND dominance >= 0.65 → maintain own voice
+
+**Guard**: EXPRESSIVE and DIVERGE are mutually exclusive (DIVERGE wins). FLAT blocked when tier == slang (conflict with VIBE SYNC). LSM only injected for owner chat.
+
+#### Module 4 — Self-Disclosure Engine (Walther) ✅ Done
+
+`_get_self_disclosure_hint(intent, illocution)` in `core.py` — returns hint string or `""`.
+
+**Guards**: `affection >= 50`, `irritability < 0.4`, cooldown 8 turns, 12% base probability.
+
+**4 disclosure types** selected by context:
+
+| Type | Trigger condition |
+|------|------------------|
+| `processing_state` | `illocution == "directive"` + `intent == "question"` |
+| `uncertainty` | `dominance <= 0.35` |
+| `aesthetic_reaction` | `illocution == "assertive"` + `affection >= 60` |
+| `preference` | `affection >= 65` + `illocution in (expressive, assertive, commissive)` |
+
+**Conflict guards** (in `chat()` after reward block):
+- `reward_hint` set → clear `_self_disclosure_hint`
+- `active_inference_mode` set → clear `_self_disclosure_hint`
+
+`_last_disclosure_turn` initialized in `MiniAI.__init__()`.
+
+**Module 2 → Module 4 connection**: `_illocution_type` from `classify_illocution()` is passed directly to `_get_self_disclosure_hint()` as input signal.
+
+#### Module 5 — Paralinguistics / Live2D (text-side) ✅ Done
+
+**VAD → Live2D Parameter Mapper** (`vts_api.py`):
+
+`update_vad_params(valence, arousal, dominance)` — maps 3D emotion space to Live2D params:
+
+| VAD | Live2D param | Range |
+|-----|-------------|-------|
+| valence × 0.4 | `ParamBrowLY`, `ParamBrowRY` | [-0.4, +0.4] |
+| 0.4 + arousal × 0.6 | `ParamEyeOpenL`, `ParamEyeOpenR` | [0.4, 1.0] |
+| (dominance - 0.5) × 10 | `ParamBodyAngleX` | [-5, +5] |
+
+Fire-and-forget via `asyncio.run_coroutine_threadsafe`. Guard: `self.vts is None` check in async helper.
+
+Called from `/chat` route and `_handle_stream_event` with `result["vad"]`.
+
+**Prosody Speed Mapping** (`web.py` `/speak` route):
+
+Maps `lyra_ai.emotion.attention` → FPT TTS `speed` header:
+- attention <= 2 → `"-2"` (very slow)
+- attention <= 4 → `"-1"` (slow)
+- attention 5-7 → `"0"` (normal)
+- attention >= 8 → `"1"` (fast)
+
+**Deferred** (needs Live2D model): micro-jitters, SSML break tags, breathing animation.
+
+---
+
+### Behavioral System Priority Chain (CRITICAL)
+
+All behavioral directives in `chat()` follow strict priority — never 2 active at once:
+
+```
+reward_hint → blocks ideology, surprise, self_disclosure
+active_inference_mode → blocks self_disclosure
+```
+
+Injection order in `build_prompt()`:
+```
+perlocution_hint → self_disclosure_hint → reward_hint → surprise_hint
+```
+
+Never add new behavioral directives without respecting this chain.
+
 ### 8b. 🧬 Emotion Architecture Upgrade (PLAN.md — 5/5 Implemented ✅)
 
 Advanced emotion model layered on top of `EmotionEngine`. All changes live in `emotion.py` unless noted.
@@ -327,7 +449,10 @@ Features:
   * slang tier → +0.08
   * intellectual tier → -0.08
 * **Pace Max Tokens** (`get_pace_max_tokens(base)`): Scales base token limit by user message pace. Scale-up gated by Lyra's energy level.
-* **Reward Schedule** (`should_trigger_reward()`): 7% chance, cooldown 3 turns.
+* **Reward Schedule** (`should_trigger_reward()`): Returns reward type string or `None`. Base 7% + behavioral shaping. Cooldown split: attempt vs deliver. 5 reward types with weighted selection.
+* **Behavioral Shaping** (`_positive_behavior_streak`): Tracks engaged turns. Each streak level +1.5% to reward probability.
+* **Expressiveness Tracking** (`_expressiveness_score`): 0.0 → 10.0. Tracks emoji, `!`, ALL CAPS. Used by LSM Tracker.
+* **LSM Directive** (`get_lsm_directive(dominance)`): Returns EXPRESSIVE / FLAT / DIVERGE directive. Owner-only.
 * **Ideology Trigger** (`should_trigger_ideology()`): 15% internal roll, cooldown 5 turns, no-repeat index tracking.
 * **Surprise Trigger** (`should_trigger_surprise()`): 5% chance, cooldown 5 turns. Cross-cooldown with ideology.
 
@@ -571,9 +696,11 @@ When a regular viewer sends their first message of a stream session:
 
 1. Lyra generates reply text
 2. Frontend calls `POST /speak` with the reply text
-3. Backend calls FPT AI TTS API (`voice: banmai`)
-4. FPT returns async URL → backend fetches MP3 → streams to frontend
-5. Frontend plays audio with lip sync via Web Audio API analyser
+3. Backend maps `lyra_ai.emotion.attention` → FPT speed string (`"-2"` to `"1"`)
+4. Backend calls FPT AI TTS API (`voice: banmai`, dynamic speed)
+5. FPT returns async URL → backend fetches MP3 → streams to frontend
+6. Frontend plays audio with lip sync via Web Audio API analyser
+7. After each chat reply, `vts_bridge.update_vad_params(v, a, d)` updates Live2D params continuously
 
 ---
 
