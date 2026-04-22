@@ -4,6 +4,13 @@
 import sqlite3
 import threading
 import math
+import time
+import json
+import os
+import re
+import collections
+from dataclasses import dataclass, field
+from collections import deque
 from datetime import datetime
 from memory import DB_PATH, DB_LOCK
 
@@ -15,8 +22,405 @@ MAX_MESSAGES_PER_VIEWER = 20    # giữ tối đa 20 message gần nhất mỗi 
 # Đọc từ config nếu có, fallback về 20
 try:
     from config import STREAM_REGULAR_MIN_MESSAGES as REGULAR_VIEWER_MIN_MESSAGES
+    from config import (
+        CONSENSUS_EXCLAMATION_THRESHOLD,
+        CONSENSUS_DISCUSSION_THRESHOLD,
+        CONSENSUS_COOLDOWN_SECONDS,
+        CONSENSUS_TOPIC_SHIFT_WINDOW,
+    )
 except ImportError:
     REGULAR_VIEWER_MIN_MESSAGES = 20
+    CONSENSUS_EXCLAMATION_THRESHOLD = 0.30
+    CONSENSUS_DISCUSSION_THRESHOLD  = 0.50
+    CONSENSUS_COOLDOWN_SECONDS      = 60
+    CONSENSUS_TOPIC_SHIFT_WINDOW    = 10
+
+# ── Emoji meanings từ JSON ─────────────────────────────────────────────────────
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_EMOJI_MEANINGS_PATH = os.path.join(_BASE_DIR, "emoji_meanings.json")
+try:
+    with open(_EMOJI_MEANINGS_PATH, "r", encoding="utf-8") as _f:
+        EMOJI_MEANINGS: dict = json.load(_f)
+except Exception:
+    EMOJI_MEANINGS = {}
+
+# ── Regex helpers ──────────────────────────────────────────────────────────────
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001f600-\U0001f64f"
+    "\U0001f300-\U0001f5ff"
+    "\U0001f680-\U0001f6ff"
+    "\U0001f900-\U0001f9ff"
+    "\U0001fa70-\U0001faff"
+    "\U00002702-\U000027b0"
+    "]+",
+    flags=re.UNICODE,
+)
+
+_STOPWORDS_VN = {
+    "và", "là", "của", "có", "không", "được", "cho", "với", "trong", "này",
+    "đó", "thì", "mà", "hay", "hoặc", "nhưng", "vì", "nên", "khi", "đã",
+    "sẽ", "đang", "rồi", "lại", "cũng", "vẫn", "còn", "nữa", "thôi", "ạ",
+    "nhé", "nha", "ơi", "à", "ừ", "uh", "ok", "okay", "the", "a", "an",
+    "is", "it", "in", "on", "at", "to", "of", "and", "or", "but", "for",
+    "i", "you", "he", "she", "we", "they", "my", "your", "his", "her",
+}
+
+_EXCLAMATION_SIGNALS = re.compile(
+    r"\b(omg|wow|wtf|nooo*|yess*|gg|pog|lol|haha|hihi|hehe|"
+    r"trời ơi|ơi trời|ôi|ối|ồ|oa|ôi giời|đỉnh|vãi|vl|cl|"
+    r"xong rồi|quá đỉnh|quá trời|kinh|ghê)\b",
+    re.IGNORECASE,
+)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ConsensusResult — kết quả phân tích consensus
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class ConsensusResult:
+    type: str           # "exclamation" | "discussion" | "emoji"
+    content: str        # normalized text hoặc emoji
+    percent: float      # % unique senders trong window
+    unique_count: int   # số unique senders trong cluster
+    total_unique: int   # tổng unique senders trong window
+    velocity: float     # messages/s trong 10s gần nhất
+    hint: str           # string inject vào prompt
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ConsensusDetector
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ConsensusDetector:
+    """
+    Phát hiện khi nhiều viewer đang nói cùng 1 thứ trong một khoảng thời gian.
+
+    Hai loại consensus:
+    - exclamation: message ngắn / cảm thán → tạo synthetic event cho Lyra react
+    - discussion:  message dài / cùng chủ đề → chỉ inject vào context
+    - emoji:       emoji spam → inject với nghĩa của emoji
+
+    Window size động theo số active viewers:
+    >= 100 viewers → 10s, >= 50 → 15s, >= 20 → 20s, >= 10 → 25s, < 10 → 30s
+    """
+
+    VELOCITY_WINDOW = 10.0  # giây để đo velocity
+
+    def __init__(self):
+        # (timestamp, sender_id, normalized_key, raw_message, is_emoji_only)
+        self._window: deque = deque()
+        self._lock = threading.Lock()
+
+        # Cooldown tracking
+        self._last_consensus_key: str = ""
+        self._last_consensus_time: float = 0.0
+
+        # Pending results để web.py poll
+        self._pending_exclamation: "ConsensusResult | None" = None
+        self._active_discussion_hint: str = ""
+        self._active_velocity_hint: str = ""
+
+    # ── Public API ─────────────────────────────────────────────────────────────
+
+    def ingest(self, message: str, sender_id: str) -> "ConsensusResult | None":
+        """
+        Nhận 1 message mới, phân tích consensus.
+        Trả về ConsensusResult nếu detect được, None nếu không.
+        """
+        now = time.time()
+        normalized, is_emoji_only, dominant_emoji = self._normalize(message)
+
+        if not normalized:
+            return None
+
+        with self._lock:
+            self._window.append((now, sender_id, normalized, message, is_emoji_only, dominant_emoji))
+            self._prune(now)
+
+            active_viewers = self._count_unique_senders(now, window_s=self._dynamic_window(now))
+            result = self._analyze(now, active_viewers)
+
+            # Update velocity hint mỗi lần ingest
+            self._active_velocity_hint = self._build_velocity_hint(now)
+
+            return result
+
+    def get_pending_exclamation(self) -> "ConsensusResult | None":
+        """Lấy và clear pending exclamation event."""
+        with self._lock:
+            r = self._pending_exclamation
+            self._pending_exclamation = None
+            return r
+
+    def get_active_discussion_hint(self) -> str:
+        """Lấy discussion hint hiện tại (không clear — valid cho đến khi bị override)."""
+        with self._lock:
+            return self._active_discussion_hint
+
+    def get_velocity_hint(self) -> str:
+        """Lấy velocity hint hiện tại."""
+        with self._lock:
+            return self._active_velocity_hint
+
+    def reset(self):
+        """Reset toàn bộ state — gọi khi stream stop."""
+        with self._lock:
+            self._window.clear()
+            self._last_consensus_key = ""
+            self._last_consensus_time = 0.0
+            self._pending_exclamation = None
+            self._active_discussion_hint = ""
+            self._active_velocity_hint = ""
+
+    # ── Internal ───────────────────────────────────────────────────────────────
+
+    def _dynamic_window(self, now: float) -> float:
+        """Tính window size dựa trên số active viewers trong 30s gần nhất."""
+        unique_30s = self._count_unique_senders(now, window_s=30.0)
+        if unique_30s >= 100: return 10.0
+        if unique_30s >= 50:  return 15.0
+        if unique_30s >= 20:  return 20.0
+        if unique_30s >= 10:  return 25.0
+        return 30.0
+
+    def _prune(self, now: float):
+        """Xóa entries cũ hơn 60s (max window cần thiết)."""
+        cutoff = now - 60.0
+        while self._window and self._window[0][0] < cutoff:
+            self._window.popleft()
+
+    def _count_unique_senders(self, now: float, window_s: float) -> int:
+        cutoff = now - window_s
+        return len({e[1] for e in self._window if e[0] >= cutoff})
+
+    def _analyze(self, now: float, active_viewers: int) -> "ConsensusResult | None":
+        """Core analysis — tìm dominant cluster trong dynamic window."""
+        win_s = self._dynamic_window(now)
+        cutoff = now - win_s
+
+        # Lấy entries trong window
+        entries = [e for e in self._window if e[0] >= cutoff]
+        if len(entries) < 3:
+            return None
+
+        total_unique = len({e[1] for e in entries})
+        if total_unique < 2:
+            return None
+
+        # Tách emoji-only vs text
+        emoji_entries = [e for e in entries if e[4]]   # is_emoji_only
+        text_entries  = [e for e in entries if not e[4]]
+
+        result = None
+
+        # --- Emoji consensus ---
+        if emoji_entries:
+            result = self._check_emoji_consensus(emoji_entries, total_unique, now)
+
+        # --- Text consensus ---
+        if result is None and text_entries:
+            result = self._check_text_consensus(text_entries, total_unique, now)
+
+        if result is None:
+            return None
+
+        # --- Cooldown check ---
+        key = result.content
+        time_since_last = now - self._last_consensus_time
+
+        if time_since_last < CONSENSUS_COOLDOWN_SECONDS:
+            # Trong cooldown — chỉ process nếu topic shift
+            if self._is_same_topic(key, self._last_consensus_key):
+                return None  # same topic, skip
+
+        # Update cooldown
+        self._last_consensus_key = key
+        self._last_consensus_time = now
+
+        # Store result
+        if result.type == "exclamation" or result.type == "emoji":
+            self._pending_exclamation = result
+        else:
+            self._active_discussion_hint = result.hint
+
+        return result
+
+    def _check_emoji_consensus(self, emoji_entries: list, total_unique: int, now: float) -> "ConsensusResult | None":
+        """Kiểm tra emoji spam consensus."""
+        # Count by dominant emoji per unique sender
+        sender_emoji: dict = {}
+        for ts, sender_id, key, raw, is_emoji, dom_emoji in emoji_entries:
+            if dom_emoji and sender_id not in sender_emoji:
+                sender_emoji[sender_id] = dom_emoji
+
+        if not sender_emoji:
+            return None
+
+        emoji_counter = collections.Counter(sender_emoji.values())
+        dominant_emoji, count = emoji_counter.most_common(1)[0]
+        percent = count / total_unique
+
+        if percent < CONSENSUS_EXCLAMATION_THRESHOLD:
+            return None
+
+        meaning = EMOJI_MEANINGS.get(dominant_emoji, "")
+        if meaning:
+            meaning_str = f" ({meaning})"
+            hint = (
+                f"[CHAT EMOJI SPAM]: {count}/{total_unique} người đang spam {dominant_emoji}{meaning_str}. "
+                f"Mọi người đang react với emoji này — Lyra nên acknowledge cả chat."
+            )
+        else:
+            # Emoji không có trong từ điển — Lyra không biết nghĩa
+            hint = (
+                f"[CHAT EMOJI SPAM]: {count}/{total_unique} người đang spam {dominant_emoji}. "
+                f"Đây là emoji Lyra chưa biết nghĩa — có thể hỏi chat emoji đó có nghĩa gì, "
+                f"hoặc react tự nhiên theo ngữ cảnh."
+            )
+
+        velocity = self._calc_velocity(now)
+        return ConsensusResult(
+            type="emoji",
+            content=f"EMOJI:{dominant_emoji}",
+            percent=percent,
+            unique_count=count,
+            total_unique=total_unique,
+            velocity=velocity,
+            hint=hint,
+        )
+
+    def _check_text_consensus(self, text_entries: list, total_unique: int, now: float) -> "ConsensusResult | None":
+        """Kiểm tra text message consensus."""
+        # Group by normalized key, 1 entry per unique sender
+        sender_key: dict = {}
+        sender_raw: dict = {}
+        for ts, sender_id, key, raw, is_emoji, dom_emoji in text_entries:
+            if sender_id not in sender_key:
+                sender_key[sender_id] = key
+                sender_raw[sender_id] = raw
+
+        key_counter = collections.Counter(sender_key.values())
+        if not key_counter:
+            return None
+
+        dominant_key, count = key_counter.most_common(1)[0]
+        percent = count / total_unique
+
+        # Classify: exclamation hay discussion?
+        raw_messages = [sender_raw[sid] for sid, k in sender_key.items() if k == dominant_key]
+        consensus_type = self._classify(raw_messages)
+
+        threshold = (
+            CONSENSUS_EXCLAMATION_THRESHOLD if consensus_type == "exclamation"
+            else CONSENSUS_DISCUSSION_THRESHOLD
+        )
+        if percent < threshold:
+            return None
+
+        velocity = self._calc_velocity(now)
+
+        if consensus_type == "exclamation":
+            hint = (
+                f"[CHAT ĐỒNG THUẬN — CẢM THÁN]: {count}/{total_unique} người đang nói \"{dominant_key}\". "
+                f"Mọi người đang react — Lyra nên acknowledge cả chat, không phải 1 người."
+            )
+        else:
+            hint = (
+                f"[CHAT ĐỒNG THUẬN — CHỦ ĐỀ]: {count}/{total_unique} người đang nói về \"{dominant_key}\". "
+                f"Đây là chủ đề đang được thảo luận chung trong chat."
+            )
+
+        return ConsensusResult(
+            type=consensus_type,
+            content=dominant_key,
+            percent=percent,
+            unique_count=count,
+            total_unique=total_unique,
+            velocity=velocity,
+            hint=hint,
+        )
+
+    def _classify(self, messages: list) -> str:
+        """Phân loại cluster là exclamation hay discussion."""
+        if not messages:
+            return "discussion"
+        avg_words = sum(len(m.split()) for m in messages) / len(messages)
+        exclamation_hits = sum(
+            1 for m in messages
+            if _EXCLAMATION_SIGNALS.search(m) or m.count("!") >= 2 or m.count("?") >= 2
+        )
+        if avg_words < 5 or exclamation_hits / len(messages) > 0.4:
+            return "exclamation"
+        return "discussion"
+
+    def _normalize(self, message: str) -> tuple:
+        """
+        Normalize message thành key.
+        Trả về (normalized_key, is_emoji_only, dominant_emoji).
+        """
+        # Check emoji-only
+        stripped = message.strip()
+        emojis_found = _EMOJI_RE.findall(stripped)
+        text_without_emoji = _EMOJI_RE.sub("", stripped).strip()
+
+        is_emoji_only = bool(emojis_found) and len(text_without_emoji) <= 2
+
+        dominant_emoji = None
+        if emojis_found:
+            # Lấy emoji xuất hiện nhiều nhất trong message
+            flat = [e for group in emojis_found for e in group]
+            if flat:
+                dominant_emoji = collections.Counter(flat).most_common(1)[0][0]
+
+        if is_emoji_only:
+            return (f"EMOJI:{dominant_emoji}", True, dominant_emoji)
+
+        # Text normalize
+        text = text_without_emoji.lower().strip()
+        words = [w for w in re.findall(r"[a-zA-ZÀ-ỹ0-9]{2,}", text) if w not in _STOPWORDS_VN]
+
+        if not words:
+            return ("", False, None)
+
+        # Short message → exact key, long → first 3 words
+        key = " ".join(words) if len(words) <= 3 else " ".join(words[:3])
+        return (key, False, dominant_emoji)
+
+    def _is_same_topic(self, new_key: str, old_key: str) -> bool:
+        """So sánh 2 key có cùng topic không."""
+        if new_key == old_key:
+            return True
+        # Emoji vs emoji
+        if new_key.startswith("EMOJI:") and old_key.startswith("EMOJI:"):
+            return new_key == old_key
+        # Text overlap
+        new_words = set(new_key.split())
+        old_words = set(old_key.split())
+        if not new_words or not old_words:
+            return False
+        overlap = len(new_words & old_words) / max(len(new_words), len(old_words))
+        return overlap >= 0.6
+
+    def _calc_velocity(self, now: float) -> float:
+        """Tính messages/s trong VELOCITY_WINDOW gần nhất."""
+        cutoff = now - self.VELOCITY_WINDOW
+        count = sum(1 for e in self._window if e[0] >= cutoff)
+        return round(count / self.VELOCITY_WINDOW, 2)
+
+    def _build_velocity_hint(self, now: float) -> str:
+        """Build velocity hint string để inject vào stream_context."""
+        v = self._calc_velocity(now)
+        if v > 15:
+            return f"[CHAT VELOCITY]: Chat đang cực kỳ sôi nổi ({v:.0f} msg/10s)"
+        if v > 5:
+            return f"[CHAT VELOCITY]: Chat đang rất sôi ({v:.0f} msg/10s)"
+        if v > 1:
+            return f"[CHAT VELOCITY]: Chat đang hoạt động ({v:.0f} msg/10s)"
+        return ""
+
+
 
 
 class ViewerTracker:
@@ -377,6 +781,25 @@ class ViewerTracker:
             self._refresh_regular_cache()
         return self._regular_cache.get(f"{viewer_id}:{platform}")
 
+    def get_viewer_recent_messages(self, viewer_id: str, platform: str, channel_id: str, limit: int = 3) -> list:
+        """
+        Lấy N tin nhắn gần nhất của viewer từ các stream trước.
+        Dùng để inject vào context khi regular viewer quay lại.
+        """
+        try:
+            conn = self._get_conn()
+            rows = conn.execute(
+                "SELECT message, sent_at FROM viewer_messages "
+                "WHERE viewer_id=? AND platform=? AND channel_id=? "
+                "ORDER BY id DESC LIMIT ?",
+                (viewer_id, platform, channel_id, limit)
+            ).fetchall()
+            conn.close()
+            return [{"message": r["message"], "sent_at": r["sent_at"]} for r in reversed(rows)]
+        except Exception as e:
+            print(f"[ViewerTracker] get_viewer_recent_messages error: {e}")
+            return []
+
     def get_stream_context(self, sender_id: str, sender_name: str, platform: str, channel_id: str, viewer_info: dict) -> str:
         """
         Build context string để inject vào prompt của Lyra.
@@ -490,6 +913,7 @@ class ChatPatternAnalyzer:
         self._emoji_freq: collections.Counter = collections.Counter()
         self._style_cache: str = ""
         self._style_cache_dirty = True
+        self._consensus = ConsensusDetector()  # ← tích hợp consensus detection
         self._init_table()
 
     def _get_conn(self):
@@ -533,13 +957,17 @@ class ChatPatternAnalyzer:
     # 1. Thu thập pattern từ message
     # ------------------------------------------------------------------
 
-    def ingest(self, message: str, channel_id: str, platform: str):
+    def ingest(self, message: str, channel_id: str, platform: str, sender_id: str = ""):
         """
         Phân tích 1 message: trích words + emojis, cập nhật DB và in-memory counter.
         Gọi mỗi lần có message mới vào stream.
+        sender_id cần thiết cho consensus detection (unique sender tracking).
         """
         self._message_counter += 1
-        # Không set dirty ở đây — chỉ set sau khi flush để cache có tác dụng
+
+        # ── Consensus detection ───────────────────────────────────────────────
+        if sender_id:
+            self._consensus.ingest(message, sender_id)
 
         # Trích emojis
         emojis = _EMOJI_RE.findall(message)
@@ -550,7 +978,7 @@ class ChatPatternAnalyzer:
         clean = _EMOJI_RE.sub("", message).lower()
         words = re.findall(r"[a-zA-ZÀ-ỹ]{2,}", clean)
         for w in words:
-            if w not in _STOPWORDS:
+            if w not in _STOPWORDS_VN:
                 self._word_freq[w] += 1
 
         # Persist vào DB (batch: mỗi 10 messages để tránh write quá nhiều)
@@ -595,7 +1023,8 @@ class ChatPatternAnalyzer:
             self._emoji_freq.clear()
             self._message_counter = 0
             self._style_cache_dirty = True
-            
+            self._consensus.reset()  # reset consensus state cho stream mới
+
             conn = self._get_conn()
             with self.db_lock:
                 conn.execute(
@@ -607,6 +1036,20 @@ class ChatPatternAnalyzer:
             print(f"[ChatPattern] session patterns reset for {platform}/{channel_id}")
         except Exception as e:
             print(f"[ChatPattern] reset_session_patterns error: {e}")
+
+    # ── Consensus getters (proxy to ConsensusDetector) ─────────────────────────
+
+    def get_pending_consensus_exclamation(self) -> "ConsensusResult | None":
+        """Lấy và clear pending exclamation event."""
+        return self._consensus.get_pending_exclamation()
+
+    def get_active_discussion_hint(self) -> str:
+        """Lấy discussion hint hiện tại."""
+        return self._consensus.get_active_discussion_hint()
+
+    def get_velocity_hint(self) -> str:
+        """Lấy velocity hint hiện tại."""
+        return self._consensus.get_velocity_hint()
 
     # ------------------------------------------------------------------
     # 2. Style hints cho prompt

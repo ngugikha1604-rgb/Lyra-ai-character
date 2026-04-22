@@ -506,7 +506,7 @@ def stream_chat():
         viewer_info = viewer_tracker.record_message(sender_id, sender_name, platform, channel_id, message)
 
         # Giai đoạn 4: Thu thập chat pattern
-        chat_analyzer.ingest(message, channel_id, platform)
+        chat_analyzer.ingest(message, channel_id, platform, sender_id=sender_id)
         style_hints = chat_analyzer.get_style_hints(channel_id, platform)
 
         # Inject stream context + style hints vào Lyra trước khi gọi chat()
@@ -730,6 +730,26 @@ def _process_queue_loop():
                     break
                 _enqueue_stream_event(raw)
 
+            # ── Consensus: check pending exclamation → inject vào donor queue ──
+            # Chạy sau drain để có đủ messages mới nhất trước khi check
+            consensus_event = chat_analyzer.get_pending_consensus_exclamation()
+            if consensus_event is not None:
+                synthetic = {
+                    "message": consensus_event.hint,
+                    "sender_id": "__consensus__",
+                    "sender_name": "Chat",
+                    "_tier": "donor",
+                    "_is_consensus": True,
+                    "_consensus_type": consensus_event.type,
+                }
+                try:
+                    _priority_queues["donor"].put_nowait(synthetic)
+                    print(f"[Consensus] Synthetic event queued: {consensus_event.type} "
+                          f"({consensus_event.unique_count}/{consensus_event.total_unique} = "
+                          f"{consensus_event.percent:.0%})")
+                except _queue.Full:
+                    pass  # donor queue full, skip
+
             has_owner_waiting = not _priority_queues["owner"].empty()
             if not has_owner_waiting and not _can_reply():
                 _time.sleep(0.3)
@@ -793,8 +813,37 @@ def _handle_stream_event(chat_event: dict):
         sender_name = chat_event["sender_name"]
         platform = chat_event.get("platform", "youtube")
         channel_id = chat_event.get("channel_id", "default")
+        is_consensus = chat_event.get("_is_consensus", False)
 
         tier = chat_event.get("_tier", "new_viewer")
+
+        # ── Synthetic consensus event: không record vào viewer_stats ──────────
+        if is_consensus:
+            # Lyra nhận hint trực tiếp, không cần viewer context
+            source_type_val = "new_viewer"
+            viewer_data = {"viewer_name": "Chat"}
+            stream_ctx = _build_stream_content_context()
+            # Thêm velocity hint nếu có
+            velocity_hint = chat_analyzer.get_velocity_hint()
+            if velocity_hint:
+                stream_ctx = f"{stream_ctx}\n{velocity_hint}" if stream_ctx else velocity_hint
+            result = lyra_ai.chat(message, source_type=source_type_val, viewer_data=viewer_data, stream_context=stream_ctx)
+            payload = build_state_payload(lyra_ai, result=result)
+            payload.update({
+                "sender_id": "__consensus__",
+                "sender_name": "Chat",
+                "source_type": "consensus",
+                "is_consensus": True,
+            })
+            if result:
+                if result.get("emotion"): vts_bridge.trigger_emotion(result["emotion"])
+                if result.get("action"):  vts_bridge.trigger_action(result["action"])
+                if result.get("vad"):
+                    v, a, d = result["vad"]
+                    vts_bridge.update_vad_params(v, a, d)
+            _sse_broadcast(payload)
+            return
+
         if tier == "owner":
             composed_input = message
         else:
@@ -804,7 +853,7 @@ def _handle_stream_event(chat_event: dict):
 
         viewer_info = viewer_tracker.record_message(sender_id, sender_name, platform, channel_id, message)
 
-        chat_analyzer.ingest(message, channel_id, platform)
+        chat_analyzer.ingest(message, channel_id, platform, sender_id=sender_id)
         style_hints = chat_analyzer.get_style_hints(channel_id, platform)
 
         stream_ctx = viewer_tracker.get_stream_context(sender_id, sender_name, platform, channel_id, viewer_info)
@@ -813,6 +862,14 @@ def _handle_stream_event(chat_event: dict):
         content_ctx = _build_stream_content_context()
         if content_ctx:
             stream_ctx = f"{content_ctx}\n{stream_ctx}" if stream_ctx else content_ctx
+
+        # ── Inject discussion hint + velocity hint vào mọi viewer message ─────
+        discussion_hint = chat_analyzer.get_active_discussion_hint()
+        if discussion_hint:
+            stream_ctx = f"{stream_ctx}\n{discussion_hint}" if stream_ctx else discussion_hint
+        velocity_hint = chat_analyzer.get_velocity_hint()
+        if velocity_hint:
+            stream_ctx = f"{stream_ctx}\n{velocity_hint}" if stream_ctx else velocity_hint
 
         # ── IDEA-01: Regular viewer arrival hint ──────────────────────────────
         # Nếu đây là tin đầu tiên của regular viewer trong session → inject hint chào

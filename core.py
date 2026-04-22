@@ -3148,13 +3148,12 @@ class MiniAI:
             )
 
         if source_type == "donor":
-
+            amount = (viewer_data or {}).get("amount", "")
+            amount_str = f" ({amount})" if amount else ""
             return (
-
-                f"Status: {name} just sent a donation! Be appreciative and acknowledge them. "
-
+                f"Status: {name} just sent a Super Chat{amount_str}! "
+                f"React warmly, say their name, and acknowledge the donation naturally — don't be robotic about it. "
                 f"Address them as '{pronoun}' in Vietnamese."
-
             )
         
 
