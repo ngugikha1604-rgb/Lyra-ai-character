@@ -1,0 +1,38 @@
+# background_worker.py — Centralized Priority Job Queue
+# Replaces scattered threading.Thread spawns with a single worker thread.
+# Jobs are prioritized: lower number = higher priority (1 = highest).
+
+import queue
+import threading
+
+_job_queue = queue.PriorityQueue()
+
+
+def _worker_loop():
+    """Background thread: fetch jobs by priority and execute."""
+    while True:
+        try:
+            priority, job = _job_queue.get()
+            func, args, kwargs = job
+            try:
+                func(*args, **kwargs)
+            except Exception as e:
+                print(f"[BgWorker] Job error (priority {priority}): {e}")
+            finally:
+                _job_queue.task_done()
+        except Exception:
+            # Avoid thread death on unexpected error
+            pass
+
+
+# Start daemon worker at import time
+_thread = threading.Thread(target=_worker_loop, daemon=True)
+_thread.start()
+
+
+def enqueue(priority: int, func, *args, **kwargs):
+    """
+    Enqueue a job for background execution.
+    Lower priority number = higher urgency.
+    """
+    _job_queue.put((priority, (func, args, kwargs)))

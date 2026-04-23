@@ -1,4 +1,13 @@
-from flask import Flask, render_template, request, jsonify, session, send_file, redirect, url_for
+from flask import (
+    Flask,
+    render_template,
+    request,
+    jsonify,
+    session,
+    send_file,
+    redirect,
+    url_for,
+)
 from flask_session import Session
 from core import MiniAI
 from viewer_tracker import ViewerTracker, ChatPatternAnalyzer
@@ -10,19 +19,43 @@ import os
 import io
 import sqlite3
 import threading
+import time
 import requests
 import pytz
 from memory import DB_PATH, DB_LOCK
-from config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, FLASK_SECRET_KEY, FPT_API_KEY, FPT_TTS_URL, FPT_TTS_VOICE
+from config import (
+    ELEVENLABS_API_KEY,
+    ELEVENLABS_VOICE_ID,
+    FLASK_SECRET_KEY,
+    FPT_API_KEY,
+    FPT_TTS_URL,
+    FPT_TTS_VOICE,
+)
 from config import STREAM_TITLE, STREAM_GAME, STREAM_GOALS, STREAM_NOTES
-from config import STREAM_REPLY_COOLDOWN, STREAM_NEW_VIEWER_INTERVAL, STREAM_REGULAR_MIN_MESSAGES
+from config import (
+    STREAM_REPLY_COOLDOWN,
+    STREAM_NEW_VIEWER_INTERVAL,
+    STREAM_REGULAR_MIN_MESSAGES,
+)
 from dotenv import load_dotenv
 import google_auth_oauthlib.flow
 from vts_api import vts_bridge
+from live_context import (
+    set_stream_active,
+    record_donation,
+    record_regular_arrival,
+    record_milestone,
+    update_chat_vibe,
+    add_constraint,
+    clear_constraint,
+    reset_live_context,
+    load_live_context,
+)
+from background_worker import enqueue
 
 # Đường dẫn tới file bạn tải từ Google Cloud
 CLIENT_SECRETS_FILE = "client_secret.json"
-SCOPES = ['https://www.googleapis.com/auth/youtube.force-ssl']
+SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 
 load_dotenv()
 
@@ -52,6 +85,7 @@ Session(app)
 # ========================
 # Đọc từ config.py — chỉnh STREAM_TITLE, STREAM_GAME, STREAM_GOALS, STREAM_NOTES trước khi stream.
 
+
 def _build_stream_content_context() -> str:
     """Tạo string inject vào prompt từ stream content trong config.py + stream milestones"""
     if not any([STREAM_TITLE, STREAM_GAME, STREAM_GOALS, STREAM_NOTES]):
@@ -71,7 +105,9 @@ def _build_stream_content_context() -> str:
     try:
         milestones = lyra_ai.memory.get_stream_milestones(limit=3)
         if milestones:
-            milestone_strs = [f"{m['description']} ({m['achieved_at'][:10]})" for m in milestones]
+            milestone_strs = [
+                f"{m['description']} ({m['achieved_at'][:10]})" for m in milestones
+            ]
             lines.append(f"Kỷ niệm stream: {' | '.join(milestone_strs)}")
     except Exception:
         pass
@@ -121,6 +157,59 @@ yt_poller = YouTubeChatPoller(viewer_tracker=viewer_tracker)
 
 # Start VTube Studio Bridge
 vts_bridge.start()
+
+# ========================
+# Proactive Chat Monitor
+# ========================
+
+
+def _proactive_monitor():
+    """Background thread: if stream active and chat silent >2 min, Lyra asks a question."""
+    while True:
+        time.sleep(30)
+        try:
+            if not lyra_ai.is_streaming:
+                continue
+            last_time = getattr(lyra_ai, "_last_viewer_message_time", None)
+            if last_time is None:
+                continue
+            gap = (datetime.now() - last_time).total_seconds()
+            if gap > 120:
+                # Load current focus from live context
+                lc = load_live_context()
+                focus = lc.get("current_focus", "stream")
+                prompt = (
+                    f"Chat đã im lặng 2 phút. Đặt một câu hỏi ngắn, tò mò về {focus} "
+                    "để giữ người xem ở lại."
+                )
+                question = lyra_ai._call_light_model(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "Bạn là Lyra, 16 tuổi, hỏi thăm ngắn gọn, tự nhiên, tò mò.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.9,
+                    max_tokens=60,
+                )
+                if question:
+                    question = question.strip()
+                    _sse_broadcast(
+                        {
+                            "type": "proactive_question",
+                            "reply": question,
+                            "emotion": "thinking",
+                            "action": "THINK",
+                            "sender_name": "Lyra",
+                            "source_type": "system",
+                        }
+                    )
+                    # Reset timer to avoid spam
+                    lyra_ai._last_viewer_message_time = datetime.now()
+        except Exception as e:
+            print(f"[ProactiveMonitor] {e}")
+
 
 # ========================
 # ROUTES
@@ -241,13 +330,13 @@ def speak():
         # attention: 0 → 10 (từ EmotionEngine)
         attention = lyra_ai.emotion.attention
         if attention <= 2:
-            tts_speed = "-2"    # Lyra mệt → nói chậm, kéo dài
+            tts_speed = "-2"  # Lyra mệt → nói chậm, kéo dài
         elif attention <= 4:
-            tts_speed = "-1"    # Hơi mệt → hơi chậm
+            tts_speed = "-1"  # Hơi mệt → hơi chậm
         elif attention >= 8:
-            tts_speed = "1"     # Hào hứng → nói nhanh hơn
+            tts_speed = "1"  # Hào hứng → nói nhanh hơn
         else:
-            tts_speed = "0"     # Bình thường
+            tts_speed = "0"  # Bình thường
 
         response = requests.post(
             FPT_TTS_URL,
@@ -273,6 +362,7 @@ def speak():
 
         # FPT xử lý TTS async — Chờ và thử lại tối đa 4 lần (mỗi lần 1s)
         import time as _t
+
         audio_res = None
         for attempt in range(4):
             _t.sleep(1.0)
@@ -281,7 +371,7 @@ def speak():
                 if temp_res.status_code == 200 and len(temp_res.content) > 500:
                     audio_res = temp_res
                     break
-                print(f"[TTS] Retry {attempt+1}/4 - Status: {temp_res.status_code}")
+                print(f"[TTS] Retry {attempt + 1}/4 - Status: {temp_res.status_code}")
             except Exception as _e:
                 print(f"[TTS] Lấy audio lỗi: {_e}")
 
@@ -398,56 +488,66 @@ def _trigger_stream_summary(channel_id: str, platform: str):
     """
     Giai đoạn 4: Tạo summary định kỳ cho chat stream.
     Gọi AI tóm tắt "chat đang nói về gì" → lưu vào episodic memory của Lyra + stream_summaries DB.
-    Chạy non-blocking (fire-and-forget trong thread riêng).
+    Hàm này được chạy trong background worker (non-blocking).
     """
-    import threading
+    try:
+        recent = chat_analyzer.get_recent_summaries(channel_id, platform, limit=1)
+        prev_summary = recent[0]["summary"] if recent else ""
 
-    def _run():
-        try:
-            recent = chat_analyzer.get_recent_summaries(channel_id, platform, limit=1)
-            prev_summary = recent[0]["summary"] if recent else ""
+        # Lấy top words hiện tại để làm input cho AI
+        style = chat_analyzer.get_style_hints(channel_id, platform)
+        top_viewers = viewer_tracker.get_top_viewers(
+            platform=platform, channel_id=channel_id, limit=5
+        )
+        top_names = (
+            ", ".join(v["viewer_name"] for v in top_viewers)
+            if top_viewers
+            else "chưa có"
+        )
 
-            # Lấy top words hiện tại để làm input cho AI
-            style = chat_analyzer.get_style_hints(channel_id, platform)
-            top_viewers = viewer_tracker.get_top_viewers(platform=platform, channel_id=channel_id, limit=5)
-            top_names = ", ".join(v["viewer_name"] for v in top_viewers) if top_viewers else "chưa có"
+        prompt_content = (
+            f"Đây là thông tin về buổi livestream:\n"
+            f"- Top chatters: {top_names}\n"
+            f"{style}\n"
+        )
+        if prev_summary:
+            prompt_content += f"- Summary trước: {prev_summary}\n"
 
-            prompt_content = (
-                f"Đây là thông tin về buổi livestream:\n"
-                f"- Top chatters: {top_names}\n"
-                f"{style}\n"
+        prompt_content += (
+            "\nTóm tắt ngắn (1-2 câu) chat đang nói về gì và vibe của kênh lúc này."
+        )
+
+        summary = lyra_ai._call_light_model(
+            [
+                {
+                    "role": "system",
+                    "content": "Bạn là assistant tóm tắt livestream chat. Trả lời bằng tiếng Việt, ngắn gọn.",
+                },
+                {"role": "user", "content": prompt_content},
+            ],
+            temperature=0.3,
+            max_tokens=80,
+        )
+
+        if summary:
+            summary = summary.strip()
+            # Lưu vào DB stream_summaries
+            chat_analyzer.save_stream_summary(summary, channel_id, platform)
+            # Shared-memory mode: stream summary cũng đi vào long-term episodic memory.
+            lyra_ai.memory.add_item(
+                "episodic", f"[Stream] {summary}", weight=1.1, limit=12
             )
-            if prev_summary:
-                prompt_content += f"- Summary trước: {prev_summary}\n"
+            # Đồng thời cache tạm trong session để tăng phản xạ theo buổi stream hiện tại.
+            try:
+                lyra_ai.memory.add_session_item(
+                    f"[Stream vibe] {summary[:160]}", kind="session"
+                )
+            except Exception:
+                pass
+            print(f"[Stream] Summary: {summary}")
 
-            prompt_content += "\nTóm tắt ngắn (1-2 câu) chat đang nói về gì và vibe của kênh lúc này."
-
-            summary = lyra_ai._call_light_model(
-                [
-                    {"role": "system", "content": "Bạn là assistant tóm tắt livestream chat. Trả lời bằng tiếng Việt, ngắn gọn."},
-                    {"role": "user", "content": prompt_content},
-                ],
-                temperature=0.3,
-                max_tokens=80,
-            )
-
-            if summary:
-                summary = summary.strip()
-                # Lưu vào DB stream_summaries
-                chat_analyzer.save_stream_summary(summary, channel_id, platform)
-                # Shared-memory mode: stream summary cũng đi vào long-term episodic memory.
-                lyra_ai.memory.add_item("episodic", f"[Stream] {summary}", weight=1.1, limit=12)
-                # Đồng thời cache tạm trong session để tăng phản xạ theo buổi stream hiện tại.
-                try:
-                    lyra_ai.memory.add_session_item(f"[Stream vibe] {summary[:160]}", kind="session")
-                except Exception:
-                    pass
-                print(f"[Stream] Summary: {summary}")
-
-        except Exception as e:
-            print(f"[Stream] Summary error: {e}")
-
-    threading.Thread(target=_run, daemon=True).start()
+    except Exception as e:
+        print(f"[Stream] Summary error: {e}")
 
 
 @app.route("/stream-chat", methods=["POST"])
@@ -503,14 +603,18 @@ def stream_chat():
         )
 
         # Giai đoạn 2 & 3: Track viewer + build stream context
-        viewer_info = viewer_tracker.record_message(sender_id, sender_name, platform, channel_id, message)
+        viewer_info = viewer_tracker.record_message(
+            sender_id, sender_name, platform, channel_id, message
+        )
 
         # Giai đoạn 4: Thu thập chat pattern
         chat_analyzer.ingest(message, channel_id, platform, sender_id=sender_id)
         style_hints = chat_analyzer.get_style_hints(channel_id, platform)
 
         # Inject stream context + style hints vào Lyra trước khi gọi chat()
-        stream_ctx = viewer_tracker.get_stream_context(sender_id, sender_name, platform, channel_id, viewer_info)
+        stream_ctx = viewer_tracker.get_stream_context(
+            sender_id, sender_name, platform, channel_id, viewer_info
+        )
         if style_hints:
             stream_ctx = f"{stream_ctx}\n{style_hints}" if stream_ctx else style_hints
         content_ctx = _build_stream_content_context()
@@ -542,13 +646,21 @@ def stream_chat():
             }
         else:
             source_type_val = "new_viewer"
-            viewer_data = {"viewer_name": sender_name, "gender": data.get("gender", "male")}
+            viewer_data = {
+                "viewer_name": sender_name,
+                "gender": data.get("gender", "male"),
+            }
 
-        result = lyra_ai.chat(composed_input, source_type=source_type_val, viewer_data=viewer_data, stream_context=stream_ctx)
+        result = lyra_ai.chat(
+            composed_input,
+            source_type=source_type_val,
+            viewer_data=viewer_data,
+            stream_context=stream_ctx,
+        )
 
         # Giai đoạn 4: Stream summary định kỳ
         if chat_analyzer.should_summarize():
-            _trigger_stream_summary(channel_id, platform)
+            enqueue(2, _trigger_stream_summary, channel_id, platform)
 
         response_payload = build_state_payload(lyra_ai, result=result)
         response_payload.update(
@@ -590,7 +702,9 @@ def get_viewers():
     channel_id = request.args.get("channel_id")
     limit = min(int(request.args.get("limit", 10)), 50)
 
-    top = viewer_tracker.get_top_viewers(platform=platform, channel_id=channel_id, limit=limit)
+    top = viewer_tracker.get_top_viewers(
+        platform=platform, channel_id=channel_id, limit=limit
+    )
     return jsonify({"viewers": top, "count": len(top)})
 
 
@@ -622,7 +736,8 @@ def proactive():
     except Exception:
         traceback.print_exc()
         return jsonify({"message": None, "should_show": False})
-    
+
+
 # ========================
 # YOUTUBE STREAM CONTROL
 # ========================
@@ -636,12 +751,12 @@ import time as _time
 # Tier 2: regular_viewer
 # Tier 3: new_viewer (random pick)
 _priority_queues: dict = {
-    "owner":          _queue.Queue(maxsize=10),
-    "donor":          _queue.Queue(maxsize=20),
+    "owner": _queue.Queue(maxsize=10),
+    "donor": _queue.Queue(maxsize=20),
     "regular_viewer": _queue.Queue(maxsize=50),
-    "new_viewer":     _queue.Queue(maxsize=200),
+    "new_viewer": _queue.Queue(maxsize=200),
 }
-_new_viewer_pool: list = []   # pool để random pick
+_new_viewer_pool: list = []  # pool để random pick
 _pool_lock = threading.Lock()
 
 # Track regular viewers đã được chào trong session này — tránh chào lại
@@ -675,8 +790,8 @@ def _enqueue_stream_event(chat_event: dict):
     Owner (source_type='owner') không đi qua queue — xử lý ngay ở /chat.
     """
     sender_id = chat_event.get("sender_id", "")
-    platform  = chat_event.get("platform", "youtube")
-    is_donor  = chat_event.get("is_donor", False)
+    platform = chat_event.get("platform", "youtube")
+    is_donor = chat_event.get("is_donor", False)
 
     regular = viewer_tracker.is_regular_viewer(sender_id, platform)
     is_owner = chat_event.get("is_owner", False)
@@ -696,7 +811,11 @@ def _enqueue_stream_event(chat_event: dict):
     if tier == "new_viewer":
         with _pool_lock:
             # Dedup: mỗi sender_id chỉ giữ 1 slot (tin nhắn mới nhất)
-            _new_viewer_pool[:] = [e for e in _new_viewer_pool if e.get("sender_id") != chat_event.get("sender_id")]
+            _new_viewer_pool[:] = [
+                e
+                for e in _new_viewer_pool
+                if e.get("sender_id") != chat_event.get("sender_id")
+            ]
             _new_viewer_pool.append(chat_event)
             # Giữ pool tối đa 100 để tránh RAM bloat
             if len(_new_viewer_pool) > 100:
@@ -705,7 +824,9 @@ def _enqueue_stream_event(chat_event: dict):
         try:
             _priority_queues[tier].put_nowait(chat_event)
         except _queue.Full:
-            print(f"[Queue] {tier} queue full, dropping message from {chat_event.get('sender_name')}")
+            print(
+                f"[Queue] {tier} queue full, dropping message from {chat_event.get('sender_name')}"
+            )
 
 
 def _process_queue_loop():
@@ -744,9 +865,11 @@ def _process_queue_loop():
                 }
                 try:
                     _priority_queues["donor"].put_nowait(synthetic)
-                    print(f"[Consensus] Synthetic event queued: {consensus_event.type} "
-                          f"({consensus_event.unique_count}/{consensus_event.total_unique} = "
-                          f"{consensus_event.percent:.0%})")
+                    print(
+                        f"[Consensus] Synthetic event queued: {consensus_event.type} "
+                        f"({consensus_event.unique_count}/{consensus_event.total_unique} = "
+                        f"{consensus_event.percent:.0%})"
+                    )
                 except _queue.Full:
                     pass  # donor queue full, skip
 
@@ -756,7 +879,7 @@ def _process_queue_loop():
                 continue
 
             event = None
-            
+
             # Tier 0: owner
             try:
                 event = _priority_queues["owner"].get_nowait()
@@ -784,6 +907,7 @@ def _process_queue_loop():
                     with _pool_lock:
                         if _new_viewer_pool:
                             import random as _random
+
                             event = _random.choice(_new_viewer_pool)
                             _new_viewer_pool.remove(event)  # chỉ xóa entry đã chọn
                     _last_new_viewer_pick = now
@@ -826,18 +950,31 @@ def _handle_stream_event(chat_event: dict):
             # Thêm velocity hint nếu có
             velocity_hint = chat_analyzer.get_velocity_hint()
             if velocity_hint:
-                stream_ctx = f"{stream_ctx}\n{velocity_hint}" if stream_ctx else velocity_hint
-            result = lyra_ai.chat(message, source_type=source_type_val, viewer_data=viewer_data, stream_context=stream_ctx)
+                stream_ctx = (
+                    f"{stream_ctx}\n{velocity_hint}" if stream_ctx else velocity_hint
+                )
+            composed_input = message  # consensus uses raw message
+            lyra_ai._last_viewer_message_time = datetime.now()
+            result = lyra_ai.chat(
+                composed_input,
+                source_type=source_type_val,
+                viewer_data=viewer_data,
+                stream_context=stream_ctx,
+            )
             payload = build_state_payload(lyra_ai, result=result)
-            payload.update({
-                "sender_id": "__consensus__",
-                "sender_name": "Chat",
-                "source_type": "consensus",
-                "is_consensus": True,
-            })
+            payload.update(
+                {
+                    "sender_id": "__consensus__",
+                    "sender_name": "Chat",
+                    "source_type": "consensus",
+                    "is_consensus": True,
+                }
+            )
             if result:
-                if result.get("emotion"): vts_bridge.trigger_emotion(result["emotion"])
-                if result.get("action"):  vts_bridge.trigger_action(result["action"])
+                if result.get("emotion"):
+                    vts_bridge.trigger_emotion(result["emotion"])
+                if result.get("action"):
+                    vts_bridge.trigger_action(result["action"])
                 if result.get("vad"):
                     v, a, d = result["vad"]
                     vts_bridge.update_vad_params(v, a, d)
@@ -851,12 +988,16 @@ def _handle_stream_event(chat_event: dict):
 
         print(f"[Stream Consumer] [{tier}] {sender_name}: {message}")
 
-        viewer_info = viewer_tracker.record_message(sender_id, sender_name, platform, channel_id, message)
+        viewer_info = viewer_tracker.record_message(
+            sender_id, sender_name, platform, channel_id, message
+        )
 
         chat_analyzer.ingest(message, channel_id, platform, sender_id=sender_id)
         style_hints = chat_analyzer.get_style_hints(channel_id, platform)
 
-        stream_ctx = viewer_tracker.get_stream_context(sender_id, sender_name, platform, channel_id, viewer_info)
+        stream_ctx = viewer_tracker.get_stream_context(
+            sender_id, sender_name, platform, channel_id, viewer_info
+        )
         if style_hints:
             stream_ctx = f"{stream_ctx}\n{style_hints}" if stream_ctx else style_hints
         content_ctx = _build_stream_content_context()
@@ -866,10 +1007,14 @@ def _handle_stream_event(chat_event: dict):
         # ── Inject discussion hint + velocity hint vào mọi viewer message ─────
         discussion_hint = chat_analyzer.get_active_discussion_hint()
         if discussion_hint:
-            stream_ctx = f"{stream_ctx}\n{discussion_hint}" if stream_ctx else discussion_hint
+            stream_ctx = (
+                f"{stream_ctx}\n{discussion_hint}" if stream_ctx else discussion_hint
+            )
         velocity_hint = chat_analyzer.get_velocity_hint()
         if velocity_hint:
-            stream_ctx = f"{stream_ctx}\n{velocity_hint}" if stream_ctx else velocity_hint
+            stream_ctx = (
+                f"{stream_ctx}\n{velocity_hint}" if stream_ctx else velocity_hint
+            )
 
         # ── IDEA-01: Regular viewer arrival hint ──────────────────────────────
         # Nếu đây là tin đầu tiên của regular viewer trong session → inject hint chào
@@ -881,13 +1026,22 @@ def _handle_stream_event(chat_event: dict):
 
             if not already_greeted:
                 from prompts import REGULAR_VIEWER_ARRIVAL_HINT
+
                 regular_data_local = chat_event.get("_regular_data") or {}
                 arrival_hint = REGULAR_VIEWER_ARRIVAL_HINT.format(
                     viewer_name=sender_name,
                     total_streams=regular_data_local.get("total_streams", 1),
                     affection=regular_data_local.get("affection", 35),
                 )
-                stream_ctx = f"{stream_ctx}\n{arrival_hint}" if stream_ctx else arrival_hint
+                stream_ctx = (
+                    f"{stream_ctx}\n{arrival_hint}" if stream_ctx else arrival_hint
+                )
+                # ── Live Context: note regular return ─────────────────────────
+                record_regular_arrival(
+                    viewer_name=sender_name,
+                    total_streams=regular_data_local.get("total_streams", 1),
+                    affection=regular_data_local.get("affection", 35),
+                )
 
         if not chat_analyzer.should_extract_memory(viewer_info):
             lyra_ai._thread_local.skip_memory_extraction = True
@@ -919,22 +1073,37 @@ def _handle_stream_event(chat_event: dict):
             source_type_val = "new_viewer"
             viewer_data = {"viewer_name": sender_name, "gender": _gender}
 
-        result = lyra_ai.chat(composed_input, source_type=source_type_val, viewer_data=viewer_data, stream_context=stream_ctx)
+        # ── Live Context: donations ─────────────────────────────────────
+        if tier == "donor":
+            amount = chat_event.get("donate_amount", "")
+            record_donation(viewer_name=sender_name, amount=amount)
+
+        # Update last activity timestamp for proactive monitoring
+        lyra_ai._last_viewer_message_time = datetime.now()
+
+        result = lyra_ai.chat(
+            composed_input,
+            source_type=source_type_val,
+            viewer_data=viewer_data,
+            stream_context=stream_ctx,
+        )
 
         if chat_analyzer.should_summarize():
-            _trigger_stream_summary(channel_id, platform)
+            enqueue(2, _trigger_stream_summary, channel_id, platform)
 
         payload = build_state_payload(lyra_ai, result=result)
-        payload.update({
-            "sender_id": sender_id,
-            "sender_name": sender_name,
-            "channel_id": channel_id,
-            "platform": platform,
-            "source_type": source_type_val,
-            "viewer_message_count": viewer_info.get("message_count", 1),
-            "viewer_affinity": viewer_info.get("affinity_score", 1.0),
-        })
-        
+        payload.update(
+            {
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "channel_id": channel_id,
+                "platform": platform,
+                "source_type": source_type_val,
+                "viewer_message_count": viewer_info.get("message_count", 1),
+                "viewer_affinity": viewer_info.get("affinity_score", 1.0),
+            }
+        )
+
         # Sync with VTube Studio
         if result:
             if result.get("emotion"):
@@ -951,11 +1120,13 @@ def _handle_stream_event(chat_event: dict):
     except Exception as e:
         print(f"[Stream Consumer] handle error: {e}")
         import traceback as tb
+
         tb.print_exc()
 
 
 # SSE broadcast — gửi event tới tất cả client đang subscribe /stream/events
 import json as _json
+
 _sse_subscribers: list = []
 _sse_lock = threading.Lock()
 
@@ -982,13 +1153,15 @@ _consumer_thread.start()
 @app.route("/stream/content", methods=["GET"])
 def stream_get_content():
     """Trả về stream content hiện tại (từ config.py)"""
-    return jsonify({
-        "title": STREAM_TITLE,
-        "game":  STREAM_GAME,
-        "goals": STREAM_GOALS,
-        "notes": STREAM_NOTES,
-        "context_string": _build_stream_content_context(),
-    })
+    return jsonify(
+        {
+            "title": STREAM_TITLE,
+            "game": STREAM_GAME,
+            "goals": STREAM_GOALS,
+            "notes": STREAM_NOTES,
+            "context_string": _build_stream_content_context(),
+        }
+    )
 
 
 @app.route("/stream/start", methods=["POST"])
@@ -1011,18 +1184,29 @@ def stream_start():
         if not live_chat_id and video_id:
             live_chat_id = get_live_chat_id(credentials, video_id)
             if not live_chat_id:
-                return jsonify({"error": f"Could not find live chat for video_id={video_id}"}), 404
+                return jsonify(
+                    {"error": f"Could not find live chat for video_id={video_id}"}
+                ), 404
 
         if not live_chat_id:
             return jsonify({"error": "Provide live_chat_id or video_id"}), 400
 
         # ── WARM-UP: Clear old session data & prime AI ──────────────
-        platform   = data.get("platform", "youtube")
+        platform = data.get("platform", "youtube")
         channel_id = data.get("channel_id", "default")
-        
+
         viewer_tracker.clear_session_stats(platform, channel_id)
         chat_analyzer.reset_session_patterns(channel_id, platform)
         lyra_ai.prepare_for_stream()
+
+        # ── Live Context: mark stream active with focus ─────────────────────
+        focus = STREAM_TITLE or STREAM_GAME or "streaming"
+        set_stream_active(True, focus=focus)
+
+        # ── Constraints from stream notes ─────────────────────────────────
+        notes = (STREAM_NOTES or "").lower()
+        if "no spoil" in notes or "không spoil" in notes:
+            add_constraint("no spoilers")
 
         result = yt_poller.start(credentials, live_chat_id)
 
@@ -1032,15 +1216,17 @@ def stream_start():
             try:
                 greeting = lyra_ai.generate_stream_event_reply("greeting")
                 if greeting:
-                    _sse_broadcast({
-                        "type": "stream_event",
-                        "event": "stream_start",
-                        "reply": greeting,
-                        "emotion": "happy",
-                        "action": "WAVE",
-                        "sender_name": "Lyra",
-                        "source_type": "system",
-                    })
+                    _sse_broadcast(
+                        {
+                            "type": "stream_event",
+                            "event": "stream_start",
+                            "reply": greeting,
+                            "emotion": "happy",
+                            "action": "WAVE",
+                            "sender_name": "Lyra",
+                            "source_type": "system",
+                        }
+                    )
                     print(f"[Stream] Greeting: {greeting}")
             except Exception as e:
                 print(f"[Stream] Greeting error: {e}")
@@ -1058,44 +1244,59 @@ def stream_start():
 def stream_stop():
     """Dừng poll YouTube Live Chat và promote regular viewers"""
     data = request.get_json() or {}
-    platform   = data.get("platform", "youtube")
+    platform = data.get("platform", "youtube")
     channel_id = data.get("channel_id", "default")
 
     # ── IDEA-02: Stream farewell ───────────────────────────────────────────────
     # Lấy summary + top viewers trước khi stop
     try:
-        recent_summaries = chat_analyzer.get_recent_summaries(channel_id, platform, limit=1)
+        recent_summaries = chat_analyzer.get_recent_summaries(
+            channel_id, platform, limit=1
+        )
         summary_text = recent_summaries[0]["summary"] if recent_summaries else ""
-        top_viewers_list = viewer_tracker.get_top_viewers(platform=platform, channel_id=channel_id, limit=3)
-        top_names = ", ".join(v["viewer_name"] for v in top_viewers_list) if top_viewers_list else "mọi người"
+        top_viewers_list = viewer_tracker.get_top_viewers(
+            platform=platform, channel_id=channel_id, limit=3
+        )
+        top_names = (
+            ", ".join(v["viewer_name"] for v in top_viewers_list)
+            if top_viewers_list
+            else "mọi người"
+        )
 
-        farewell = lyra_ai.generate_stream_event_reply("farewell", {
-            "summary": summary_text,
-            "top_viewers": top_names,
-            "duration": "",
-        })
+        farewell = lyra_ai.generate_stream_event_reply(
+            "farewell",
+            {
+                "summary": summary_text,
+                "top_viewers": top_names,
+                "duration": "",
+            },
+        )
         if farewell:
-            _sse_broadcast({
-                "type": "stream_event",
-                "event": "stream_stop",
-                "reply": farewell,
-                "emotion": "friendly",
-                "action": "WAVE",
-                "sender_name": "Lyra",
-                "source_type": "system",
-            })
+            _sse_broadcast(
+                {
+                    "type": "stream_event",
+                    "event": "stream_stop",
+                    "reply": farewell,
+                    "emotion": "friendly",
+                    "action": "WAVE",
+                    "sender_name": "Lyra",
+                    "source_type": "system",
+                }
+            )
             print(f"[Stream] Farewell: {farewell}")
     except Exception as e:
         print(f"[Stream] Farewell error: {e}")
 
-    promoted = viewer_tracker.promote_regular_viewers(platform=platform, channel_id=channel_id)
+    promoted = viewer_tracker.promote_regular_viewers(
+        platform=platform, channel_id=channel_id
+    )
 
     # Clear L2 Session Memory khi stream kết thúc
     lyra_ai.memory.clear_session_memory()
 
     # Viết nhật ký bí mật + Hợp nhất trí nhớ sau buổi stream (CLS)
-    threading.Thread(target=lyra_ai.write_diary_entry, daemon=True).start()
-    threading.Thread(target=lyra_ai.memory.consolidate_episodic_to_semantic, daemon=True).start()
+    enqueue(3, lyra_ai.write_diary_entry)
+    enqueue(3, lyra_ai.memory.consolidate_episodic_to_semantic)
 
     # Reset greeted set cho session tiếp theo
     with _greeted_lock:
@@ -1107,20 +1308,27 @@ def stream_stop():
         stream_num = lyra_ai.memory.increment_stream_count()
 
         from config import STREAM_TITLE
+
         # Debut (lần đầu tiên)
-        lyra_ai.memory.check_stream_milestone(
+        if lyra_ai.memory.check_stream_milestone(
             "debut", f"Buổi stream đầu tiên của Lyra!", stream_title=STREAM_TITLE
-        )
+        ):
+            record_milestone("First stream debut!")
+
         # Mốc số lượng stream
         for milestone_n in [10, 25, 50, 100]:
             if stream_num >= milestone_n:
-                lyra_ai.memory.check_stream_milestone(
+                if lyra_ai.memory.check_stream_milestone(
                     f"stream_{milestone_n}",
                     f"Đã stream {milestone_n} buổi!",
                     stream_title=STREAM_TITLE,
-                )
+                ):
+                    record_milestone(f"Reached {milestone_n} streams!")
     except Exception as e:
         print(f"[Stream] Milestone check error: {e}")
+
+    # ── Live Context: reset to neutral (stream now officially ended) ──────────
+    reset_live_context()
 
     result = yt_poller.stop()
     lyra_ai.is_streaming = False
@@ -1141,34 +1349,38 @@ def stream_regular_viewers():
 @app.route("/stream/analytics", methods=["GET"])
 def stream_analytics():
     """Thống kê sau mỗi stream: top viewers, regulars promoted, queue stats"""
-    platform   = request.args.get("platform", "youtube")
+    platform = request.args.get("platform", "youtube")
     channel_id = request.args.get("channel_id")
-    limit      = min(int(request.args.get("limit", 10)), 50)
+    limit = min(int(request.args.get("limit", 10)), 50)
 
-    top_viewers = viewer_tracker.get_top_viewers(platform=platform, channel_id=channel_id, limit=limit)
-    regulars    = viewer_tracker.get_regular_viewers(platform=platform, limit=limit)
+    top_viewers = viewer_tracker.get_top_viewers(
+        platform=platform, channel_id=channel_id, limit=limit
+    )
+    regulars = viewer_tracker.get_regular_viewers(platform=platform, limit=limit)
 
     # Queue stats
     queue_stats = {
-        "donor_pending":          _priority_queues["donor"].qsize(),
+        "donor_pending": _priority_queues["donor"].qsize(),
         "regular_viewer_pending": _priority_queues["regular_viewer"].qsize(),
-        "new_viewer_pool":        len(_new_viewer_pool),
-        "reply_cooldown_s":       REPLY_COOLDOWN,
-        "new_viewer_interval_s":  NEW_VIEWER_PICK_INTERVAL,
+        "new_viewer_pool": len(_new_viewer_pool),
+        "reply_cooldown_s": REPLY_COOLDOWN,
+        "new_viewer_interval_s": NEW_VIEWER_PICK_INTERVAL,
     }
 
-    return jsonify({
-        "top_viewers":    top_viewers,
-        "regular_viewers": regulars,
-        "stream_content": {
-            "title": STREAM_TITLE,
-            "game":  STREAM_GAME,
-            "goals": STREAM_GOALS,
-            "notes": STREAM_NOTES,
-        },
-        "queue_stats":    queue_stats,
-        "yt_poller":      yt_poller.get_status(),
-    })
+    return jsonify(
+        {
+            "top_viewers": top_viewers,
+            "regular_viewers": regulars,
+            "stream_content": {
+                "title": STREAM_TITLE,
+                "game": STREAM_GAME,
+                "goals": STREAM_GOALS,
+                "notes": STREAM_NOTES,
+            },
+            "queue_stats": queue_stats,
+            "yt_poller": yt_poller.get_status(),
+        }
+    )
 
 
 @app.route("/stream/status", methods=["GET"])
@@ -1191,7 +1403,7 @@ def stream_events():
             _sse_subscribers.append(q)
         try:
             # Gửi heartbeat ngay để giữ connection
-            yield "data: {\"type\":\"connected\"}\n\n"
+            yield 'data: {"type":"connected"}\n\n'
             while True:
                 try:
                     msg = q.get(timeout=20)
@@ -1216,64 +1428,71 @@ def stream_events():
 
 
 # Auth routes for YouTube API access (OAuth 2.0 flow)
-@app.route('/authorize')
+@app.route("/authorize")
 def authorize():
     import secrets
     import hashlib
     import base64
 
     flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE, scopes=SCOPES)
-    flow.redirect_uri = url_for('oauth2callback', _external=True)
+        CLIENT_SECRETS_FILE, scopes=SCOPES
+    )
+    flow.redirect_uri = url_for("oauth2callback", _external=True)
 
     # Tự tạo PKCE code_verifier + code_challenge (Google yêu cầu)
     code_verifier = secrets.token_urlsafe(64)
-    code_challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(code_verifier.encode()).digest()
-    ).rstrip(b'=').decode()
-
-    authorization_url, state = flow.authorization_url(
-        access_type='offline',
-        include_granted_scopes='true',
-        prompt='consent',
-        code_challenge=code_challenge,
-        code_challenge_method='S256',
+    code_challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest())
+        .rstrip(b"=")
+        .decode()
     )
 
-    session['state'] = state
-    session['code_verifier'] = code_verifier
+    authorization_url, state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+        code_challenge=code_challenge,
+        code_challenge_method="S256",
+    )
+
+    session["state"] = state
+    session["code_verifier"] = code_verifier
     return redirect(authorization_url)
 
-@app.route('/oauth2callback')
-def oauth2callback():
-    state = session['state']
-    flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
-        CLIENT_SECRETS_FILE, scopes=SCOPES, state=state)
-    flow.redirect_uri = url_for('oauth2callback', _external=True)
 
-    code_verifier = session.pop('code_verifier', None)
-    fetch_kwargs = {'authorization_response': request.url}
+@app.route("/oauth2callback")
+def oauth2callback():
+    state = session["state"]
+    flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE, scopes=SCOPES, state=state
+    )
+    flow.redirect_uri = url_for("oauth2callback", _external=True)
+
+    code_verifier = session.pop("code_verifier", None)
+    fetch_kwargs = {"authorization_response": request.url}
     if code_verifier:
-        fetch_kwargs['code_verifier'] = code_verifier
+        fetch_kwargs["code_verifier"] = code_verifier
 
     flow.fetch_token(**fetch_kwargs)
 
     credentials = flow.credentials
-    session['credentials'] = {
-        'token': credentials.token,
-        'refresh_token': credentials.refresh_token,
-        'token_uri': credentials.token_uri,
-        'client_id': credentials.client_id,
-        'client_secret': credentials.client_secret,
-        'scopes': list(credentials.scopes) if credentials.scopes else [],
+    session["credentials"] = {
+        "token": credentials.token,
+        "refresh_token": credentials.refresh_token,
+        "token_uri": credentials.token_uri,
+        "client_id": credentials.client_id,
+        "client_secret": credentials.client_secret,
+        "scopes": list(credentials.scopes) if credentials.scopes else [],
     }
     return "Xác thực thành công! Lyra đã có quyền truy cập YouTube."
+
 
 @app.route("/secret/diary")
 def view_diary():
     """Trang xem nhật ký bí mật"""
     entries = lyra_ai.memory.get_diary_entries(limit=30)
     return render_template("diary.html", entries=entries)
+
 
 # ========================
 # MAIN
@@ -1282,4 +1501,6 @@ def view_diary():
 if __name__ == "__main__":
     print("Starting Lyra AI Server...")
     print("Sessions will be saved to: ./flask_sessions")
+    # Start proactive monitor thread
+    threading.Thread(target=_proactive_monitor, daemon=True).start()
     app.run(debug=True, use_reloader=False)

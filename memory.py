@@ -9,6 +9,7 @@ import re
 import json
 import sqlite3
 import threading
+import time
 import requests
 import random
 from datetime import datetime, timedelta
@@ -356,10 +357,10 @@ class MemorySystem:
         self.pinecone = PineconeLayer()
         self.ranker = MemoryRanker()
 
-        # Session memory (L2) — in-memory, cleared on stream stop
-        self._session_items: list[dict] = []
-        self._session_last_activity_at: str | None = None
-        self._rolling_stream_summary: str = ""
+        # ── Background Lifecycle Sweeper ─────────────────────────────────────
+        # Periodically expires memories with TTL, cleans up stale entries.
+        self._sweeper_thread = threading.Thread(target=self._sweeper_loop, daemon=True)
+        self._sweeper_thread.start()
 
     # ── dict-like access (backward compat) ────────────────────────────────────
     def __getitem__(self, key):
@@ -376,6 +377,28 @@ class MemorySystem:
 
     def __len__(self):
         return len(self.memory)
+
+    # ── Lifecycle Manager (Zep-style) ────────────────────────────────────────
+    def _sweeper_loop(self):
+        """Background thread that expires memories based on TTL and performs cleanup."""
+        while True:
+            time.sleep(1800)  # 30 minutes
+            try:
+                conn = self._get_db()
+                if not conn:
+                    continue
+                c = conn.cursor()
+                now_iso = datetime.now().isoformat()
+                with self.db_lock:
+                    c.execute(
+                        "UPDATE memory_items SET is_valid=0 "
+                        "WHERE is_valid=1 AND ttl_minutes>0 "
+                        "AND datetime(last_used_at, '+' || ttl_minutes || ' minutes') < ?",
+                        (now_iso,),
+                    )
+                    conn.commit()
+            except Exception as e:
+                print(f"[Memory] Sweeper error: {e}")
 
     # ── DB ─────────────────────────────────────────────────────────────────────
     def _get_db(self):
@@ -428,6 +451,9 @@ class MemorySystem:
                     embedding    BLOB,
                     pinecone_id  TEXT,
                     superseded   INTEGER DEFAULT 0,
+                    is_valid     INTEGER DEFAULT 1,
+                    memory_scope TEXT DEFAULT 'semantic',
+                    ttl_minutes  INTEGER DEFAULT 0,
                     UNIQUE(kind, value)
                 );
                 CREATE TABLE IF NOT EXISTS stream_milestones (
@@ -464,6 +490,9 @@ class MemorySystem:
                 ("importance", "REAL DEFAULT 1.0"),
                 ("pinecone_id", "TEXT"),
                 ("superseded", "INTEGER DEFAULT 0"),
+                ("is_valid", "INTEGER DEFAULT 1"),
+                ("memory_scope", "TEXT DEFAULT 'semantic'"),
+                ("ttl_minutes", "INTEGER DEFAULT 0"),
             ]:
                 if col not in existing_cols:
                     c.execute(f"ALTER TABLE memory_items ADD COLUMN {col} {definition}")
@@ -1037,11 +1066,12 @@ class MemorySystem:
 
                 c.execute(
                     "INSERT INTO memory_items "
-                    "(kind,value,layer,weight,saliency,importance,access_count,source_turn,last_used_at,embedding) "
-                    "VALUES (?,?,?,?,?,?,0,?,?,?) "
+                    "(kind,value,layer,weight,saliency,importance,access_count,source_turn,last_used_at,embedding,is_valid,memory_scope,ttl_minutes) "
+                    "VALUES (?,?,?,?,?,?,0,?,?, ?, 1, ?, 0) "
                     "ON CONFLICT(kind,value) DO UPDATE SET "
                     "weight=excluded.weight, saliency=excluded.saliency, importance=excluded.importance, "
                     "layer=excluded.layer, last_used_at=excluded.last_used_at, embedding=excluded.embedding, "
+                    "is_valid=excluded.is_valid, memory_scope=excluded.memory_scope, ttl_minutes=excluded.ttl_minutes, "
                     "superseded=0",
                     (
                         kind,
@@ -1053,6 +1083,7 @@ class MemorySystem:
                         self.turn_counter,
                         now,
                         emb_blob,
+                        layer,  # memory_scope = layer
                     ),
                 )
                 conn.commit()
@@ -1219,11 +1250,12 @@ class MemorySystem:
                     emb_blob = existing["embedding"] if existing else None
                     c.execute(
                         "INSERT INTO memory_items "
-                        "(kind,value,layer,weight,saliency,importance,access_count,source_turn,last_used_at,embedding) "
-                        "VALUES (?,?,?,?,?,?,0,?,?,?) "
+                        "(kind,value,layer,weight,saliency,importance,access_count,source_turn,last_used_at,embedding,is_valid,memory_scope,ttl_minutes) "
+                        "VALUES (?,?,?,?,?,?,0,?,?, ?, 1, ?, 0) "
                         "ON CONFLICT(kind,value) DO UPDATE SET "
                         "weight=excluded.weight, saliency=excluded.saliency, importance=excluded.importance, "
-                        "layer=excluded.layer, last_used_at=excluded.last_used_at",
+                        "layer=excluded.layer, last_used_at=excluded.last_used_at, embedding=excluded.embedding, "
+                        "is_valid=excluded.is_valid, memory_scope=excluded.memory_scope, ttl_minutes=excluded.ttl_minutes",
                         (
                             kind,
                             str(value),
@@ -1234,6 +1266,7 @@ class MemorySystem:
                             self.turn_counter,
                             now,
                             emb_blob,
+                            layer,  # memory_scope = layer
                         ),
                     )
 
@@ -1417,9 +1450,9 @@ class MemorySystem:
                 # Fetch more than we need for the ranker to choose
                 rows = list(
                     c.execute(
-                        "SELECT kind, value, weight, saliency FROM memory_items "
-                        "WHERE layer=? AND superseded=0 "
-                        "ORDER BY saliency DESC, created_at DESC LIMIT 50",
+                        "SELECT kind, value, weight, saliency, last_used_at FROM memory_items "
+                        "WHERE layer=? AND superseded=0 AND is_valid=1 "
+                        "ORDER BY saliency DESC, last_used_at DESC LIMIT 50",
                         (LAYER_USER,),
                     )
                 )
@@ -1428,11 +1461,25 @@ class MemorySystem:
                     # Privacy filter
                     if is_public and kind in ("profile", "relational"):
                         continue
+                    # ── Freshness factor (temporal boost) ─────────────────────────────
+                    last_used_str = r["last_used_at"]
+                    freshness = 1.0
+                    if last_used_str:
+                        try:
+                            last_used = datetime.fromisoformat(last_used_str)
+                            age_hours = (
+                                datetime.now() - last_used
+                            ).total_seconds() / 3600.0
+                            # Half-life of ~1 week (168 hours): factor = 1/(1+age/168)
+                            freshness = 1.0 / (1.0 + age_hours / 168.0)
+                        except Exception:
+                            pass
+                    base_weight = r["weight"] * (1.0 + (r["saliency"] / 10.0))
                     candidates.append(
                         {
                             "kind": kind,
                             "value": r["value"],
-                            "weight": r["weight"] * (1.0 + (r["saliency"] / 10.0)),
+                            "weight": base_weight * freshness,
                         }
                     )
         except Exception:
