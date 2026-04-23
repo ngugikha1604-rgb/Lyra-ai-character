@@ -517,12 +517,13 @@ class MiniAI:
 
                 if response.status_code != 200:
 
-                    print(f"[Translate] Groq failed ({response.status_code}) in {duration:.1f}s: {result}")
+                    # Bug fix: log label là [Chat] thay vì [Translate] — đây là primary chat model
+                    print(f"[Chat] Groq failed ({response.status_code}) in {duration:.1f}s: {result}")
 
                     break
 
 
-                print(f"[Translate] Groq responded in {duration:.1f}s")
+                print(f"[Chat] Groq responded in {duration:.1f}s")
 
                 content = (
 
@@ -2537,6 +2538,7 @@ class MiniAI:
         c = conn.cursor()
 
 
+        # Bug fix: đọc count + fetch old summaries trong cùng 1 lock để tránh race condition
         with self.memory.db_lock:
 
             res = c.execute("SELECT COUNT(*) FROM summaries WHERE is_mega=0").fetchone()
@@ -2544,21 +2546,31 @@ class MiniAI:
             count = res[0] if res else 0
 
 
+            if count >= self.memory.max_summaries:
+
+                old_summaries = c.execute(
+
+                    "SELECT id, summary, timestamp FROM summaries WHERE is_mega=0 ORDER BY id ASC"
+
+                ).fetchall()
+
+
+                old_mega = c.execute(
+
+                    "SELECT summary FROM summaries WHERE is_mega=1 ORDER BY id DESC LIMIT 1"
+
+                ).fetchone()
+
+
+            else:
+
+                old_summaries = []
+
+                old_mega = None
+
+
+        # Compress ngoài lock để không block DB trong khi gọi LLM
         if count >= self.memory.max_summaries:
-
-            old_summaries = c.execute(
-
-                "SELECT id, summary, timestamp FROM summaries WHERE is_mega=0 ORDER BY id ASC"
-
-            ).fetchall()
-
-
-            old_mega = c.execute(
-
-                "SELECT summary FROM summaries WHERE is_mega=1 ORDER BY id DESC LIMIT 1"
-
-            ).fetchone()
-
 
             parts = []
 
@@ -2568,7 +2580,7 @@ class MiniAI:
 
             for row in old_summaries:
 
-                parts.append(f"[{row[1]}] {row[2]}")
+                parts.append(f"[{row[2]}] {row[1]}")
 
             combined_text = "\n".join(parts)
 
@@ -2608,6 +2620,7 @@ class MiniAI:
 
             if mega_text:
 
+                # Bug fix: commit mega-summary transaction riêng để không bị rollback
                 with self.memory.db_lock:
 
                     c.execute("DELETE FROM summaries WHERE is_mega=1")
@@ -2621,6 +2634,8 @@ class MiniAI:
                         (mega_text, datetime.now().strftime("%Y-%m-%d %H:%M")),
 
                     )
+
+                    conn.commit()  # Bug fix: commit mega ngay, không phụ thuộc vào insert bên dưới
 
                     print(f"[DB] Compressed {count} summaries into mega summary")
 
