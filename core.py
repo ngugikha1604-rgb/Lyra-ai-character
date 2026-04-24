@@ -27,7 +27,7 @@ from config import (
 from config import LIGHT_MODEL, LIGHT_BASE_URL
 
 from live_context import get_live_context_block, maybe_refresh_from_emotion
-from background_worker import enqueue
+from background_worker import enqueue, PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_NORMAL
 
 
 from prompts import (
@@ -269,6 +269,9 @@ class MiniAI:
         except Exception as e:
             print(f"[Light] Error: {e}, falling back to main model")
 
+        # Fallback to main chat model (Groq primary, Ollama secondary)
+        # Note: No recursion loop because _call_model uses Groq/CHAT_MODEL,
+        # while _call_light_model uses LIGHT_MODEL (usually smaller/faster)
         return self._call_model(
             messages, temperature=temperature, max_tokens=max_tokens
         )
@@ -507,6 +510,8 @@ class MiniAI:
         """Search DuckDuckGo and return results"""
 
         try:
+            from duckduckgo_search import DDGS  # Lazy import
+
             with DDGS() as ddgs:
                 results = list(ddgs.text(query, max_results=max_results))
 
@@ -598,8 +603,9 @@ class MiniAI:
 
         self.emotion.update(user_input, self.time_gap_hours, intent=intent)
 
-        # Sync live context mood/energy labels (owner only to avoid noise)
-        if source_type == "owner":
+        # Sync live context mood/energy labels (owner only, when streaming)
+        # Chỉ update khi đang stream để tránh I/O không cần thiết
+        if source_type == "owner" and self.is_streaming:
             maybe_refresh_from_emotion(self.emotion.get_state())
 
         # ── Self-Disclosure Engine (Walther — SIP Theory) ────────────────────
@@ -635,7 +641,7 @@ class MiniAI:
             # Tự động tóm tắt stream mỗi N tin nhắn (Dùng Light Model)
 
             if self.stream_turn_counter % STREAM_SUMMARY_THRESHOLD == 0:
-                enqueue(2, self.update_stream_summary)
+                enqueue(PRIORITY_HIGH, self.update_stream_summary)
 
             # Selective viewer memory (temporary): extract a few high-signal hints into L2 cache.
 
@@ -1098,7 +1104,11 @@ class MiniAI:
         else:
             # Enqueue background extraction instead of raw thread
             enqueue(
-                1, self.extract_memory, _extract_input, _extract_intent, _extract_source
+                PRIORITY_CRITICAL,
+                self.extract_memory,
+                _extract_input,
+                _extract_intent,
+                _extract_source,
             )
 
         # Chỉ lưu conversation history khi owner chat
@@ -2151,8 +2161,21 @@ class MiniAI:
                     affection=self.emotion.affection,
                 )
 
+                # ── Thông báo đã ghi xong nhật ký ─────────────────────────────────
+                print("=" * 60)
+                print("✅ SECRET DIARY - ĐÃ GHI XONG!")
+                print(
+                    f"   Mood: {self.emotion.mood} | Affection: {self.emotion.affection}/100"
+                )
+                print(f"   Stream turns: {turns}")
+                print("─" * 60)
+                print(entry_content.strip())
+                print("=" * 60)
+                print("[Core] ✅ Diary saved - you can now stop the server if needed")
+
                 return True
 
+            print("[Core] ⚠ Diary not saved - content too short")
             return False
 
         except Exception as e:
@@ -2880,7 +2903,11 @@ class MiniAI:
                 },
             ]
 
-            summary = self._call_light_model(messages, temperature=0.7, max_tokens=150)
+            # Dynamic max_tokens dựa trên attention (50-150)
+            _base_tokens = 50 + int(self.emotion.attention * 10)  # 50-150
+            summary = self._call_light_model(
+                messages, temperature=0.7, max_tokens=_base_tokens
+            )
 
             if summary:
                 self.memory.update_rolling_stream_summary(summary)

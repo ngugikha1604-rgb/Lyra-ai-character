@@ -5,6 +5,12 @@
 import queue
 import threading
 
+
+# Priority levels (lower number = higher priority)
+PRIORITY_CRITICAL = 1  # Memory extraction (owner data, must be fast)
+PRIORITY_HIGH = 2  # Stream summary, important updates
+PRIORITY_NORMAL = 3  # Diary, consolidation, non-critical background tasks
+
 _job_queue = queue.PriorityQueue()
 
 
@@ -34,5 +40,7 @@ def enqueue(priority: int, func, *args, **kwargs):
     """
     Enqueue a job for background execution.
     Lower priority number = higher urgency.
+
+    Use priority constants: PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_NORMAL
     """
     _job_queue.put((priority, (func, args, kwargs)))

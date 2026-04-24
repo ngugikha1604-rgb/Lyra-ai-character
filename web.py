@@ -51,7 +51,7 @@ from live_context import (
     reset_live_context,
     load_live_context,
 )
-from background_worker import enqueue
+from background_worker import enqueue, PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_NORMAL
 
 # Đường dẫn tới file bạn tải từ Google Cloud
 CLIENT_SECRETS_FILE = "client_secret.json"
@@ -660,7 +660,7 @@ def stream_chat():
 
         # Giai đoạn 4: Stream summary định kỳ
         if chat_analyzer.should_summarize():
-            enqueue(2, _trigger_stream_summary, channel_id, platform)
+            enqueue(PRIORITY_HIGH, _trigger_stream_summary, channel_id, platform)
 
         response_payload = build_state_payload(lyra_ai, result=result)
         response_payload.update(
@@ -1089,7 +1089,7 @@ def _handle_stream_event(chat_event: dict):
         )
 
         if chat_analyzer.should_summarize():
-            enqueue(2, _trigger_stream_summary, channel_id, platform)
+            enqueue(PRIORITY_HIGH, _trigger_stream_summary, channel_id, platform)
 
         payload = build_state_payload(lyra_ai, result=result)
         payload.update(
@@ -1295,8 +1295,8 @@ def stream_stop():
     lyra_ai.memory.clear_session_memory()
 
     # Viết nhật ký bí mật + Hợp nhất trí nhớ sau buổi stream (CLS)
-    enqueue(3, lyra_ai.write_diary_entry)
-    enqueue(3, lyra_ai.memory.consolidate_episodic_to_semantic)
+    enqueue(PRIORITY_NORMAL, lyra_ai.write_diary_entry)
+    enqueue(PRIORITY_NORMAL, lyra_ai.memory.consolidate_episodic_to_semantic)
 
     # Reset greeted set cho session tiếp theo
     with _greeted_lock:
