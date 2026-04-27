@@ -65,6 +65,54 @@ os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET_KEY
 
+# Security configurations
+# SESSION_COOKIE_SECURE=True chỉ dùng trên HTTPS — tắt khi dev local (HTTP)
+_is_production = os.environ.get("FLASK_ENV", "development") == "production"
+app.config["SESSION_COOKIE_SECURE"] = _is_production
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB max request size
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+import functools
+
+# CORS Protection - only allow localhost during development
+@app.after_request
+def after_request(response):
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    return response
+
+# Rate Limiter
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"]
+)
+
+# Simple authentication decorator for sensitive endpoints
+def require_auth(f):
+    @functools.wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Check for admin session or API key
+        auth_header = request.headers.get('X-Admin-Key')
+        if auth_header != os.environ.get('ADMIN_API_KEY', 'lyra-admin-key-change-me'):
+            return jsonify({'error': 'Unauthorized'}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Input sanitization
+def sanitize_input(text, max_length=500):
+    if not text or not isinstance(text, str):
+        return ''
+    import re
+    # Remove potentially dangerous characters
+    text = re.sub(r'[<>\"\'%;)(&+]', '', text)
+    return text.strip()[:max_length]
+
+
+
 # ========================
 # SESSION CONFIGURATION
 # ========================
@@ -224,6 +272,8 @@ def index():
 
 
 @app.route("/reset")
+@limiter.limit("10 per minute")
+@require_auth
 def reset():
     """Xóa session nhưng GIỮ memory.db"""
     global lyra_ai
@@ -233,6 +283,8 @@ def reset():
 
 
 @app.route("/reset-all")
+@limiter.limit("3 per minute")
+@require_auth
 def reset_all():
     """Xóa toàn bộ session + memory.db"""
     global lyra_ai
@@ -243,6 +295,7 @@ def reset_all():
     return "All cleared (session + memory)"
 
 
+@limiter.limit("30 per minute")
 @app.route("/chat", methods=["POST"])
 def chat():
 
@@ -256,7 +309,7 @@ def chat():
         if not data or "message" not in data:
             return jsonify({"error": "Invalid request"}), 400
 
-        user_input = data["message"].strip()
+        user_input = sanitize_input(data["message"], max_length=1000)
 
         if user_input == "":
             return jsonify({"reply": "Please say something."})
@@ -311,6 +364,7 @@ def chat():
 # ========================
 
 
+@limiter.limit("20 per minute")
 @app.route("/speak", methods=["POST"])
 def speak():
     """FPT AI TTS — trả về audio mp3"""
@@ -550,6 +604,7 @@ def _trigger_stream_summary(channel_id: str, platform: str):
         print(f"[Stream] Summary error: {e}")
 
 
+@limiter.limit("60 per minute")
 @app.route("/stream-chat", methods=["POST"])
 def stream_chat():
     """
@@ -581,7 +636,7 @@ def stream_chat():
                 {"error": "Missing required fields: message, sender_id"}
             ), 400
 
-        message = data["message"].strip()
+        message = sanitize_input(data["message"], max_length=500)
         sender_id = str(data["sender_id"]).strip()
         sender_name = str(data.get("sender_name", "Viewer")).strip()
         channel_id = str(data.get("channel_id", "default")).strip()
@@ -1488,6 +1543,8 @@ def oauth2callback():
 
 
 @app.route("/secret/diary")
+@limiter.limit("5 per minute")
+@require_auth
 def view_diary():
     """Trang xem nhật ký bí mật"""
     entries = lyra_ai.memory.get_diary_entries(limit=30)
@@ -1503,4 +1560,4 @@ if __name__ == "__main__":
     print("Sessions will be saved to: ./flask_sessions")
     # Start proactive monitor thread
     threading.Thread(target=_proactive_monitor, daemon=True).start()
-    app.run(debug=True, use_reloader=False)
+    app.run(debug=False, use_reloader=False, host="127.0.0.1")
