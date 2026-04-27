@@ -134,6 +134,15 @@ class SkillSynthesizer:
                 json.dump(stats, f, indent=2)
             self._rebuild_index(stats)
 
+    def get_skill_context(self, skill_name):
+        md_path = os.path.join(self.skills_dir, f"{skill_name}.md")
+        if os.path.exists(md_path):
+            try:
+                with open(md_path, "r", encoding="utf-8") as f:
+                    return f.read()
+            except: pass
+        return ""
+
     def _delete_skill(self, name):
         md_path = os.path.join(self.skills_dir, f"{name}.md")
         if os.path.exists(md_path):

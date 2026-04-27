@@ -21,6 +21,7 @@ from memory import MemorySystem
 from vbrain import parse_vbrain_response
 from conversation_state import ConversationStateDetector
 from skill_synthesizer import SkillSynthesizer
+from prompts import REWARD_HINTS, IDEOLOGY_PROMPTS
 
 # Mixins
 from behavioral_logic import BehavioralMixin
@@ -74,8 +75,8 @@ class MiniAI(BehavioralMixin, PromptBuilderMixin, StreamHandlerMixin, MemoryHand
         self.time_period = get_time_period(self.current_time.hour)
 
         self.skills_dir = os.path.join(BASE_DIR, "skills")
-        self._skills_index = self._load_skill_index()
         self.synthesizer = SkillSynthesizer(self.skills_dir)
+        self._skills_index = self._load_skill_index()
         
         self.last_message_time = self.memory.memory.get("time_tracking", {}).get("last_message_time")
         self.time_gap_hours = calculate_time_gap(self.last_message_time, self.current_time)
@@ -230,6 +231,10 @@ class MiniAI(BehavioralMixin, PromptBuilderMixin, StreamHandlerMixin, MemoryHand
             self.memory.memory.setdefault("conversation", {}).setdefault("conversation_thread", []).extend([
                 {"role": "user", "content": user_input}, {"role": "assistant", "content": original_reply}
             ])
+            self.turn_counter += 2  # user + assistant
+            self.recent_responses.append(original_reply.lower()[:30])
+            if len(self.recent_responses) > 10: self.recent_responses.pop(0)
+            
             self.last_message_time = self.current_time.isoformat()
             self.memory.memory["time_tracking"]["last_message_time"] = self.last_message_time
             self.memory.save()
@@ -245,6 +250,34 @@ class MiniAI(BehavioralMixin, PromptBuilderMixin, StreamHandlerMixin, MemoryHand
         }
 
     def emotion_from_state(self): return self.emotion.emotion_from_state()
+
+    def _load_skill_index(self):
+        if os.path.exists(self.synthesizer.index_path):
+            try:
+                with open(self.synthesizer.index_path, "r", encoding="utf-8") as f:
+                    return f.read()
+            except: pass
+        return ""
+
+    def _load_skill_content(self, skill_name):
+        return self.synthesizer.get_skill_context(skill_name)
+
+    def _log_skill_usage(self, skill_name):
+        import time
+        print(f"[Skill] Using: {skill_name}")
+        stats_path = self.synthesizer.stats_path
+        try:
+            stats = {}
+            if os.path.exists(stats_path):
+                with open(stats_path, "r", encoding="utf-8") as f:
+                    stats = json.load(f)
+            if skill_name not in stats:
+                stats[skill_name] = {"call_count": 0, "last_used": 0}
+            stats[skill_name]["call_count"] += 1
+            stats[skill_name]["last_used"] = time.time()
+            with open(stats_path, "w", encoding="utf-8") as f:
+                json.dump(stats, f, indent=2)
+        except: pass
 
     def get_proactive_message(self):
         """Generates a proactive message based on time and situation."""

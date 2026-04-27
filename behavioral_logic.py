@@ -8,6 +8,33 @@ class BehavioralMixin:
     Mixin for Lyra's behavioral and psychological logic.
     Handles speech acts, self-disclosure, interaction tweaks, and intent detection.
     """
+    def infer_user_signal(self, text: str) -> str:
+        """Heuristically infers the user's current 'signal' or vibe."""
+        mood = self.detect_user_mood(text)
+        intent = self.detect_intent(text)
+        
+        if mood == "frustrated": return "User seems annoyed or impatient."
+        if mood == "sad": return "User seems down or needs comfort."
+        if mood == "stressed": return "User is under pressure."
+        if mood == "excited": return "User is high energy and happy."
+        
+        if intent == "question": return "User is curious and seeking information."
+        if intent == "complaint": return "User is criticizing or expressing dissatisfaction."
+        if intent == "request": return "User wants you to do something."
+        
+        return "User is making a casual statement."
+
+    def clean_reply(self, text: str) -> str:
+        """Cleans AI response from meta-talk, quotes, and artifacts."""
+        if not text: return ""
+        # Remove quotes
+        text = text.strip().strip('"').strip("'")
+        # Remove common meta-prefixes
+        text = re.sub(r"^(Lyra:|Assistant:|AI:)", "", text, flags=re.I).strip()
+        # Remove potential markdown
+        text = re.sub(r"```.*?```", "", text, flags=re.S).strip()
+        return text
+
     # ── Compiled Patterns ──────────────────────────────────────────────────────
     _INTRO_PATTERNS = [
         re.compile(r"(my name is|i'm called|call me|i am [a-z]+|i'm [a-z]+)", re.I),

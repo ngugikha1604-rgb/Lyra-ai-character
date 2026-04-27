@@ -375,3 +375,58 @@ class MemorySystem:
         with self.db_lock:
             conn.execute("INSERT INTO diaries (content, mood_score, affection_score) VALUES (?,?,?)", (content, mood, affection))
             conn.commit()
+
+    def get_diary_entries(self, limit=5):
+        conn = self._get_db()
+        if not conn: return []
+        try:
+            rows = conn.execute("SELECT content, mood_score, affection_score, timestamp FROM diaries ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            return [{"content": r[0], "mood": r[1], "affection": r[2], "timestamp": r[3]} for r in rows]
+        except Exception: return []
+
+    def get_stream_milestones(self, limit=3):
+        conn = self._get_db()
+        if not conn: return []
+        try:
+            rows = conn.execute("SELECT description, achieved_at FROM stream_milestones ORDER BY achieved_at DESC LIMIT ?", (limit,)).fetchall()
+            return [{"description": r[0], "achieved_at": r[1]} for r in rows]
+        except Exception: return []
+
+    def extract_candidates_heuristic(self, text):
+        """Fast heuristic-based memory extraction."""
+        candidates = []
+        text_lower = text.lower()
+        
+        # Simple patterns for likes/dislikes
+        if re.search(r"\b(thích|yêu|mê|khoái)\b", text_lower):
+            m = re.search(r"(?:thích|yêu|mê|khoái)\s+([^\s,!?.]+)", text_lower)
+            if m: candidates.append({"kind": "like", "value": m.group(1), "saliency": 3})
+            
+        if re.search(r"\b(ghét|không thích|sợ)\b", text_lower):
+            m = re.search(r"(?:ghét|không thích|sợ)\s+([^\s,!?.]+)", text_lower)
+            if m: candidates.append({"kind": "dislike", "value": m.group(1), "saliency": 3})
+            
+        if re.search(r"\b(muốn|định|sẽ|kế hoạch)\b", text_lower):
+            m = re.search(r"(?:muốn|định|sẽ|kế hoạch)\s+([^\s,!?.]+)", text_lower)
+            if m: candidates.append({"kind": "goal", "value": m.group(1), "saliency": 4})
+            
+        return candidates
+
+    def buffer_candidate(self, kind, value, saliency=None):
+        if not hasattr(self, "memory_buffer"): self.memory_buffer = []
+        self.memory_buffer.append({"kind": kind, "value": value, "saliency": saliency or 2, "timestamp": time.time()})
+        if len(self.memory_buffer) > 20: self.memory_buffer.pop(0)
+
+    def should_buffer(self, text, intent):
+        """Decides if we should bother with LLM extraction."""
+        if intent in ("compliment", "complaint", "introduction", "suggestion"): return True
+        if len(text) > 40: return True
+        if self.memory_buffer: return True
+        return False
+
+    def should_flush(self, intent):
+        """Decides if we should flush the buffer now."""
+        # Flush every few turns or on important intents
+        if intent in ("introduction", "suggestion") or len(self.memory_buffer) >= 3:
+            return True
+        return False
