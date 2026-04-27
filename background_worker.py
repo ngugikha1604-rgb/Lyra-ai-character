@@ -44,3 +44,7 @@ def enqueue(priority: int, func, *args, **kwargs):
     Use priority constants: PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_NORMAL
     """
     _job_queue.put((priority, (func, args, kwargs)))
+
+def get_queue_stats():
+    """Returns the current number of pending jobs in the queue."""
+    return _job_queue.qsize()

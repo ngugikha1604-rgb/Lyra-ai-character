@@ -1,0 +1,61 @@
+import os
+import requests
+import threading
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+# Constants
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "memory.db")
+DB_LOCK = threading.Lock()
+
+LAYER_USER = "user"      # L1 — persistent facts
+LAYER_SESSION = "session"  # L2 — stream-specific context
+LAYER_TEMPORAL = "temporal" # L3 — episodic/summaries
+
+_LAYER_MAP = {
+    "like": LAYER_USER,
+    "dislike": LAYER_USER,
+    "goal": LAYER_USER,
+    "topic": LAYER_USER,
+    "relational": LAYER_USER,
+    "inside_joke": LAYER_USER,
+    "episodic": LAYER_TEMPORAL,
+    "session": LAYER_SESSION,
+}
+
+_CONFLICTABLE_KINDS = {"like", "dislike", "goal", "relational"}
+
+KIND_IMPORTANCE = {
+    "relational": 1.5,
+    "goal": 1.4,
+    "inside_joke": 1.3,
+    "like": 1.2,
+    "dislike": 1.2,
+    "topic": 1.1,
+    "episodic": 1.0,
+    "session": 0.9
+}
+
+def _get_ollama_embedding(text: str) -> "np.ndarray | None":
+    """Calls Ollama to get vector embedding."""
+    if np is None: return None
+    try:
+        from config import EMBEDDING_MODEL, EMBEDDING_URL
+        resp = requests.post(EMBEDDING_URL, json={"model": EMBEDDING_MODEL, "prompt": text}, timeout=5, verify=False)
+        if resp.status_code == 200:
+            vec = resp.json().get("embedding")
+            if vec: return np.array(vec, dtype=np.float32)
+    except Exception:
+        pass
+    return None
+
+def _cosine_similarity(v1, v2) -> float:
+    """Calculates cosine similarity between two vectors."""
+    if v1 is None or v2 is None or np is None: return 0.0
+    dot = np.dot(v1, v2)
+    norm1, norm2 = np.linalg.norm(v1), np.linalg.norm(v2)
+    if norm1 == 0 or norm2 == 0: return 0.0
+    return float(dot / (norm1 * norm2))

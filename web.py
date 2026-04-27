@@ -51,7 +51,7 @@ from live_context import (
     reset_live_context,
     load_live_context,
 )
-from background_worker import enqueue, PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_NORMAL
+from background_worker import enqueue, get_queue_stats, PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_NORMAL
 
 # Đường dẫn tới file bạn tải từ Google Cloud
 CLIENT_SECRETS_FILE = "client_secret.json"
@@ -1286,7 +1286,7 @@ def stream_start():
             except Exception as e:
                 print(f"[Stream] Greeting error: {e}")
 
-        threading.Thread(target=_send_greeting, daemon=True).start()
+        enqueue(PRIORITY_NORMAL, _send_greeting)
 
         return jsonify(result)
 
@@ -1549,6 +1549,17 @@ def view_diary():
     """Trang xem nhật ký bí mật"""
     entries = lyra_ai.memory.get_diary_entries(limit=30)
     return render_template("diary.html", entries=entries)
+
+
+@app.route("/debug/queue", methods=["GET"])
+@require_auth
+def debug_queue():
+    """Returns the current background worker queue size."""
+    stats = {
+        "pending_jobs": get_queue_stats(),
+        "status": "operational"
+    }
+    return jsonify(stats)
 
 
 # ========================

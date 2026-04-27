@@ -139,14 +139,14 @@ def maybe_refresh_from_emotion(emotion_state: Dict[str, Any]) -> None:
     attention = emotion_state.get("attention", 5)
     # Simple mapping
     mood_label = (
-        "happy"
+        "playful"
+        if mood > 6
+        else "happy"
         if mood > 3
-        else "sad"
-        if mood < -3
         else "grumpy"
         if mood < -6
-        else "playful"
-        if mood > 6
+        else "sad"
+        if mood < -3
         else "neutral"
     )
     energy_label = "high" if attention >= 7 else "low" if attention <= 3 else "medium"

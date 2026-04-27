@@ -1,9 +1,11 @@
 # Environments
 .env
-.env.*
+.env.*.local
 
 # Database
 memory.db
+memory.db-shm
+memory.db-wal
 memory.json
 *.db
 *.sqlite
@@ -39,6 +41,10 @@ Thumbs.db
 config.py
 APIkey.txt
 *.bak
+client_secret.json
+vts_token.json
+live_context.json
+PLAN.md
 task.md
  implementation_plan.md
  walkthrough.md
@@ -46,3 +52,9 @@ task.md
 #Models
 models/
 *.safetensors
+
+source_art/
+!.env.example
+
+#Vibe coding
+/.vscode

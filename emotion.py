@@ -13,6 +13,27 @@ class EmotionEngine:
     MOOD_DECAY_RATE: float = 0.08        # mood → 0 per turn (~12 turns to halve)
     DOMINANCE_DECAY_RATE: float = 0.05   # dominance → 0.5 per turn (~10 turns to halve gap)
 
+    # ── Keywords ──────────────────────────────────────────────────────────────
+    POSITIVE_WORDS = {
+        # English
+        "good", "great", "awesome", "nice", "thanks", "thank", "love", "cool",
+        "amazing", "brilliant", "beautiful", "wonderful", "perfect", "excellent",
+        "fantastic", "incredible",
+        # Vietnamese
+        "tuyệt", "hay", "thích", "vui", "cảm ơn", "cảm on", "yêu", "đẹp",
+        "giỏi", "ngoan", "tốt", "ổn", "sướng", "phấn khích", "hạnh phúc",
+        "thú vị", "xuất sắc", "tuyệt vời",
+    }
+
+    NEGATIVE_WORDS = {
+        # English
+        "stupid", "hate", "annoying", "bad", "useless", "dumb", "terrible",
+        "awful", "horrible", "worst",
+        # Vietnamese
+        "ghét", "tệ", "dở", "ngu", "bực", "chán", "mệt", "buồn", "tức",
+        "khó chịu", "thất vọng", "chán nản", "bực bội", "tức giận", "đau", "khổ",
+    }
+
     def __init__(self):
         self.mood = 0           # Valence proxy: -10 → +10
         self.previous_mood = 0
@@ -81,78 +102,8 @@ class EmotionEngine:
 
         text_lower = text.lower()
 
-        positive = [
-            # English
-            "good",
-            "great",
-            "awesome",
-            "nice",
-            "thanks",
-            "thank",
-            "love",
-            "cool",
-            "amazing",
-            "brilliant",
-            "beautiful",
-            "wonderful",
-            "perfect",
-            "excellent",
-            "fantastic",
-            "incredible",
-            # Vietnamese
-            "tuyệt",
-            "hay",
-            "thích",
-            "vui",
-            "cảm ơn",
-            "cảm on",
-            "yêu",
-            "đẹp",
-            "giỏi",
-            "ngoan",
-            "tốt",
-            "ổn",
-            "sướng",
-            "phấn khích",
-            "hạnh phúc",
-            "thú vị",
-            "xuất sắc",
-            "tuyệt vời",
-        ]
-
-        negative = [
-            # English
-            "stupid",
-            "hate",
-            "annoying",
-            "bad",
-            "useless",
-            "dumb",
-            "terrible",
-            "awful",
-            "horrible",
-            "worst",
-            # Vietnamese
-            "ghét",
-            "tệ",
-            "dở",
-            "ngu",
-            "bực",
-            "chán",
-            "mệt",
-            "buồn",
-            "tức",
-            "khó chịu",
-            "thất vọng",
-            "chán nản",
-            "bực bội",
-            "tức giận",
-            "đau",
-            "khổ",
-        ]
-
-        has_positive = any(w in text_lower for w in positive)
-        has_negative = any(w in text_lower for w in negative)
+        has_positive = any(w in text_lower for w in self.POSITIVE_WORDS)
+        has_negative = any(w in text_lower for w in self.NEGATIVE_WORDS)
 
         # ── Cognitive Appraisal (Lazarus, 1991) ───────────────────────────────
         # Đánh giá sự kiện theo 2 chiều trước khi apply delta:
@@ -215,7 +166,7 @@ class EmotionEngine:
         self._outburst_this_turn = False
 
         # Tích lũy
-        negative_count = sum(1 for w in negative if w in text_lower)
+        negative_count = sum(1 for w in self.NEGATIVE_WORDS if w in text_lower)
         if negative_count >= 2:
             self.irritability += 0.20   # Chỉ trích nặng (nhiều từ tiêu cực)
         elif has_negative:
