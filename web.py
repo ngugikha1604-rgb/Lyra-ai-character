@@ -22,6 +22,7 @@ import threading
 import time
 import requests
 import pytz
+from pydub import AudioSegment
 from memory import DB_PATH, DB_LOCK
 from config import (
     ELEVENLABS_API_KEY,
@@ -364,6 +365,34 @@ def chat():
 # ========================
 
 
+def apply_pitch_shift(audio_bytes, octaves=0.22):
+    """
+    Tăng pitch cho audio bằng cách thay đổi sample rate.
+    Điều này sẽ làm audio nhanh hơn một chút, phù hợp với giọng em gái tinh nghịch.
+    """
+    try:
+        # Load audio từ bytes
+        audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
+        
+        # Tính toán sample rate mới dựa trên số octaves
+        # 0.22 - 0.25 octaves là mức phù hợp cho Lyra 16 tuổi
+        new_sample_rate = int(audio.frame_rate * (2.0 ** octaves))
+        
+        # Override frame rate để đổi pitch (và speed)
+        shifted_audio = audio._spawn(audio.raw_data, overrides={'frame_rate': new_sample_rate})
+        
+        # Thiết lập lại frame rate về chuẩn để player hiểu đúng
+        shifted_audio = shifted_audio.set_frame_rate(audio.frame_rate)
+        
+        # Xuất ra bytes
+        out_io = io.BytesIO()
+        shifted_audio.export(out_io, format="mp3")
+        return out_io.getvalue()
+    except Exception as e:
+        print(f"[PitchShift] Error: {e}")
+        return audio_bytes
+
+
 @limiter.limit("20 per minute")
 @app.route("/speak", methods=["POST"])
 def speak():
@@ -433,8 +462,14 @@ def speak():
             print(f"[TTS] Audio URL lỗi hoặc bị FPT delay quá lâu!")
             return jsonify({"error": "Audio fetch failed after 4s"}), 500
 
+        # ── Áp dụng Pitch Shifting để giọng trẻ con hơn ───────────────────────
+        try:
+            final_audio = apply_pitch_shift(audio_res.content, octaves=0.22)
+        except Exception:
+            final_audio = audio_res.content
+
         return send_file(
-            io.BytesIO(audio_res.content),
+            io.BytesIO(final_audio),
             mimetype="audio/mpeg",
             as_attachment=False,
         )
