@@ -217,29 +217,6 @@ class MiniAI(BehavioralMixin, PromptBuilderMixin, StreamHandlerMixin, MemoryHand
                     if content: parsed = parse_vbrain_response(content)
             self.current_vbrain = parsed
 
-            # --- THOUGHT CHAINING (Inner Monologue Continuation) ---
-            # Section 11: If monologue > 20 chars and random() < 0.07, call model a second time.
-            if random.random() < 0.07:
-                monologue = parsed.get("monologue", "")
-                if len(monologue) > 20:
-                    print(f"[Core] Thought Chaining triggered (len={len(monologue)}).")
-                    chain_messages = [
-                        {"role": "system", "content": THOUGHT_CHAIN_SYSTEM},
-                        {"role": "user", "content": f"[INNER MONOLOGUE]: {monologue}"}
-                    ]
-                    chain_content = self._call_model(chain_messages, temperature=0.5, max_tokens=150)
-                    if chain_content:
-                        chain_parsed = parse_vbrain_response(chain_content)
-                        second_monologue = chain_parsed.get("monologue", "")
-                        if second_monologue:
-                            # Prepend the second response's monologue to the original one
-                            parsed["monologue"] = f"{second_monologue}\n\n[Original]: {monologue}"
-                            # Refine the reply/emotion/action using the second response
-                            parsed["reply"] = chain_parsed.get("reply", parsed.get("reply"))
-                            parsed["emotion"] = chain_parsed.get("emotion", parsed.get("emotion"))
-                            parsed["action"] = chain_parsed.get("action", parsed.get("action"))
-                            print("[Core] Thought Chaining completed.")
-                            self.current_vbrain = parsed
         else:
             self.current_vbrain = {"monologue": "", "emotion": "neutral", "action": "NONE", "reply": "..."}
 

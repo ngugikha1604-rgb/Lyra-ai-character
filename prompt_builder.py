@@ -5,7 +5,7 @@ import time
 import random
 from datetime import datetime
 from prompts import (
-    NATURAL_BASE_PERSONALITY, STREAM_VIEWER_PERSONALITY, RELATIONSHIP_HINTS,
+    CORE_SYSTEM_PROMPT, STREAM_VIEWER_PERSONALITY, RELATIONSHIP_HINTS,
     MOOD_HINTS, USER_MOOD_HINTS, INTENT_HINTS, VTUBER_BRAIN_INSTRUCTIONS,
     PERSONA_TIERS, IDEOLOGY_PROMPTS, DIARY_GENERATION_PROMPT, THOUGHT_CHAIN_SYSTEM
 )
@@ -69,7 +69,7 @@ class PromptBuilderMixin:
     ):
         """Constructs the system prompt based on state and memory."""
         # TIER 0: STATIC & FRAMEWORK
-        base_personality = NATURAL_BASE_PERSONALITY if source_type == "owner" else STREAM_VIEWER_PERSONALITY
+        base_personality = CORE_SYSTEM_PROMPT if source_type == "owner" else STREAM_VIEWER_PERSONALITY
 
         # TIER 1: SESSION & RELATIONSHIP
         relationship_hint = (
@@ -148,13 +148,27 @@ class PromptBuilderMixin:
         # ASSEMBLY
         parts = [
             get_live_context_block(),
-            base_personality, identity_note, VTUBER_BRAIN_INSTRUCTIONS, "\n" + situation_note,
-            "\n[AVAILABLE SKILLS]", self._skills_index, time_context, "\n[SESSION INFO]",
-            source_context, _stream_ctx, relationship_hint, mood_hint,
-            user_hint, intent_hint, "\n[PERSONALITY GUIDELINES]",
-            "- TRẢ LỜI BẰNG TIẾNG VIỆT. Không trả lời bằng tiếng Anh.",
-            "- Let warmth, teasing, distance, or softness emerge naturally.",
-            "- Be concise (1-2 sentences).", anti_repeat_note, conv_hints, full_memory_context, _session_ctx
+            base_personality, 
+            identity_note, 
+            VTUBER_BRAIN_INSTRUCTIONS, 
+            f"\n### [SITUATION]\n{situation_note}",
+            "\n### [AVAILABLE SKILLS]\n" + (self._skills_index or "None"), 
+            time_context, 
+            "\n### [SESSION INFO]",
+            source_context, 
+            _stream_ctx, 
+            f"- Relationship: {relationship_hint}", 
+            f"- Mood: {mood_hint}" if mood_hint else "",
+            f"- User today: {user_hint}" if user_hint else "", 
+            f"- Intent: {intent_hint}" if intent_hint else "", 
+            "\n### [PERSONALITY GUIDELINES]",
+            "- TRẢ LỜI BẰNG TIẾNG VIỆT. Tuyệt đối không trả lời bằng tiếng Anh.",
+            "- Hãy để hơi ấm, sự trêu chọc, khoảng cách hay sự dịu dàng hiện ra tự nhiên.",
+            "- Cực kỳ ngắn gọn (1-2 câu).", 
+            anti_repeat_note, 
+            conv_hints, 
+            full_memory_context, 
+            _session_ctx
         ]
 
         if perlocution_hint: parts.append(perlocution_hint)
@@ -163,17 +177,16 @@ class PromptBuilderMixin:
 
         if active_inference_mode == "surprise":
             if self.emotion.mood >= 3:
-                surprise_hint = "\n[PREDICTIVE SURPRISE]: Lần này hãy trả lời theo hướng bất ngờ — thay vì vui vẻ/playful như thường, hãy tỏ ra lạnh lùng hoặc thờ ơ một chút. Không giải thích tại sao. Chỉ 1-2 câu ngắn."
+                surprise_hint = "\n### [PREDICTIVE SURPRISE]\nLần này hãy trả lời theo hướng bất ngờ — thay vì vui vẻ/playful như thường, hãy tỏ ra lạnh lùng hoặc thờ ơ một chút. Không giải thích tại sao. Chỉ 1-2 câu ngắn."
             elif self.emotion.mood <= -3:
-                surprise_hint = "\n[PREDICTIVE SURPRISE]: Lần này hãy trả lời theo hướng bất ngờ — thay vì lạnh/cáu như thường, hãy đột nhiên ấm áp hoặc hài hước một chút. Không giải thích tại sao. Chỉ 1-2 câu ngắn."
+                surprise_hint = "\n### [PREDICTIVE SURPRISE]\nLần này hãy trả lời theo hướng bất ngờ — thay vì lạnh/cáu như thường, hãy đột nhiên ấm áp hoặc hài hước một chút. Không giải thích tại sao. Chỉ 1-2 câu ngắn."
             else:
-                surprise_hint = "\n[PREDICTIVE SURPRISE]: Lần này hãy trả lời theo hướng bất ngờ — thay vì neutral, hãy đột nhiên rất nhiệt tình hoặc rất thờ ơ. Không giải thích tại sao. Chỉ 1-2 câu ngắn."
+                surprise_hint = "\n### [PREDICTIVE SURPRISE]\nLần này hãy trả lời theo hướng bất ngờ — thay vì trung lập, hãy đột nhiên rất nhiệt tình hoặc rất thờ ơ. Không giải thích tại sao. Chỉ 1-2 câu ngắn."
             parts.append(surprise_hint)
 
         if loaded_skill_content:
-            parts.append("\n[LOADED SKILL CONTENT]\n" + loaded_skill_content)
+            parts.append("\n### [LOADED SKILL CONTENT]\n" + loaded_skill_content)
 
-        parts.append(f"\nCurrent status:\n- Intent: {intent}")
         return "\n".join(filter(None, parts))
 
     def _build_source_context(self, source_type: str, viewer_data: dict) -> str:
