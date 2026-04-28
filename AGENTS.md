@@ -60,9 +60,26 @@ Lyra uses a structured, three-layer memory system inspired by human neurobiology
     - **Distillation**: Analyzes today's episodic buffer to detect recurring patterns.
     - **Integration**: Stable findings are migrated from L2/L3 to L1 (Semantic Memory).
     - **Personality Adaptation**: Updates behavioral indices (mood bias, affection rate) based on daily vibe.
-*   **Layered Retrieval**: Prevents context bloat by only pulling what's necessary.
-*   **Conflict Resolution**: Detects contradictions (e.g., changing likes) and updates facts while archiving historical changes to L3.
 *   **Automatic Consolidation**: Stale L1 items are moved or deleted to keep the database clean.
+
+---
+
+### 2a. 🧬 Inspired Cognitive Logic (Lightweight Implementation)
+
+Lyra incorporates high-level cognitive patterns from modern AI frameworks, implemented as native, lightweight Python logic to avoid library overhead:
+
+*   **Mem0-inspired Persistence**:
+    - **Logic**: Dynamic fact extraction and conflict resolution.
+    - **Lyra Implementation**: Uses `_detect_conflict` in `memory.py` with vector embeddings (Cosine Similarity > 0.82) to identify if a new user fact contradicts an old one. Old facts are marked `superseded=1` and archived, while the core L1 memory stays "clean" and updated.
+*   **LangGraph-inspired State Routing**:
+    - **Logic**: Cyclic graph-like execution and conditional edge routing.
+    - **Lyra Implementation**: The `chat()` method in `core.py` acts as a state controller. If the AI output contains `skill_needed`, the system "routes" the execution back to the model with new context (Skill Loop). The `ConversationStateDetector` manages transitions between 6 distinct states, acting as a lightweight state-persistence layer.
+*   **Cognee-inspired Semantic Layering**:
+    - **Logic**: Organizing unstructured data into hierarchical cognitive layers.
+    - **Lyra Implementation**: Implemented via the **Three-Layer Memory (L1/L2/L3)**. Instead of a flat RAG, Lyra uses a specialized `MemoryRanker` (Reranker logic) to pick the most salient items across layers, mimicking how human cognition prioritizes facts vs. recent events vs. deep episodes.
+*   **Hermes-inspired Reflection (Agentic Monologue)**:
+    - **Logic**: Mandatory internal chain-of-thought and self-correction.
+    - **Lyra Implementation**: Every response requires a `monologue` field. The **Thought Chaining** module (Section 11) takes this further by allowing the AI to "think twice" before replying, essentially an autonomous agentic reflection loop built directly into the conversation flow.
 
 ---
 
@@ -145,7 +162,8 @@ Flow:
 ### 7. Conversation Management
 
 * Stores last ~40 messages
-* Summarizes old messages automatically
+* Summarizes old messages automatically (standard summarization)
+* **Mega Summary Compression**: When standard summaries exceed 8 entries, a light model compresses them into a single "Mega Summary" (`is_mega=1`) to preserve multi-session context efficiently.
 * Keeps:
 
   * Recent context
@@ -300,6 +318,33 @@ Maps `lyra_ai.emotion.attention` → FPT TTS `speed` header:
 - attention >= 8 → `"1"` (fast)
 
 **Deferred** (needs Live2D model): micro-jitters, SSML break tags, breathing animation.
+
+---
+
+### 8d. 🧠 Autonomous Self-Evolving System (RLHF) ✅ Implemented
+
+A lightweight reinforcement learning mechanism that allows Lyra to "evolve" her speaking style based on real-time audience feedback. Files: `rl_feedback_loop.py`, `core.py`, `web.py`, `memory.py`.
+
+#### 1. Stream Feedback Loop (RL Tracker)
+Every time Lyra speaks on stream, a **15-second Reward Window** is opened.
+- All viewer messages during this window are captured as the "Environment's Reaction".
+- Observations are buffered in `rl_feedback_buffer.json`.
+
+#### 2. Reward Evaluation (The Evaluator)
+Once the window closes, the interaction is scored using the `LIGHT_MODEL` (`qwen2.5:0.5b`).
+- **Reward Metrics**: Sentiment (haha/khen/đỉnh), Engagement (chat velocity spikes), and Mirroring (viewers using Lyra's slang).
+- **Score Range**: -10.0 to +10.0.
+- **Guardrails**: Toxic chat or spam results in negative rewards and are filtered out.
+
+#### 3. Pattern Promotion (The Review Node)
+Triggered via `consolidate_post_stream()` during the `/stream/stop` sequence (CLS phase).
+- **Success Patterns**: Interactions with `reward >= 7.0` are promoted to Pinecone (L3 Memory) with `kind="rl_few_shot"`.
+- **Evolved Persona**: The top successful "vibes" of the day are distilled into a short instruction (e.g., *"Use more Southern slang to tease viewers"*) and saved to `live_context.json` constraints.
+
+#### 4. Retrieval & Reinforcement
+During future streams, the memory system retrieves these patterns:
+- **Weight Boost**: `rl_few_shot` items receive a **x4.0 weight boost** in the ranking module.
+- **Few-Shot Injection**: Successfully proven responses appear as `[Mẫu thành công]` hints in Lyra's prompt, encouraging her to repeat high-engagement behaviors.
 
 ---
 
@@ -473,6 +518,18 @@ Features:
 
 ---
 
+### 10a. 🔎 Heuristic Web Search (RAG) ✅ Implemented
+
+Lyra can proactively search the web to answer factual questions or get latest news. File: `model_utilities.py`.
+
+- **Heuristic Trigger**: `_should_search(user_input)` uses regex to detect question patterns (what/who/where/when/how) and keywords (tin tức, thời tiết, giá...).
+- **Privacy Guard**: Search is disabled if the input contains personal pronouns (I, me, my, tôi, mình) to avoid searching private info.
+- **Provider**: Uses `duckduckgo_search` (DDGS) for anonymous, tracker-free results.
+- **Injection**: Top 3 search results are formatted into a concise snippet and injected into `search_context` in the prompt.
+- **Constraint**: Only triggered if `SEARCH_ENABLED=True` in `config.py`.
+
+---
+
 ### 11. Thought Chaining
 
 - After generating a reply, if `monologue` is substantial (>20 chars) and `random() < 0.07` (7% chance), Lyra calls the model a second time.
@@ -501,6 +558,40 @@ Each situation uses a dedicated prompt instead of one shared system prompt:
 | `MEMORY_COMPRESSION_PROMPT` | Mega summary compression |
 
 `STREAM_VIEWER_PERSONALITY` makes Lyra aware she is streaming to an audience — not in a private 1-1 conversation. Keeps replies to 1 sentence max.
+
+---
+
+### 13. 🛠️ Skill System & Autodidactic Loop ✅ Implemented
+
+A meta-learning framework that allows Lyra to discover and refine "Skills" over time. Files: `skill_synthesizer.py`, `core.py`, `prompt_builder.py`.
+
+#### 1. Skill Synthesis (The Teacher Node)
+Triggered every **25 turns** during stream or private chat.
+- **Input**: The last 10 turns of conversation.
+- **Logic**: A light model (`SkillSynthesizer`) analyzes the interaction to detect unique behavior patterns or complex problem-solving methods demonstrated by Lyra.
+- **Output**: If a new skill is found, it generates a markdown file (e.g., `skills/sarcastic_teasing.md`) with instructions and examples.
+
+#### 2. Skill Indexing & Stats
+- All learned skills are registered in `skills/_index.md`.
+- `skill_stats.json` tracks `call_count` and `last_used` for each skill.
+- **Stale Removal**: Skills not used for 30 days and with <3 calls are automatically deleted ("forgotten") to keep the library clean.
+
+#### 3. Dynamic Execution
+- During standard chat, if Lyra's monologue indicates she needs help, she can set `skill_needed` in her JSON response.
+- **The Loop**: `core.py` detects the field → loads the requested `.md` file → re-calls the model with the skill's specific instructions.
+- This allows Lyra to "level up" her complexity on demand without bloating the base prompt.
+
+---
+
+### 14. 📣 Proactive Stream Monitoring (Silence Fill) ✅ Implemented
+
+A background thread in `web.py` ensures the stream never goes silent.
+
+- **Threshold**: 120 seconds of chat inactivity.
+- **Logic**: `_proactive_monitor` thread checks the gap since the last viewer message.
+- **Context Injection**: Loads the `current_focus` from `live_context.json` (e.g., "Genshin gameplay").
+- **Generation**: A light model generates a 1-sentence thought or question to re-engage the audience.
+- **SSE Broadcast**: The proactive message is sent directly to the frontend via SSE as a `proactive_question` type.
 
 ---
 
