@@ -22,6 +22,7 @@ from vbrain import parse_vbrain_response
 from conversation_state import ConversationStateDetector
 from skill_synthesizer import SkillSynthesizer
 from prompts import REWARD_HINTS, IDEOLOGY_PROMPTS
+from rl_feedback_loop import RLFeedbackLoop
 
 # Mixins
 from behavioral_logic import BehavioralMixin
@@ -60,6 +61,7 @@ class MiniAI(BehavioralMixin, PromptBuilderMixin, StreamHandlerMixin, MemoryHand
         self._thread_local = threading.local()
         
         self.memory.load()
+        self.rl_loop = RLFeedbackLoop(self)
         self.is_streaming = False
         self.stream_turn_counter = 0
         self._last_viewer_message_time = None
@@ -118,7 +120,7 @@ class MiniAI(BehavioralMixin, PromptBuilderMixin, StreamHandlerMixin, MemoryHand
         self.emotion.update(user_input, self.time_gap_hours, intent=intent)
 
         if source_type == "owner" and self.is_streaming:
-            maybe_refresh_from_emotion(self.emotion.get_state())
+            enqueue(PRIORITY_HIGH, maybe_refresh_from_emotion, self.emotion.get_state())
 
         _self_disclosure_hint = self._get_self_disclosure_hint(intent, _illocution_type) if source_type == "owner" else ""
 
@@ -138,7 +140,7 @@ class MiniAI(BehavioralMixin, PromptBuilderMixin, StreamHandlerMixin, MemoryHand
             self.emotion.affection = float((viewer_data or {}).get("affection", 10))
         
         self.conv_state.update(user_input, self.messages)
-        self.summarize_history()
+        enqueue(PRIORITY_NORMAL, self.summarize_history)
         
         _memory_future = self._executor.submit(self.memory.get_relevant_context, user_input, source_type != "owner")
         _needs_search, _search_query = self._should_search(user_input) if source_type == "owner" else (False, None)
@@ -237,17 +239,23 @@ class MiniAI(BehavioralMixin, PromptBuilderMixin, StreamHandlerMixin, MemoryHand
             
             self.last_message_time = self.current_time.isoformat()
             self.memory.memory["time_tracking"]["last_message_time"] = self.last_message_time
-            self.memory.save()
+            enqueue(PRIORITY_NORMAL, self.memory.save)
 
             if self.turn_counter % 25 == 0:
                 enqueue(PRIORITY_NORMAL, self.synthesizer.synthesize, self.messages[:], self)
 
-        return {
+        result_dict = {
             "reply": reply, "original_reply": original_reply, "monologue": self.current_vbrain.get("monologue", ""),
             "emotion": self.current_vbrain.get("emotion", "neutral"), "action": self.current_vbrain.get("action", "NONE"),
             "mood": self.emotion.mood, "affection": self.emotion.affection, "dominance": round(self.emotion.dominance, 2),
             "vad": self.emotion.get_vad(), "intent": intent, "illocution": _illocution_type, "conv_state": self.conv_state.state
         }
+
+        # Reinforcement Learning: Track action for reward if it's a stream chat
+        if source_type != "owner":
+            self.rl_loop.register_action(reply, intent, self.emotion.get_state())
+
+        return result_dict
 
     def emotion_from_state(self): return self.emotion.emotion_from_state()
 

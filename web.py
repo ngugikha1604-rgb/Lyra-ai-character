@@ -664,6 +664,7 @@ def stream_chat():
 
         # Giai đoạn 4: Thu thập chat pattern
         chat_analyzer.ingest(message, channel_id, platform, sender_id=sender_id)
+        lyra_ai.rl_loop.ingest_viewer_message(message, sender_name)
         style_hints = chat_analyzer.get_style_hints(channel_id, platform)
 
         # Inject stream context + style hints vào Lyra trước khi gọi chat()
@@ -685,12 +686,14 @@ def stream_chat():
         is_donor = data.get("is_donor", False)
         if is_donor:
             source_type_val = "donor"
+            amount = data.get("donate_amount", "")
             viewer_data = {
                 "viewer_name": sender_name,
                 "affection": regular["affection"] if regular else 40,
-                "amount": data.get("donate_amount", ""),
+                "amount": amount,
                 "gender": data.get("gender", "male"),
             }
+            record_donation(sender_name, amount)
         elif regular:
             source_type_val = "regular_viewer"
             viewer_data = {
@@ -699,6 +702,8 @@ def stream_chat():
                 "total_streams": regular["total_streams"],
                 "gender": data.get("gender", "male"),
             }
+            if viewer_info.get("message_count", 1) == 1:
+                record_regular_arrival(sender_name, regular["total_streams"], regular["affection"])
         else:
             source_type_val = "new_viewer"
             viewer_data = {
@@ -1349,9 +1354,10 @@ def stream_stop():
     # Clear L2 Session Memory khi stream kết thúc
     lyra_ai.memory.clear_session_memory()
 
-    # Viết nhật ký bí mật + Hợp nhất trí nhớ sau buổi stream (CLS)
+    # Viết nhật ký bí mật + Hợp nhất trí nhớ sau buổi stream (CLS) + RL Consolidation
     enqueue(PRIORITY_NORMAL, lyra_ai.write_diary_entry)
     enqueue(PRIORITY_NORMAL, lyra_ai.memory.consolidate_episodic_to_semantic)
+    enqueue(PRIORITY_NORMAL, lyra_ai.rl_loop.consolidate_post_stream)
 
     # Reset greeted set cho session tiếp theo
     with _greeted_lock:

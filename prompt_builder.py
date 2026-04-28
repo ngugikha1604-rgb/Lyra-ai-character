@@ -147,9 +147,10 @@ class PromptBuilderMixin:
 
         # ASSEMBLY
         parts = [
+            get_live_context_block(),
             base_personality, identity_note, VTUBER_BRAIN_INSTRUCTIONS, "\n" + situation_note,
             "\n[AVAILABLE SKILLS]", self._skills_index, time_context, "\n[SESSION INFO]",
-            source_context, _stream_ctx, get_live_context_block(), relationship_hint, mood_hint,
+            source_context, _stream_ctx, relationship_hint, mood_hint,
             user_hint, intent_hint, "\n[PERSONALITY GUIDELINES]",
             "- TRẢ LỜI BẰNG TIẾNG VIỆT. Không trả lời bằng tiếng Anh.",
             "- Let warmth, teasing, distance, or softness emerge naturally.",

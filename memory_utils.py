@@ -23,6 +23,7 @@ _LAYER_MAP = {
     "relational": LAYER_USER,
     "inside_joke": LAYER_USER,
     "episodic": LAYER_TEMPORAL,
+    "rl_few_shot": LAYER_TEMPORAL,
     "session": LAYER_SESSION,
 }
 
@@ -36,6 +37,7 @@ KIND_IMPORTANCE = {
     "dislike": 1.2,
     "topic": 1.1,
     "episodic": 1.0,
+    "rl_few_shot": 1.6,
     "session": 0.9
 }
 

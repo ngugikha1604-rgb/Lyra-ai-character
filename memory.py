@@ -323,8 +323,17 @@ class MemorySystem:
         
         query_vec = self._get_embedding(user_input)
         if query_vec is not None and self.pinecone._enabled:
-            for m in self.pinecone.query(query_vec.tolist(), top_k=6):
-                if m["score"] > 0.65: candidates.append({"kind": "temporal", "value": m["metadata"]["value"], "weight": m["score"] * 1.5})
+            for m in self.pinecone.query(query_vec.tolist(), top_k=8):
+                meta = m.get("metadata", {})
+                kind = meta.get("kind", "temporal")
+                val = meta.get("value", "")
+                score = m["score"]
+                
+                if kind == "rl_few_shot":
+                    # RL patterns get a massive boost to ensure they appear as few-shot examples
+                    candidates.append({"kind": "rl_pattern", "value": f"[Mẫu thành công]: {val}", "weight": score * 4.0})
+                elif score > 0.65:
+                    candidates.append({"kind": "temporal", "value": val, "weight": score * 1.5})
 
         context_items = self.ranker.rank(user_input, candidates, token_budget=550)
         if not context_items: return ""

@@ -65,6 +65,12 @@ class PineconeLayer:
         """Upserts a single vector into Pinecone."""
         host = self._get_host()
         if not host or not self._enabled: return
+        
+        # Ensure timestamp exists for temporal ranking
+        if "timestamp" not in metadata:
+            from datetime import datetime, timezone
+            metadata["timestamp"] = datetime.now(timezone.utc).isoformat()
+            
         try:
             requests.post(
                 f"https://{host}/vectors/upsert",
@@ -76,11 +82,12 @@ class PineconeLayer:
             print(f"[Pinecone] upsert error: {e}")
 
     def query(self, vector: list, top_k: int = 6, filter_meta: dict = None) -> list:
-        """Semantic search in Pinecone."""
+        """Semantic search in Pinecone with Zep-style temporal re-ranking."""
         host = self._get_host()
         if not host or not self._enabled: return []
         try:
-            body = {"vector": vector, "topK": top_k, "includeMetadata": True}
+            fetch_k = top_k * 3
+            body = {"vector": vector, "topK": fetch_k, "includeMetadata": True}
             if filter_meta: body["filter"] = filter_meta
             resp = requests.post(
                 f"https://{host}/query",
@@ -89,7 +96,31 @@ class PineconeLayer:
                 timeout=10
             )
             if resp.status_code == 200:
-                return [{"id": m["id"], "score": m["score"], "metadata": m.get("metadata", {})} for m in resp.json().get("matches", [])]
+                matches = [{"id": m["id"], "score": m["score"], "metadata": m.get("metadata", {})} for m in resp.json().get("matches", [])]
+                
+                # Zep-style temporal ranking
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                
+                for m in matches:
+                    ts_str = m["metadata"].get("timestamp")
+                    time_diff_hours = 24.0 * 30  # Default to 30 days old if no timestamp
+                    if ts_str:
+                        try:
+                            # Handle both timezone-aware and naive ISO formats
+                            ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                            if ts.tzinfo is None:
+                                ts = ts.replace(tzinfo=timezone.utc)
+                            time_diff_hours = max(0, (now - ts).total_seconds() / 3600.0)
+                        except Exception:
+                            pass
+                    
+                    # Freshness weight: Halves every 48 hours, floors at 0.15
+                    freshness = max(0.15, 1.0 / ((time_diff_hours / 48.0) + 1.0))
+                    m["score"] = m["score"] * freshness
+                
+                matches.sort(key=lambda x: x["score"], reverse=True)
+                return matches[:top_k]
         except Exception as e:
             print(f"[Pinecone] query error: {e}")
         return []
