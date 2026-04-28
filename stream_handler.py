@@ -1,3 +1,5 @@
+import json
+import re
 from prompts import (
     STREAM_ROLLING_SUMMARY_PROMPT, STREAM_EVENT_SYSTEM, 
     STREAM_GREETING_PROMPT, STREAM_FAREWELL_PROMPT, PROACTIVE_STREAM_PROMPT
@@ -99,3 +101,38 @@ class StreamHandlerMixin:
         except Exception as e:
             print(f"[Stream Event] generate error: {e}")
             return ""
+
+    def _generate_stream_plan(self):
+        """Generates a 3-5 item agenda for the current stream session."""
+        try:
+            from live_context import update_plan
+            
+            print("[Core] Generating dynamic stream plan...")
+            goals_str = ", ".join(STREAM_GOALS) if STREAM_GOALS else "chưa có"
+            
+            prompt = (
+                f"Bạn là Lyra. Hãy tạo một bản kế hoạch (Agenda) cho buổi stream hôm nay.\n"
+                f"Tiêu đề: {STREAM_TITLE or 'Không có'}\n"
+                f"Game: {STREAM_GAME or 'Không có'}\n"
+                f"Mục tiêu ban đầu: {goals_str}\n"
+                f"Ghi chú: {STREAM_NOTES or 'Không có'}\n\n"
+                f"Hãy tạo 3-5 mục tiêu nhỏ, cụ thể và 'nhập vai' (ví dụ: 'Trêu chủ nhân khi thua game', 'Hỏi thăm 3 bạn viewer mới').\n"
+                f"Trả về JSON: {{\"plan\": [\"mục tiêu 1\", \"mục tiêu 2\"]}}"
+            )
+            
+            raw = self._call_light_model([
+                {"role": "system", "content": "Bạn là planner cho Lyra. Chỉ trả về JSON."},
+                {"role": "user", "content": prompt}
+            ], temperature=0.7, max_tokens=250)
+            
+            if raw:
+                match = re.search(r'\{.*\}', raw, re.DOTALL)
+                if match:
+                    data = json.loads(match.group())
+                    plan_texts = data.get("plan", [])
+                    if plan_texts:
+                        structured_plan = [{"goal": text, "status": "pending"} for text in plan_texts]
+                        update_plan(structured_plan)
+                        print(f"[Plan] Stream plan generated: {len(structured_plan)} items.")
+        except Exception as e:
+            print(f"[Core] generate_stream_plan error: {e}")

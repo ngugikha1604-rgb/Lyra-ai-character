@@ -21,6 +21,8 @@ TRANSIENT_FIELD_TTL = {
     "priority_mentions": 10,
     "chat_vibe": 10,
     "energy_label": 15,
+    "current_insights": 15,
+    "stream_plan": 60,
 }
 
 # Lock for thread-safe file operations
@@ -78,6 +80,8 @@ def get_default_context() -> Dict[str, Any]:
         "chat_vibe": "",
         "priority_mentions": [],
         "constraints": [],
+        "current_insights": [],
+        "stream_plan": [],
         "expires_after_minutes": DEFAULT_CONTEXT_TTL_MINUTES,
     }
 
@@ -207,8 +211,23 @@ def get_live_context_block(max_lines: int = 6) -> str:
     if constraints:
         lines.append(f"Constraints: {'; '.join(constraints)}")
 
+    # Current insights (from Reflection Loop)
+    insights = data.get("current_insights", [])
+    if insights:
+        lines.append("[INSIGHTS]")
+        for insight in insights[:3]:
+            lines.append(f"• {insight}")
+    
+    # Stream plan (from Dynamic Planning)
+    plan = data.get("stream_plan", [])
+    if plan:
+        lines.append("[STREAM PLAN]")
+        pending = [p for p in plan if p.get("status") == "pending"]
+        for p in pending[:3]:
+            lines.append(f"□ {p['goal']}")
+
     lines.append("[/LIVE_CONTEXT]")
-    block = "\n".join(lines[:max_lines])
+    block = "\n".join(lines[:max_lines + 4]) # Allow a bit more for new sections
     return block
 
 
@@ -283,3 +302,11 @@ def clear_constraint(constraint: str) -> None:
     if constraint in constraints:
         constraints.remove(constraint)
         update_field("constraints", constraints)
+
+def update_insights(insights: list[str]) -> None:
+    """Update current mid-session insights."""
+    update_field("current_insights", insights, ttl_minutes=15)
+
+def update_plan(plan_items: list[dict]) -> None:
+    """Update dynamic stream plan."""
+    update_field("stream_plan", plan_items, ttl_minutes=60)

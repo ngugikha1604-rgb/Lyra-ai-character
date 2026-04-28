@@ -1258,6 +1258,7 @@ def stream_start():
         viewer_tracker.clear_session_stats(platform, channel_id)
         chat_analyzer.reset_session_patterns(channel_id, platform)
         lyra_ai.prepare_for_stream()
+        enqueue(PRIORITY_NORMAL, lyra_ai._generate_stream_plan)
 
         # ── Live Context: mark stream active with focus ─────────────────────
         focus = STREAM_TITLE or STREAM_GAME or "streaming"

@@ -253,7 +253,7 @@ class MemorySystem:
         if self._session_last_activity_at and datetime.now() - datetime.fromisoformat(self._session_last_activity_at) >= timedelta(hours=idle_hours):
             self.clear_session_memory()
 
-    def add_item(self, kind, value, weight=1.0, limit=12):
+    def add_item(self, kind, value, weight=1.0, limit=12, importance=None):
         """Adds a fact or episode to memory with conflict detection."""
         self._is_dirty = True
         text = str(value).strip()
@@ -264,8 +264,8 @@ class MemorySystem:
             conn = self._get_db()
             if not conn: return
             c = conn.cursor()
-            saliency = self.estimate_saliency(kind, text)
-            importance = KIND_IMPORTANCE.get(kind, 1.0)
+            saliency = importance if importance is not None else self.estimate_saliency(kind, text)
+            importance_val = KIND_IMPORTANCE.get(kind, 1.0)
             now = datetime.now().isoformat()
 
             with self.db_lock:
@@ -274,7 +274,7 @@ class MemorySystem:
                     if conflict: self._resolve_conflict(kind, conflict, text, c)
                 
                 emb_blob = self._embed_to_blob(text)
-                c.execute("INSERT INTO memory_items (kind,value,layer,weight,saliency,importance,source_turn,last_used_at,embedding) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(kind,value) DO UPDATE SET superseded=0, last_used_at=excluded.last_used_at, embedding=excluded.embedding", (kind, text, layer, weight, saliency, importance, self.turn_counter, now, emb_blob))
+                c.execute("INSERT INTO memory_items (kind,value,layer,weight,saliency,importance,source_turn,last_used_at,embedding) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(kind,value) DO UPDATE SET superseded=0, last_used_at=excluded.last_used_at, embedding=excluded.embedding", (kind, text, layer, weight, saliency, importance_val, self.turn_counter, now, emb_blob))
                 conn.commit()
                 
                 if layer == LAYER_TEMPORAL and self.pinecone._enabled:
@@ -350,7 +350,42 @@ class MemorySystem:
                 conn.execute("UPDATE memory_items SET last_used_at=?, access_count=MIN(access_count+1,100) WHERE kind=? AND value=?", (now, kind, value))
             conn.commit()
 
+    def _llm_importance_score(self, items: list[dict]) -> list[int]:
+        """Batch-score items (1-10) using light model."""
+        if not items: return []
+        from config import LIGHT_MODEL, LIGHT_BASE_URL
+        
+        prompt = (
+            "Rank how important each memory item is for an AI Streamer's long-term memory (1-10, 10 is critical).\n"
+            "Return ONLY a comma-separated list of numbers.\n"
+            "Items:\n"
+        )
+        for i, item in enumerate(items):
+            prompt += f"{i+1}. [{item.get('kind', 'fact')}]: {item.get('value', '')[:120]}\n"
+
+        try:
+            resp = requests.post(
+                LIGHT_BASE_URL,
+                json={
+                    "model": LIGHT_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "options": {"temperature": 0.1, "num_predict": 30},
+                    "stream": False
+                },
+                timeout=10
+            )
+            if resp.status_code == 200:
+                content = resp.json().get("message", {}).get("content", "").strip()
+                scores = [int(s.strip()) for s in re.findall(r"\b\d+\b", content)]
+                if len(scores) < len(items):
+                    scores.extend([self.estimate_saliency(it.get('kind'), it.get('value')) for it in items[len(scores):]])
+                return [max(1, min(10, s)) for s in scores[:len(items)]]
+        except Exception:
+            pass
+        return [self.estimate_saliency(it.get('kind'), it.get('value')) for it in items]
+
     def estimate_saliency(self, kind, value):
+        """Heuristic-based saliency (fallback)."""
         score = {"goal": 5, "relational": 5, "episodic": 3}.get(kind, 2)
         if any(w in str(value).lower() for w in ["love", "hate", "important", "stress", "fail", "proud"]): score += 3
         return min(10, score)
@@ -363,11 +398,60 @@ class MemorySystem:
             return random.choice(res)[0] if res else ""
 
     def consolidate(self):
+        """
+        Enhanced Forgetting Mechanism (Semantic & Episodic Decay).
+        Deletes stale, low-value facts and old superseded records from SQLite.
+        """
         conn = self._get_db()
         if not conn: return
-        with self.db_lock:
-            conn.execute("DELETE FROM memory_items WHERE layer=? AND access_count=0 AND (? - source_turn) > 100 AND saliency < 7", (LAYER_USER, self.turn_counter))
-            conn.commit()
+        
+        now = datetime.now()
+        fourteen_days_ago = (now - timedelta(days=14)).isoformat()
+        thirty_days_ago = (now - timedelta(days=30)).isoformat()
+        
+        try:
+            with self.db_lock:
+                # 1. Delete "junk" items (access_count=0 and old)
+                conn.execute(
+                    "DELETE FROM memory_items WHERE access_count=0 AND (? - source_turn) > 100 AND saliency < 7", 
+                    (self.turn_counter,)
+                )
+                
+                # 2. Forget stale L1 facts (Semantic Forgetting)
+                # If not accessed in 14 days AND access_count < 3 AND saliency < 8
+                conn.execute(
+                    "DELETE FROM memory_items WHERE superseded=0 AND layer=? "
+                    "AND last_used_at < ? AND access_count < 3 AND saliency < 8",
+                    (LAYER_USER, fourteen_days_ago)
+                )
+                
+                # 3. Purge old superseded items (Database Cleanup)
+                # They are already in Pinecone (L3), so we don't need them in SQLite L1 forever
+                conn.execute(
+                    "DELETE FROM memory_items WHERE superseded=1 AND last_used_at < ?",
+                    (thirty_days_ago,)
+                )
+                
+                conn.commit()
+                print("[Memory] Consolidation completed: stale facts and old archives purged.")
+        except Exception as e:
+            print(f"[Memory] Consolidation error: {e}")
+
+    def consolidate_episodic_to_semantic(self):
+        """
+        Giai đoạn củng cố ký ức (CLS): Chuyển đổi các sự kiện ngắn hạn (L2/L3) 
+        thành các đặc điểm lâu dài (L1) và thực hiện dọn dẹp (Forgetting).
+        """
+        print("[Memory] Running post-session consolidation and forgetting...")
+        # 1. Thực hiện dọn dẹp các fact cũ/yếu (Cơ chế quên)
+        self.consolidate()
+        
+        # 2. Dọn dẹp cache để giải phóng tài nguyên
+        self._basic_context_cache = None
+        self._rag_context_cache = None
+        self._relevant_items_cache = None
+        
+        print("[Memory] Consolidation and cleaning successful.")
 
     def _get_in_memory_fallback(self):
         class Fallback:

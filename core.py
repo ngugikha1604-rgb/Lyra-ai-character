@@ -11,7 +11,7 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 # Internal Imports
 from config import *
 from live_context import maybe_refresh_from_emotion
-from background_worker import enqueue, PRIORITY_CRITICAL, PRIORITY_HIGH
+from background_worker import enqueue, PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_NORMAL
 from time_utils import (
     get_vietnam_time, get_time_period, calculate_time_gap, 
     should_send_greeting, get_time_context
@@ -132,6 +132,10 @@ class MiniAI(BehavioralMixin, PromptBuilderMixin, StreamHandlerMixin, MemoryHand
                 self.memory.add_session_item(f"{viewer_name} nhắn: {user_input[:80]}", kind="session")
             if self.stream_turn_counter % STREAM_SUMMARY_THRESHOLD == 0:
                 enqueue(PRIORITY_HIGH, self.update_stream_summary)
+
+        # Reflection Loop (Generative Agents - Feature 2)
+        if self.turn_counter % REFLECTION_INTERVAL == 0:
+            enqueue(PRIORITY_NORMAL, self._reflect_on_session)
 
         # Context Gathering (Parallel)
         _original_affection = self.emotion.affection
@@ -310,6 +314,68 @@ class MiniAI(BehavioralMixin, PromptBuilderMixin, StreamHandlerMixin, MemoryHand
             with open(stats_path, "w", encoding="utf-8") as f:
                 json.dump(stats, f, indent=2)
         except: pass
+
+    def _reflect_on_session(self):
+        """Mid-session reflection loop to generate high-level insights."""
+        try:
+            print("[Core] Running reflection loop...")
+            # 1. Gather context
+            recent_convo = "\n".join([f"{'User' if m['role'] == 'user' else 'Lyra'}: {m['content']}" for m in self.messages[-20:]])
+            session_items = "\n".join([f"- {i['value']}" for i in self.memory._session_items[-10:]])
+            emotion_state = self.emotion.describe_internal_state()
+            
+            prompt = (
+                f"Bạn là tiềm thức của Lyra. Hãy tự suy ngẫm về diễn biến gần đây.\n\n"
+                f"Lịch sử chat gần đây:\n{recent_convo}\n\n"
+                f"Diễn biến session (L2):\n{session_items}\n\n"
+                f"Trạng thái cảm xúc: {emotion_state}\n\n"
+                f"Nhiệm vụ: Tóm tắt 2-3 'Key Insights' (thấu hiểu) về tình hình hiện tại (ví dụ: User đang bận, Viewer thích đùa nhây, Lyra đang mệt). "
+                f"Trả về JSON cực ngắn: {{\"insights\": [\"insight 1\", \"insight 2\"]}}"
+            )
+            
+            raw = self._call_light_model([
+                {"role": "system", "content": "Bạn là subconscious của Lyra. Chỉ trả về JSON."},
+                {"role": "user", "content": prompt}
+            ], temperature=0.3, max_tokens=150)
+            
+            if raw:
+                match = re.search(r'\{.*\}', raw, re.DOTALL)
+                if match:
+                    data = json.loads(match.group())
+                    insights = data.get("insights", [])
+                    if insights:
+                        from live_context import update_insights
+                        update_insights(insights)
+                        print(f"[Reflection] New insights: {insights}")
+                        
+                        # Feature 3: Auto-update plan if exists
+                        self._update_plan_status(insights)
+
+        except Exception as e:
+            print(f"[Core] Reflection loop error: {e}")
+
+    def _update_plan_status(self, insights):
+        """Updates the status of plan items based on recent insights."""
+        from live_context import load_live_context, update_plan
+        lc = load_live_context()
+        plan = lc.get("stream_plan", [])
+        if not plan: return
+        
+        updated = False
+        insight_text = " ".join(insights).lower()
+        
+        # Simple heuristic to mark goals as done based on insights
+        for item in plan:
+            if item["status"] == "pending":
+                # If any insight word matches plan goal keywords
+                keywords = re.findall(r"\w{4,}", item["goal"].lower())
+                if any(kw in insight_text for kw in keywords if kw not in ("chủ", "nhân", "lyra", "người", "khán", "giả")):
+                    item["status"] = "done"
+                    updated = True
+                    print(f"[Plan] Goal marked as done: {item['goal']}")
+        
+        if updated:
+            update_plan(plan)
 
     def get_proactive_message(self):
         """Generates a proactive message based on time and situation."""

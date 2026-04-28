@@ -69,15 +69,26 @@ class MemoryHandlerMixin:
             facts = json.loads(raw)
             profile = self.memory.memory["user_profile"]
 
+            # Collect all items to batch-score importance
+            items_to_add = []
             if source_type == "owner":
                 for k in ["name", "location", "occupation"]:
                     if facts.get(k) and not profile.get(k): profile[k] = facts[k]
                 if facts.get("age") and not profile.get("age_range"): profile["age_range"] = facts["age"]
-                for item in facts.get("relational", []): self.memory.add_item("relational", item, weight=1.3)
+                for item in facts.get("relational", []):
+                    items_to_add.append({"kind": "relational", "value": item, "weight": 1.3})
 
             for kind, key in [("like", "likes"), ("dislike", "dislikes"), ("goal", "goals"), ("topic", "topics"), ("inside_joke", "inside_jokes")]:
                 weight = 1.4 if kind == "goal" else 1.5 if kind == "inside_joke" else 1.0
-                for item in facts.get(key, []): self.memory.add_item(kind, item, weight=weight)
+                for item in facts.get(key, []):
+                    items_to_add.append({"kind": kind, "value": item, "weight": weight})
+
+            # Batch score importance
+            if items_to_add:
+                scores = self.memory._llm_importance_score(items_to_add)
+                for i, item in enumerate(items_to_add):
+                    saliency = scores[i] if i < len(scores) else None
+                    self.memory.add_item(item["kind"], item["value"], weight=item["weight"], importance=saliency)
 
             if facts.get("mood_today"): self._user_mood_today = facts["mood_today"]
             self.memory.memory_buffer.clear()

@@ -80,6 +80,12 @@ Lyra incorporates high-level cognitive patterns from modern AI frameworks, imple
 *   **Hermes-inspired Reflection (Agentic Monologue)**:
     - **Logic**: Mandatory internal chain-of-thought and self-correction.
     - **Lyra Implementation**: Every response requires a `monologue` field. The **Thought Chaining** module (Section 11) takes this further by allowing the AI to "think twice" before replying, essentially an autonomous agentic reflection loop built directly into the conversation flow.
+*   **Generative Agents-inspired Memory Stream & Planning**:
+    - **Logic**: Importance-based memory scoring, periodic reflection loops, and dynamic objective planning (Park et al., 2023).
+    - **Lyra Implementation**:
+        1. **Importance Score**: New memories are batch-scored (1-10) by a light model. High-importance items boost their retrieval weight (`weight * (1 + saliency/10)`).
+        2. **Reflection Loop**: Every 20 turns, Lyra triggers a background "reflection" task to synthesize 2-3 **Key Insights** (stored in `live_context.json`) about the current state of the session.
+        3. **Dynamic Planning**: At stream start, Lyra generates a 3-5 item **Agenda**. This plan is auto-updated (marked as `done`) based on insights generated during the Reflection Loop.
 
 ---
 
@@ -875,6 +881,37 @@ This project is built around:
 * Prefer heuristics + batching
 
 ---
+
+---
+
+### 15. 🧠 Generative Agents Cognitive Upgrade (Feature Set) ✅ Implemented
+
+Bộ tính năng nâng cấp khả năng nhận thức và lập kế hoạch dựa trên nghiên cứu **Generative Agents (Park et al., 2023)**.
+
+#### A. Memory Stream with Importance Score
+- **Mục tiêu**: Lyra ưu tiên những thông tin quan trọng thay vì nhớ máy móc.
+- **Triển khai**: 
+    - Khi buffer bộ nhớ được flush, hệ thống gọi `_llm_importance_score` (Batch call) để chấm điểm 1-10 cho tất cả items.
+    - Điểm này lưu vào cột `saliency` trong DB.
+    - `MemoryRanker` sử dụng công thức `weight * (1 + saliency/10)` để đẩy các ký ức quan trọng lên đầu context window.
+- **Tệp liên quan**: `memory.py`, `memory_handler.py`.
+
+#### B. Reflection Loop (Vòng lặp Suy ngẫm)
+- **Mục tiêu**: Tổng hợp bối cảnh hội thoại thành các "Thấu hiểu" (Insights) cấp cao.
+- **Triển khai**:
+    - Trigger mỗi **20 tin nhắn** (`REFLECTION_INTERVAL`).
+    - Phân tích 20 messages gần nhất + emotion state + session items.
+    - Sinh ra 2-3 insights (ví dụ: "User đang stress vì công việc", "Viewer thích nghe Lyra hát").
+    - Lưu vào `live_context.json` (TTL 15m) và inject vào prompt qua block `[INSIGHTS]`.
+- **Tệp liên quan**: `core.py`, `live_context.py`.
+
+#### C. Dynamic Planning (Kế hoạch Động)
+- **Mục tiêu**: Tạo Agenda cho stream và tự động cập nhật tiến độ.
+- **Triển khai**:
+    - **Generate**: Khi stream start, Lyra gen 3-5 mục tiêu cụ thể (Agenda).
+    - **Update**: Sau mỗi Reflection Loop, hệ thống dùng Insights mới để đối soát và đánh dấu `done` cho các mục tiêu đã đạt được.
+    - **Visibility**: Chỉ hiển thị các mục tiêu `pending` trong prompt qua block `[STREAM PLAN]`.
+- **Tệp liên quan**: `stream_handler.py`, `web.py`, `core.py`.
 
 ## 📌 Summary for AI Agents
 
