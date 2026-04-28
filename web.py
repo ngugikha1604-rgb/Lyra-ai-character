@@ -23,6 +23,8 @@ import time
 import requests
 import pytz
 from pydub import AudioSegment
+import sounddevice as sd
+import numpy as np
 from memory import DB_PATH, DB_LOCK
 from config import (
     ELEVENLABS_API_KEY,
@@ -393,6 +395,32 @@ def apply_pitch_shift(audio_bytes, octaves=0.22):
         return audio_bytes
 
 
+def play_to_cable(audio_bytes, device_id=15):
+    """
+    Phát audio trực tiếp ra thiết bị VB Cable (ID 15) để OBS bắt được.
+    """
+    try:
+        # Load audio từ bytes
+        audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
+        
+        # Chuyển đổi AudioSegment sang numpy array
+        samples = np.array(audio.get_array_of_samples())
+        
+        # Xử lý nếu là Stereo
+        if audio.channels == 2:
+            samples = samples.reshape((-1, 2))
+            
+        # Chuẩn hóa về float32 [-1.0, 1.0] để sounddevice phát chuẩn
+        samples = samples.astype(np.float32) / (2**15)
+        
+        # Phát ra thiết bị chỉ định
+        sd.play(samples, samplerate=audio.frame_rate, device=device_id)
+        # sd.play không chặn luồng (non-blocking), âm thanh sẽ tự phát ở background
+        
+    except Exception as e:
+        print(f"[AudioPlayback] Lỗi khi phát ra VB Cable: {e}")
+
+
 @limiter.limit("20 per minute")
 @app.route("/speak", methods=["POST"])
 def speak():
@@ -465,6 +493,8 @@ def speak():
         # ── Áp dụng Pitch Shifting để giọng trẻ con hơn ───────────────────────
         try:
             final_audio = apply_pitch_shift(audio_res.content, octaves=0.22)
+            # Phát ra VB Cable
+            play_to_cable(final_audio, device_id=15)
         except Exception:
             final_audio = audio_res.content
 

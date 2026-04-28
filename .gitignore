@@ -58,3 +58,6 @@ source_art/
 
 #Vibe coding
 /.vscode
+
+#Check Devices
+check_devices.py
