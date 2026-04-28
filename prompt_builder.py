@@ -7,7 +7,8 @@ from datetime import datetime
 from prompts import (
     CORE_SYSTEM_PROMPT, STREAM_VIEWER_PERSONALITY, RELATIONSHIP_HINTS,
     MOOD_HINTS, USER_MOOD_HINTS, INTENT_HINTS, VTUBER_BRAIN_INSTRUCTIONS,
-    PERSONA_TIERS, IDEOLOGY_PROMPTS, DIARY_GENERATION_PROMPT, THOUGHT_CHAIN_SYSTEM
+    PERSONA_TIERS, IDEOLOGY_PROMPTS, DIARY_GENERATION_PROMPT, THOUGHT_CHAIN_SYSTEM,
+    UNDERSTANDING_HINTS
 )
 from time_utils import get_time_context, get_weekend_context
 from live_context import get_live_context_block
@@ -151,6 +152,7 @@ class PromptBuilderMixin:
             base_personality, 
             identity_note, 
             VTUBER_BRAIN_INSTRUCTIONS, 
+            UNDERSTANDING_HINTS,
             f"\n### [SITUATION]\n{situation_note}",
             "\n### [AVAILABLE SKILLS]\n" + (self._skills_index or "None"), 
             time_context, 
