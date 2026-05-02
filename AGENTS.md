@@ -341,7 +341,7 @@ Maps `lyra_ai.emotion.attention` → FPT TTS `speed` header:
 - attention 5-7 → `"0"` (bình thường)
 - attention >= 8 → `"1"` (nhanh)
 
-**Deferred** (needs Live2D model): micro-jitters, SSML break tags, breathing animation.
+**Deferred** (FPT TTS không hỗ trợ SSML): SSML break tags vẫn chưa khả thi với provider hiện tại.
 
 ---
 

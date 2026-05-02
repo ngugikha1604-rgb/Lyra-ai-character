@@ -186,32 +186,56 @@ class VTSController:
             print(f"[VTS] Lỗi cập nhật parameter {name}: {e}")
 
     async def _idle_loop(self):
-        """Loop chạy ngầm tạo chuyển động lắc lư và chớp mắt khi rảnh rỗi"""
+        """Loop chạy ngầm tạo chuyển động idle tự nhiên khi rảnh rỗi.
+
+        3 lớp chuyển động:
+          1. Swaying     — lắc lư thân/đầu nhịp nhàng qua sin wave
+          2. Breathing   — ParamBreath nhịp thở chậm (~0.25 Hz)
+          3. Micro-jitter — noise ngẫu nhiên nhỏ trên đầu/mắt để tránh cứng đờ
+          4. Random Blink — chớp mắt 3% mỗi 0.1s
+        """
         while self.is_connected:
             await asyncio.sleep(0.1)
             if self.vts is None:
                 continue
-            
+
             # Idle check: nếu không có cập nhật trong 5s, bắt đầu chuyển động idle
             if time.time() - self.last_activity_time > 5.0:
                 try:
                     params = []
-                    
-                    # 1. Swaying (đung đưa nhẹ)
-                    # Dùng hàm sin theo thời gian để tạo chuyển động nhịp nhàng
                     t = time.time()
-                    sway = math.sin(t * 1.5) * 2.0  # Lắc từ -2 đến +2 độ
+
+                    # ── 1. Swaying (đung đưa nhẹ) ────────────────────────────
+                    # sin(t * 1.5) → ~0.24 Hz, biên độ ±2 độ
+                    sway = math.sin(t * 1.5) * 2.0
                     params.append(("ParamBodyAngleX", sway))
                     params.append(("ParamAngleZ", sway * 1.5))
-                    
-                    # 2. Random Blink (chớp mắt ngẫu nhiên)
-                    # Xác suất nhỏ để nhắm mắt, giữ nhắm mắt trong thời gian rất ngắn (0.1s do loop delay)
+
+                    # ── 2. Breathing animation ───────────────────────────────
+                    # sin(t * 1.57) → ~0.25 Hz (1 nhịp thở / 4 giây)
+                    # ParamBreath range: 0.0 → 1.0
+                    breath = (math.sin(t * 1.57) + 1.0) / 2.0  # normalize 0→1
+                    params.append(("ParamBreath", breath))
+
+                    # ── 3. Micro-jitters ─────────────────────────────────────
+                    # Noise ngẫu nhiên biên độ rất nhỏ — tránh avatar cứng đờ
+                    # Chỉ apply khi đang idle (không override VAD params đang active)
+                    jitter_head_x = random.gauss(0, 0.15)   # ParamAngleX ±0.15
+                    jitter_head_y = random.gauss(0, 0.10)   # ParamAngleY ±0.10
+                    jitter_brow   = random.gauss(0, 0.03)   # lông mày rung nhẹ
+                    params.append(("ParamAngleX", jitter_head_x))
+                    params.append(("ParamAngleY", jitter_head_y))
+                    params.append(("ParamBrowLY", jitter_brow))
+                    params.append(("ParamBrowRY", jitter_brow))
+
+                    # ── 4. Random Blink ──────────────────────────────────────
+                    # 3% mỗi 0.1s → trung bình chớp mắt ~1 lần / 3.3 giây
                     eye_val = 1.0
-                    if random.random() < 0.03: 
+                    if random.random() < 0.03:
                         eye_val = 0.0
                     params.append(("ParamEyeLOpen", eye_val))
                     params.append(("ParamEyeROpen", eye_val))
-                    
+
                     for name, value in params:
                         req = self.vts.vts_request.requestSetParameterValue(name, value)
                         await self.vts.request(req)
