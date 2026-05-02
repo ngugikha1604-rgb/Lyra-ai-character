@@ -263,9 +263,6 @@ class MiniAI(
         self.memory.memory["time_tracking"]["last_message_time"] = self.last_message_time
         enqueue(PRIORITY_NORMAL, self.memory.save)
 
-        if self.turn_counter % 25 == 0:
-            enqueue(PRIORITY_NORMAL, self.synthesizer.synthesize, self.messages[:], self)
-
     def _build_chat_result(self, reply, original_reply, intent, illocution):
         return {
             "reply": reply,
@@ -349,7 +346,7 @@ class MiniAI(
 
         result_dict = self._build_chat_result(reply, original_reply, intent, illocution)
         if source_type != "owner":
-            self.rl_loop.register_action(reply, intent, self.emotion.get_state())
+            self.rl_loop.register_action(user_input, reply, intent, self.emotion.get_state())
 
         return result_dict
 

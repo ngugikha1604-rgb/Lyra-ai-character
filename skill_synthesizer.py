@@ -26,6 +26,63 @@ class SkillSynthesizer:
         self.index_path = os.path.join(skills_dir, "_index.md")
         self.stats_path = os.path.join(skills_dir, "skill_stats.json")
 
+    def _parse_skill_response(self, resp):
+        """Extract and normalize a skill JSON object from model output."""
+        if not resp or resp.strip() == "{}":
+            return None
+
+        match = re.search(r"\{.*\}", resp, re.DOTALL)
+        if not match:
+            return None
+
+        skill_data = json.loads(match.group())
+        if not isinstance(skill_data, dict):
+            return None
+
+        raw_name = str(skill_data.get("skill_name", "")).strip().lower()
+        safe_name = re.sub(r"[^a-z0-9_]+", "_", raw_name).strip("_")
+        content = str(skill_data.get("content_md", "")).strip()
+        if not safe_name or not content:
+            return None
+
+        description = str(skill_data.get("description", "Kỹ năng tự học từ phản ứng tích cực của viewer")).strip()
+        return {
+            "skill_name": safe_name,
+            "description": description or "Kỹ năng tự học từ phản ứng tích cực của viewer",
+            "content_md": content,
+        }
+
+    def synthesize_from_rl(self, user_input, lyra_reply, reaction_text, core_engine):
+        """
+        Synthesizes a new behavioral skill based on high-reward stream interactions.
+        """
+        try:
+            print("[Synthesizer] Analyzing high-reward interaction for new skill...")
+            prompt = (
+                f"Viewer asked: \"{user_input}\"\n"
+                f"Lyra responded: \"{lyra_reply}\"\n"
+                f"Audience reaction (very positive): \"{reaction_text}\"\n\n"
+                f"What specific conversational 'Skill' or 'Behavior Pattern' did Lyra use here to get such a positive reaction? "
+                f"Extract this as a repeatable skill."
+            )
+            
+            resp = core_engine._call_light_model([
+                {"role": "system", "content": SKILL_SYNTHESIZE_PROMPT},
+                {"role": "user", "content": prompt}
+            ])
+
+            skill_data = self._parse_skill_response(resp)
+            if not skill_data:
+                return None
+
+            learned_name = self.save_skill(skill_data)
+            self.cleanup_stale_skills()
+            return learned_name
+        except Exception as e:
+            print(f"[Synthesizer] RL Synthesize Error: {e}")
+            return None
+
+
     def synthesize(self, conversation_history, core_engine):
         """
         Gần giống như memory extraction nhưng tập trung vào 'cách cư xử' hoặc 'kỹ năng xử lý'
@@ -44,17 +101,8 @@ class SkillSynthesizer:
                 {"role": "user", "content": f"Analyze this conversation for new skills:\n\n{snippet_text}"}
             ])
 
-            if not resp or resp.strip() == "{}":
-                return None
-
-            # Parse JSON result
-            # Đôi khi model trả về text kèm JSON, cần dùng regex
-            match = re.search(r"\{.*\}", resp, re.DOTALL)
-            if not match:
-                return None
-            
-            skill_data = json.loads(match.group())
-            if not skill_data.get("skill_name") or not skill_data.get("content_md"):
+            skill_data = self._parse_skill_response(resp)
+            if not skill_data:
                 return None
 
             learned_name = self.save_skill(skill_data)
@@ -71,7 +119,8 @@ class SkillSynthesizer:
     def save_skill(self, skill_data):
         name = skill_data["skill_name"]
         content = skill_data["content_md"]
-        description = skill_data["description"]
+        description = skill_data.get("description", "Kỹ năng tự học")
+        os.makedirs(self.skills_dir, exist_ok=True)
 
         # 1. Lưu file .md
         file_path = os.path.join(self.skills_dir, f"{name}.md")
@@ -85,6 +134,7 @@ class SkillSynthesizer:
 
         # 2. Cập nhật _index.md
         self.update_index(name, description)
+        self._register_skill_stats(name, description)
         
         print(f"[Synthesizer] New skill learned: {name}")
         return name
@@ -95,6 +145,26 @@ class SkillSynthesizer:
         
         with open(self.index_path, "a", encoding="utf-8") as f:
             f.write(f"| `{name}` | {description} |\n")
+
+    def _register_skill_stats(self, name, description):
+        stats = {}
+        if os.path.exists(self.stats_path):
+            try:
+                with open(self.stats_path, "r", encoding="utf-8") as f:
+                    stats = json.load(f)
+            except Exception:
+                stats = {}
+
+        now = time.time()
+        stats[name] = {
+            **stats.get(name, {}),
+            "description": description,
+            "call_count": stats.get(name, {}).get("call_count", 0),
+            "last_used": stats.get(name, {}).get("last_used", now),
+            "created_at": stats.get(name, {}).get("created_at", now),
+        }
+        with open(self.stats_path, "w", encoding="utf-8") as f:
+            json.dump(stats, f, ensure_ascii=False, indent=2)
 
     def cleanup_stale_skills(self):
         """

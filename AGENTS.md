@@ -301,27 +301,45 @@ Five behavioral/linguistic systems layered on top of the emotion engine. All own
 
 #### Module 5 — Paralinguistics / Live2D (text-side) ✅ Done
 
-**VAD → Live2D Parameter Mapper** (`vts_api.py`):
+**VTube Studio (VTS) Bridge** (`vts_api.py`):
+Kết nối WebSocket tới VTS (mặc định port 8001). Cần bật "Start API" trong VTS và lưu `vts_token.json`.
 
+**VAD → Live2D Parameter Mapper**:
 `update_vad_params(valence, arousal, dominance)` — maps 3D emotion space to Live2D params:
 
 | VAD | Live2D param | Range |
 |-----|-------------|-------|
 | valence × 0.4 | `ParamBrowLY`, `ParamBrowRY` | [-0.4, +0.4] |
-| 0.4 + arousal × 0.6 | `ParamEyeOpenL`, `ParamEyeOpenR` | [0.4, 1.0] |
+| 0.4 + arousal × 0.6 | `ParamEyeLOpen`, `ParamEyeROpen` | [0.4, 1.0] |
 | (dominance - 0.5) × 10 | `ParamBodyAngleX` | [-5, +5] |
 
-Fire-and-forget via `asyncio.run_coroutine_threadsafe`. Guard: `self.vts is None` check in async helper.
+**Hotkey Mapping (Emotions)**:
+Các hotkey cần setup trong VTS với ID tương ứng:
+- `neutral` → `RESET`
+- `happy` → `EXP_HAPPY`, `ecstatic` → `EXP_HAPPY_MAX`
+- `sad` → `EXP_SAD`, `disappointed` → `EXP_SAD_MIN`
+- `angry` → `EXP_ANGRY`, `furious` → `EXP_ANGRY_MAX`
+- `thinking` → `EXP_THINKING` (kích hoạt ngay khi LLM bắt đầu xử lý)
+- Other: `bored`, `friendly`, `loving`, `sleeping`, `cold`, `observing`.
 
-Called from `/chat` route and `_handle_stream_event` with `result["vad"]`.
+**Action Mapping**:
+LLM action (ví dụ `wave`, `nod`) → `ACT_<ACTION_NAME>` (ví dụ `ACT_WAVE`).
+
+**Lip Sync (Khuyên dùng)**:
+TTS Audio (VB-Cable ID 15) → VTS Microphone Lip-Sync (chọn input là VB-Cable). Không cần code.
+
+**Idle Behavior**:
+Tự động kích hoạt sau 5 giây không hoạt động. Avatar sẽ lắc lư nhẹ (swaying) qua `ParamBodyAngleX` / `ParamAngleZ` và chớp mắt ngẫu nhiên (3% mỗi 0.1s).
+
+**Action Interruption**:
+`clear_audio_queue()` trong `web.py` ngắt âm thanh và queue hiện tại khi có tin nhắn mới đè lên.
 
 **Prosody Speed Mapping** (`web.py` `/speak` route):
-
 Maps `lyra_ai.emotion.attention` → FPT TTS `speed` header:
-- attention <= 2 → `"-2"` (very slow)
-- attention <= 4 → `"-1"` (slow)
-- attention 5-7 → `"0"` (normal)
-- attention >= 8 → `"1"` (fast)
+- attention <= 2 → `"-2"` (rất chậm)
+- attention <= 4 → `"-1"` (chậm)
+- attention 5-7 → `"0"` (bình thường)
+- attention >= 8 → `"1"` (nhanh)
 
 **Deferred** (needs Live2D model): micro-jitters, SSML break tags, breathing animation.
 

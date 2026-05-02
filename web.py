@@ -243,6 +243,19 @@ def _audio_worker():
 audio_thread = threading.Thread(target=_audio_worker, daemon=True)
 audio_thread.start()
 
+def clear_audio_queue():
+    """Xóa tất cả các âm thanh đang chờ phát và dừng âm thanh hiện tại (Action Interruption)."""
+    while not audio_play_queue.empty():
+        try:
+            audio_play_queue.get_nowait()
+            audio_play_queue.task_done()
+        except _queue.Empty:
+            break
+    try:
+        sd.stop()
+    except Exception as e:
+        print(f"[AudioWorker] Lỗi khi dừng âm thanh: {e}")
+
 # ========================
 # Proactive Chat Monitor
 # ========================
@@ -353,6 +366,12 @@ def chat():
             return jsonify({"reply": "Please say something."})
 
         # ===== GENERATE AI REPLY =====
+        # Ngắt tiếng đang nói nếu người dùng chat đè (Action Interruption)
+        clear_audio_queue()
+        
+        # Kích hoạt biểu cảm Thinking trước khi AI xử lý
+        vts_bridge.trigger_emotion("thinking")
+
         # Owner chat qua web — source_type = "owner", full memory
         with ai_chat_lock:
             result = lyra_ai.chat(user_input, source_type="owner")
@@ -811,6 +830,9 @@ def stream_chat():
                 "viewer_name": sender_name,
                 "gender": data.get("gender", "male"),
             }
+
+        # Kích hoạt biểu cảm Thinking
+        vts_bridge.trigger_emotion("thinking")
 
         with ai_chat_lock:
             result = lyra_ai.chat(

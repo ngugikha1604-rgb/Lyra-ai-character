@@ -34,11 +34,12 @@ class RLFeedbackLoop:
         except Exception as e:
             print(f"[RL] Save buffer error: {e}")
 
-    def register_action(self, reply, intent, emotion):
+    def register_action(self, user_input, reply, intent, emotion):
         """Called when Lyra speaks. Starts a new reward observation window."""
         now = time.time()
         obs = {
             "action_time": now,
+            "user_input": user_input,
             "reply": reply,
             "intent": intent,
             "emotion": emotion,
@@ -68,12 +69,21 @@ class RLFeedbackLoop:
             return
         enqueue(PRIORITY_NORMAL, self._evaluate_observation, obs)
 
+    def _coerce_score(self, value):
+        """Return a numeric reward score, clamped to the evaluator range."""
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return max(-10.0, min(10.0, score))
+
     def _evaluate_observation(self, obs):
         """Uses light model (Qwen 0.5b) to score the reaction."""
         reaction_text = "\n".join(obs["reaction_buffer"][:15]) # Limit to 15 messages to stay within context
         
         prompt = (
             f"Bạn là giám khảo đánh giá mức độ thành công của Streamer AI Lyra.\n"
+            f"Viewer hỏi: \"{obs.get('user_input', '')}\"\n"
             f"Lyra vừa nói: \"{obs['reply']}\"\n"
             f"Phản ứng của chat ngay sau đó:\n{reaction_text}\n\n"
             f"Hãy chấm điểm độ thành công (Reward) từ -10 đến +10.\n"
@@ -96,13 +106,16 @@ class RLFeedbackLoop:
             match = re.search(r'\{.*\}', raw, re.DOTALL)
             if match:
                 eval_data = json.loads(match.group())
-                obs["reward_score"] = eval_data.get("score", 0.0)
+                obs["reward_score"] = self._coerce_score(eval_data.get("score", 0.0))
                 obs["reason"] = eval_data.get("reason", "")
                 # We don't need to keep the full reaction buffer in the permanent file
                 obs["reaction_preview"] = reaction_text[:200]
-                del obs["reaction_buffer"] 
+                obs.pop("reaction_buffer", None)
                 
                 print(f"[RL] Scored: {obs['reward_score']} | Reply: {obs['reply'][:30]}...")
+                
+                if obs["reward_score"] >= 8.0:
+                    enqueue(PRIORITY_NORMAL, self.ai.synthesizer.synthesize_from_rl, obs.get("user_input", ""), obs["reply"], obs["reaction_preview"], self.ai)
                 
                 with self.lock:
                     self.buffer.append(obs)
@@ -117,8 +130,8 @@ class RLFeedbackLoop:
         print("[RL] Running Post-Stream Review Node...")
         # 1. Filter High Reward interactions (Score >= 7.0)
         # Sort by score descending
-        sorted_buffer = sorted(self.buffer, key=lambda x: x.get("reward_score", 0), reverse=True)
-        high_reward = [obs for obs in sorted_buffer if obs.get("reward_score", 0) >= 7.0]
+        sorted_buffer = sorted(self.buffer, key=lambda x: self._coerce_score(x.get("reward_score", 0)), reverse=True)
+        high_reward = [obs for obs in sorted_buffer if self._coerce_score(obs.get("reward_score", 0)) >= 7.0]
         
         if not high_reward:
             print("[RL] No high reward interactions found today.")

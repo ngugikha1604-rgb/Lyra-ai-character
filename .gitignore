@@ -54,7 +54,7 @@ models/
 *.safetensors
 
 source_art/
-lyra/
+static/
 !.env.example
 
 #Vibe coding
