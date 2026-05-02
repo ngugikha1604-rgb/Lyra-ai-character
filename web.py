@@ -63,7 +63,8 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 load_dotenv()
 
 # Cho phép OAuth qua HTTP khi dev local (không dùng trên production)
-os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
+if not _is_production:
+    os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET_KEY
@@ -168,7 +169,8 @@ def _build_stream_content_context() -> str:
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    # Thêm check_same_thread=False để hỗ trợ môi trường Flask đa luồng
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=20.0)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -209,6 +211,38 @@ yt_poller = YouTubeChatPoller(viewer_tracker=viewer_tracker)
 # Start VTube Studio Bridge
 vts_bridge.start()
 
+# Lock để đảm bảo chỉ có 1 thread được gọi lyra_ai.chat() tại một thời điểm
+ai_chat_lock = threading.Lock()
+
+# ========================
+# AUDIO QUEUE FOR TTS
+# ========================
+import queue as _queue
+audio_play_queue = _queue.Queue()
+
+def _audio_worker():
+    """Luồng xử lý phát audio tuần tự, tránh chồng chéo âm thanh"""
+    while True:
+        try:
+            # Lấy data từ queue (block cho đến khi có)
+            audio_data, frame_rate, device_id = audio_play_queue.get()
+            
+            # Chuyển đổi sang numpy array và phát
+            samples = np.array(audio_data)
+            sd.play(samples, samplerate=frame_rate, device=device_id)
+            
+            # Chờ cho đến khi âm thanh phát xong trước khi lấy câu tiếp theo
+            sd.wait()
+            
+            audio_play_queue.task_done()
+        except Exception as e:
+            print(f"[AudioWorker] Error: {e}")
+            time.sleep(0.1)
+
+# Khởi chạy luồng audio worker
+audio_thread = threading.Thread(target=_audio_worker, daemon=True)
+audio_thread.start()
+
 # ========================
 # Proactive Chat Monitor
 # ========================
@@ -233,17 +267,18 @@ def _proactive_monitor():
                     f"Chat đã im lặng 2 phút. Đặt một câu hỏi ngắn, tò mò về {focus} "
                     "để giữ người xem ở lại."
                 )
-                question = lyra_ai._call_light_model(
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "Bạn là Lyra, 16 tuổi, hỏi thăm ngắn gọn, tự nhiên, tò mò.",
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.9,
-                    max_tokens=60,
-                )
+                with ai_chat_lock:
+                    question = lyra_ai._call_light_model(
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "Bạn là Lyra, 16 tuổi, hỏi thăm ngắn gọn, tự nhiên, tò mò.",
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        temperature=0.9,
+                        max_tokens=60,
+                    )
                 if question:
                     question = question.strip()
                     _sse_broadcast(
@@ -319,7 +354,8 @@ def chat():
 
         # ===== GENERATE AI REPLY =====
         # Owner chat qua web — source_type = "owner", full memory
-        result = lyra_ai.chat(user_input, source_type="owner")
+        with ai_chat_lock:
+            result = lyra_ai.chat(user_input, source_type="owner")
         print(
             "[CHAT] reply_len=%s monologue_len=%s emotion=%s action=%s"
             % (
@@ -413,9 +449,8 @@ def play_to_cable(audio_bytes, device_id=15):
         # Chuẩn hóa về float32 [-1.0, 1.0] để sounddevice phát chuẩn
         samples = samples.astype(np.float32) / (2**15)
         
-        # Phát ra thiết bị chỉ định
-        sd.play(samples, samplerate=audio.frame_rate, device=device_id)
-        # sd.play không chặn luồng (non-blocking), âm thanh sẽ tự phát ở background
+        # Đẩy vào queue để phát tuần tự thay vì sd.play trực tiếp
+        audio_play_queue.put((samples.tolist(), audio.frame_rate, device_id))
         
     except Exception as e:
         print(f"[AudioPlayback] Lỗi khi phát ra VB Cable: {e}")
@@ -636,17 +671,18 @@ def _trigger_stream_summary(channel_id: str, platform: str):
             "\nTóm tắt ngắn (1-2 câu) chat đang nói về gì và vibe của kênh lúc này."
         )
 
-        summary = lyra_ai._call_light_model(
-            [
-                {
-                    "role": "system",
-                    "content": "Bạn là assistant tóm tắt livestream chat. Trả lời bằng tiếng Việt, ngắn gọn.",
-                },
-                {"role": "user", "content": prompt_content},
-            ],
-            temperature=0.3,
-            max_tokens=80,
-        )
+        with ai_chat_lock:
+            summary = lyra_ai._call_light_model(
+                [
+                    {
+                        "role": "system",
+                        "content": "Bạn là assistant tóm tắt livestream chat. Trả lời bằng tiếng Việt, ngắn gọn.",
+                    },
+                    {"role": "user", "content": prompt_content},
+                ],
+                temperature=0.3,
+                max_tokens=80,
+            )
 
         if summary:
             summary = summary.strip()
@@ -776,12 +812,13 @@ def stream_chat():
                 "gender": data.get("gender", "male"),
             }
 
-        result = lyra_ai.chat(
-            composed_input,
-            source_type=source_type_val,
-            viewer_data=viewer_data,
-            stream_context=stream_ctx,
-        )
+        with ai_chat_lock:
+            result = lyra_ai.chat(
+                composed_input,
+                source_type=source_type_val,
+                viewer_data=viewer_data,
+                stream_context=stream_ctx,
+            )
 
         # Giai đoạn 4: Stream summary định kỳ
         if chat_analyzer.should_summarize():
@@ -837,7 +874,8 @@ def get_viewers():
 def proactive():
     """Lyra chủ động nhắn khi user vắng lâu"""
     try:
-        msg = lyra_ai.get_proactive_message()
+        with ai_chat_lock:
+            msg = lyra_ai.get_proactive_message()
 
         if not msg:
             return jsonify({"message": None, "should_show": False})
@@ -1080,12 +1118,13 @@ def _handle_stream_event(chat_event: dict):
                 )
             composed_input = message  # consensus uses raw message
             lyra_ai._last_viewer_message_time = datetime.now()
-            result = lyra_ai.chat(
-                composed_input,
-                source_type=source_type_val,
-                viewer_data=viewer_data,
-                stream_context=stream_ctx,
-            )
+            with ai_chat_lock:
+                result = lyra_ai.chat(
+                    composed_input,
+                    source_type=source_type_val,
+                    viewer_data=viewer_data,
+                    stream_context=stream_ctx,
+                )
             payload = build_state_payload(lyra_ai, result=result)
             payload.update(
                 {
@@ -1206,12 +1245,13 @@ def _handle_stream_event(chat_event: dict):
         # Update last activity timestamp for proactive monitoring
         lyra_ai._last_viewer_message_time = datetime.now()
 
-        result = lyra_ai.chat(
-            composed_input,
-            source_type=source_type_val,
-            viewer_data=viewer_data,
-            stream_context=stream_ctx,
-        )
+        with ai_chat_lock:
+            result = lyra_ai.chat(
+                composed_input,
+                source_type=source_type_val,
+                viewer_data=viewer_data,
+                stream_context=stream_ctx,
+            )
 
         if chat_analyzer.should_summarize():
             enqueue(PRIORITY_HIGH, _trigger_stream_summary, channel_id, platform)
@@ -1322,7 +1362,8 @@ def stream_start():
 
         viewer_tracker.clear_session_stats(platform, channel_id)
         chat_analyzer.reset_session_patterns(channel_id, platform)
-        lyra_ai.prepare_for_stream()
+        with ai_chat_lock:
+            lyra_ai.prepare_for_stream()
         enqueue(PRIORITY_NORMAL, lyra_ai._generate_stream_plan)
 
         # ── Live Context: mark stream active with focus ─────────────────────
@@ -1340,7 +1381,8 @@ def stream_start():
         # Generate câu chào mở màn và broadcast qua SSE
         def _send_greeting():
             try:
-                greeting = lyra_ai.generate_stream_event_reply("greeting")
+                with ai_chat_lock:
+                    greeting = lyra_ai.generate_stream_event_reply("greeting")
                 if greeting:
                     _sse_broadcast(
                         {
@@ -1389,14 +1431,15 @@ def stream_stop():
             else "mọi người"
         )
 
-        farewell = lyra_ai.generate_stream_event_reply(
-            "farewell",
-            {
-                "summary": summary_text,
-                "top_viewers": top_names,
-                "duration": "",
-            },
-        )
+        with ai_chat_lock:
+            farewell = lyra_ai.generate_stream_event_reply(
+                "farewell",
+                {
+                    "summary": summary_text,
+                    "top_viewers": top_names,
+                    "duration": "",
+                },
+            )
         if farewell:
             _sse_broadcast(
                 {

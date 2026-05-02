@@ -18,7 +18,7 @@ from config import *
 from memory_utils import (
     BASE_DIR, DB_PATH, DB_LOCK, LAYER_USER, LAYER_SESSION, LAYER_TEMPORAL,
     _LAYER_MAP, _CONFLICTABLE_KINDS, KIND_IMPORTANCE,
-    _get_ollama_embedding, _cosine_similarity
+    _get_ollama_embedding, _cosine_similarity, _vectorized_cosine_similarity
 )
 from pinecone_layer import PineconeLayer
 from memory_ranker import MemoryRanker
@@ -40,6 +40,7 @@ class MemorySystem:
         self._rag_context_cache = None
         self._rag_cache_key = None
         self._relevant_items_cache = None
+        self._semantic_cache = []  # Store tuples of (query_vec, context_str)
 
         self.max_summaries = max_summaries
         self.memory = self.get_default_memory()
@@ -210,12 +211,25 @@ class MemorySystem:
         if kind not in _CONFLICTABLE_KINDS: return None
         rows = list(c.execute("SELECT id, value, embedding FROM memory_items WHERE kind=? AND superseded=0 AND value != ?", (kind, new_value)))
         new_vec = _get_ollama_embedding(new_value)
+        
+        if new_vec is not None and np is not None:
+            valid_rows = []
+            embeddings = []
+            for row in rows:
+                if row["embedding"]:
+                    try:
+                        embeddings.append(np.frombuffer(row["embedding"], dtype=np.float32))
+                        valid_rows.append(row)
+                    except Exception: pass
+            
+            if embeddings:
+                matrix = np.stack(embeddings)
+                sims = _vectorized_cosine_similarity(new_vec, matrix)
+                for i, sim in enumerate(sims):
+                    if sim > 0.82: return valid_rows[i]
+                    
+        # Fallback to Jaccard-like keyword matching
         for row in rows:
-            if new_vec is not None and row["embedding"]:
-                try:
-                    sim = _cosine_similarity(new_vec, np.frombuffer(row["embedding"], dtype=np.float32))
-                    if sim > 0.82: return row
-                except Exception: pass
             if len(set(re.findall(r"\w{3,}", new_value.lower())) & set(re.findall(r"\w{3,}", row["value"].lower()))) / 5 > 0.5: return row
         return None
 
@@ -384,6 +398,19 @@ class MemorySystem:
 
     def get_relevant_context(self, user_input: str, is_public: bool = False) -> str:
         """Retrieves and ranks the most relevant memories for the current turn."""
+        query_vec = self._get_embedding(user_input)
+        
+        # 1. Check Semantic Cache
+        if query_vec is not None and np is not None and len(self._semantic_cache) > 0:
+            cached_vecs = [item[0] for item in self._semantic_cache]
+            matrix = np.stack(cached_vecs)
+            sims = _vectorized_cosine_similarity(query_vec, matrix)
+            best_idx = np.argmax(sims)
+            if sims[best_idx] > 0.95:
+                print(f"[Memory] Semantic Cache Hit! (sim: {sims[best_idx]:.3f})")
+                return self._semantic_cache[best_idx][1]
+
+        # 2. Retrieve L1 Candidates
         candidates = []
         try:
             conn = self._get_db()
@@ -394,9 +421,10 @@ class MemorySystem:
                     candidates.append({"kind": r["kind"], "value": r["value"], "weight": r["weight"] * (1 + r["saliency"]/10)})
         except Exception: pass
 
+        # 3. Retrieve L2 Session Items
         for item in self._session_items[-10:]: candidates.append({"kind": "session", "value": item["value"], "weight": 1.2})
         
-        query_vec = self._get_embedding(user_input)
+        # 4. Retrieve L3 Pinecone Items
         if query_vec is not None and self.pinecone._enabled:
             for m in self.pinecone.query(query_vec.tolist(), top_k=8):
                 meta = m.get("metadata", {})
@@ -410,11 +438,22 @@ class MemorySystem:
                 elif score > 0.65:
                     candidates.append({"kind": "temporal", "value": val, "weight": score * 1.5})
 
+        # 5. Rerank Candidates
         context_items = self.ranker.rank(user_input, candidates, token_budget=550)
-        if not context_items: return ""
+        if not context_items: 
+            return ""
         
         enqueue(PRIORITY_NORMAL, self.touch_items, [(c["kind"], c["value"]) for c in candidates if c["value"] in context_items])
-        return "Bối cảnh quan trọng:\n" + "\n".join([f"- {m}" for m in context_items])
+        result_str = "Bối cảnh quan trọng:\n" + "\n".join([f"- {m}" for m in context_items])
+        
+        # 6. Update Semantic Cache
+        if query_vec is not None:
+            self._semantic_cache.append((query_vec, result_str))
+            # Keep cache size small to stay fast (LRU style)
+            if len(self._semantic_cache) > 50:
+                self._semantic_cache.pop(0)
+                
+        return result_str
 
     def touch_items(self, items):
         conn = self._get_db()

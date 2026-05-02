@@ -61,3 +61,18 @@ def _cosine_similarity(v1, v2) -> float:
     norm1, norm2 = np.linalg.norm(v1), np.linalg.norm(v2)
     if norm1 == 0 or norm2 == 0: return 0.0
     return float(dot / (norm1 * norm2))
+
+def _vectorized_cosine_similarity(query_vec: "np.ndarray", matrix: "np.ndarray") -> "np.ndarray":
+    """Calculates cosine similarity between a 1D query vector and a 2D matrix of vectors."""
+    if query_vec is None or matrix is None or np is None or len(matrix) == 0:
+        return np.array([])
+    # Compute dot products
+    dot_products = np.dot(matrix, query_vec)
+    # Compute norms
+    query_norm = np.linalg.norm(query_vec)
+    matrix_norms = np.linalg.norm(matrix, axis=1)
+    # Avoid division by zero
+    denominators = query_norm * matrix_norms
+    # Handle zero norms
+    similarities = np.divide(dot_products, denominators, out=np.zeros_like(dot_products), where=denominators!=0)
+    return similarities
