@@ -1,8 +1,6 @@
 import re
 import time
 import requests
-import json
-from prompts import TRANSLATE_PROMPT
 from config import (
     GROQ_API_KEY,
     LIGHT_MODEL, CHAT_MODEL, LIGHT_BASE_URL, CHAT_BASE_URL,
@@ -75,6 +73,9 @@ class ModelUtilityMixin:
 
     def _call_groq_model(self, messages, temperature=0.4, max_tokens=150):
         """Call Groq primary chat model."""
+        if not GROQ_API_KEY:
+            return None
+
         backoff = 2.0
         for attempt in range(3):
             try:

@@ -22,7 +22,7 @@ from memory_utils import (
 )
 from pinecone_layer import PineconeLayer
 from memory_ranker import MemoryRanker
-from background_worker import enqueue, PRIORITY_NORMAL, PRIORITY_HIGH
+from background_worker import enqueue, PRIORITY_NORMAL
 
 MEMORY_PATH = os.path.join(BASE_DIR, "memory.json")
 
@@ -45,6 +45,7 @@ class MemorySystem:
         self.memory = self.get_default_memory()
         self.memory_buffer = []
         self._is_dirty = False
+        self._pending_conversation_rows = []
 
         self.pinecone = PineconeLayer()
         self.ranker = MemoryRanker()
@@ -63,6 +64,10 @@ class MemorySystem:
     def __contains__(self, key): return key in self.memory
     def __iter__(self): return iter(self.memory)
     def __len__(self): return len(self.memory)
+
+    @property
+    def turn_counter(self):
+        return self.memory.get("conversation", {}).get("total_messages", 0)
 
     def _sweeper_loop(self):
         """Background thread for memory TTL expiration."""
@@ -235,6 +240,13 @@ class MemorySystem:
         self._session_last_activity_at = now
         if len(self._session_items) > 30: self._session_items.pop(0)
 
+    def queue_conversation_row(self, role, content):
+        """Stage one chat message for durable SQLite persistence."""
+        if role not in ("user", "assistant") or not content:
+            return
+        self._pending_conversation_rows.append((role, str(content)))
+        self._is_dirty = True
+
     def update_rolling_stream_summary(self, summary): self._rolling_stream_summary = summary
     def clear_session_memory(self):
         self._session_items.clear()
@@ -294,16 +306,79 @@ class MemorySystem:
                         conn.commit()
         enqueue(PRIORITY_NORMAL, _run)
 
+    def _current_persist_time(self):
+        return (
+            self.memory.get("time_tracking", {}).get("last_message_time")
+            or datetime.now().isoformat()
+        )
+
+    def _metadata_rows(self, now):
+        conversation = self.memory.get("conversation", {})
+        relationship = self.memory.get("relationship", {})
+        time_tracking = self.memory.get("time_tracking", {})
+
+        rows = [
+            ("total_messages", str(self.turn_counter)),
+            ("first_chat", conversation.get("first_chat") or ""),
+            ("last_chat", conversation.get("last_chat") or ""),
+            ("last_message_time", now),
+            ("affection", str(relationship.get("current_affection", 50))),
+            (
+                "milestones_reached",
+                json.dumps(relationship.get("milestones_reached", []), ensure_ascii=False),
+            ),
+            ("memory_buffer", json.dumps(self.memory_buffer, ensure_ascii=False)),
+        ]
+
+        if time_tracking.get("first_greeting_sent") is not None:
+            rows.append(("first_greeting_sent", str(bool(time_tracking.get("first_greeting_sent")))))
+
+        return rows
+
+    @staticmethod
+    def _non_empty_rows(values):
+        return [(key, value) for key, value in values.items() if value not in (None, "")]
+
+    def _write_metadata(self, cursor, now):
+        cursor.executemany(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            self._metadata_rows(now),
+        )
+
+    def _write_profile_tables(self, cursor):
+        cursor.executemany(
+            "INSERT OR REPLACE INTO profile (key, value) VALUES (?, ?)",
+            self._non_empty_rows(self.memory.get("user_profile", {})),
+        )
+        cursor.executemany(
+            "INSERT OR REPLACE INTO self_profile (key, value) VALUES (?, ?)",
+            self._non_empty_rows(self.memory.get("identity", {})),
+        )
+
+    def _flush_pending_conversation(self, cursor):
+        if not self._pending_conversation_rows:
+            return
+
+        cursor.executemany(
+            "INSERT INTO conversation (role, content) VALUES (?, ?)",
+            self._pending_conversation_rows,
+        )
+        self._pending_conversation_rows.clear()
+
     def save(self):
-        if not self._is_dirty: return
+        if not self._is_dirty and not self._pending_conversation_rows:
+            return
+
         conn = self._get_db()
-        if not conn: return
+        if not conn:
+            return
+
         c = conn.cursor()
-        now = datetime.now().isoformat()
+        now = self._current_persist_time()
         with self.db_lock:
-            # Sync metadata and profile tables (simplified)
-            c.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('total_messages', ?)", (str(self.turn_counter),))
-            c.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('last_message_time', ?)", (now,))
+            self._write_metadata(c, now)
+            self._write_profile_tables(c)
+            self._flush_pending_conversation(c)
             conn.commit()
         self._is_dirty = False
 

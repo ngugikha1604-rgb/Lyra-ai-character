@@ -4,7 +4,6 @@ import json
 import random
 import threading
 import concurrent.futures
-from datetime import datetime
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
@@ -12,10 +11,7 @@ os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 from config import *
 from live_context import maybe_refresh_from_emotion
 from background_worker import enqueue, PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_NORMAL
-from time_utils import (
-    get_vietnam_time, get_time_period, calculate_time_gap, 
-    should_send_greeting, get_time_context
-)
+from time_utils import get_vietnam_time, get_time_period, calculate_time_gap, should_send_greeting
 from emotion import EmotionEngine
 from memory import MemorySystem
 from vbrain import parse_vbrain_response
@@ -33,7 +29,13 @@ from model_utilities import ModelUtilityMixin
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-class MiniAI(BehavioralMixin, PromptBuilderMixin, StreamHandlerMixin, MemoryHandlerMixin, ModelUtilityMixin):
+class MiniAI(
+    BehavioralMixin,
+    PromptBuilderMixin,
+    StreamHandlerMixin,
+    MemoryHandlerMixin,
+    ModelUtilityMixin,
+):
     """
     Lyra AI Core Engine.
     Refactored using Mixins to maintain a clean, modular structure.
@@ -97,166 +99,255 @@ class MiniAI(BehavioralMixin, PromptBuilderMixin, StreamHandlerMixin, MemoryHand
         self.memory.memory["conversation"]["total_messages"] = value
 
     @property
-    def attention(self): return self.emotion.attention
-    @property
-    def mood(self): return self.emotion.mood
-    @property
-    def affection(self): return self.emotion.affection
-    @property
-    def memory_dict(self): return self.memory.memory
+    def attention(self):
+        return self.emotion.attention
 
-    def chat(self, user_input, source_type: str = "owner", viewer_data: dict = None, stream_context: str = ""):
-        """Main orchestration loop for Lyra's conversation."""
+    @property
+    def mood(self):
+        return self.emotion.mood
+
+    @property
+    def affection(self):
+        return self.emotion.affection
+
+    @property
+    def memory_dict(self):
+        return self.memory.memory
+
+    def _refresh_time_state(self):
         self.current_time = get_vietnam_time()
         self.time_period = get_time_period(self.current_time.hour)
         self.time_gap_hours = calculate_time_gap(self.last_message_time, self.current_time)
         self.should_greet = should_send_greeting(self.time_gap_hours, self.last_message_time)
 
-        self.turn_counter += 1
-        intent = self.detect_intent(user_input)
+    def _owner_behavior_hints(self, user_input, intent, source_type):
+        if source_type != "owner":
+            return "neutral", "", ""
 
-        # Behavioral & Psychological Signals
-        _illocution_type, _perlocution_hint = self.classify_illocution(user_input, intent) if source_type == "owner" else ("neutral", "")
+        illocution, perlocution = self.classify_illocution(user_input, intent)
+        disclosure = self._get_self_disclosure_hint(intent, illocution)
+        return illocution, perlocution, disclosure
+
+    def _track_stream_turn(self, user_input, source_type, viewer_data, stream_context):
+        if source_type == "owner" or not stream_context:
+            return
+
+        self.stream_turn_counter += 1
+        viewer_name = (viewer_data or {}).get("viewer_name", "")
+        if viewer_name:
+            self.memory.add_session_item(f"{viewer_name} nhắn: {user_input[:80]}", kind="session")
+        if self.stream_turn_counter % STREAM_SUMMARY_THRESHOLD == 0:
+            enqueue(PRIORITY_HIGH, self.update_stream_summary)
+
+    def _apply_viewer_emotion_context(self, source_type, viewer_data):
+        original_state = (self.emotion.affection, self.emotion.dominance)
+        if source_type != "owner":
+            self.emotion.affection = float((viewer_data or {}).get("affection", 10))
+        return original_state
+
+    def _restore_viewer_emotion_context(self, source_type, original_state):
+        if source_type != "owner":
+            self.emotion.affection, self.emotion.dominance = original_state
+
+    def _collect_turn_context(self, user_input, source_type):
+        self.conv_state.update(user_input, self.messages)
+        enqueue(PRIORITY_NORMAL, self.summarize_history)
+
+        is_public = source_type != "owner"
+        memory_future = self._executor.submit(self.memory.get_relevant_context, user_input, is_public)
+        needs_search, search_query = self._should_search(user_input) if source_type == "owner" else (False, None)
+        search_future = self._executor.submit(self._search_web, search_query) if needs_search else None
+
+        memory_context = memory_future.result() or ""
+        search_context = ""
+        if search_future:
+            search_result = search_future.result()
+            if search_result:
+                search_context = f"\n\n[SEARCH RESULTS]\n{search_result}\n"
+        return memory_context, search_context
+
+    def _build_reward_hint(self, source_type):
+        if source_type != "owner":
+            return ""
+
+        reward_type = self.conv_state.should_trigger_reward(0.07)
+        reward_hint = ""
+
+        if reward_type == "deep_recall":
+            rare_mem = self.memory.get_rare_memory()
+            if rare_mem:
+                reward_hint = random.choice(REWARD_HINTS["deep_recall"]).format(memory=rare_mem)
+                self.conv_state.confirm_reward_delivered()
+            else:
+                reward_type = "healthy_debate"
+
+        if reward_type and reward_type in REWARD_HINTS and not reward_hint:
+            reward_hint = random.choice(REWARD_HINTS[reward_type])
+            self.conv_state.confirm_reward_delivered()
+
+        return reward_hint
+
+    def _choose_active_inference(self, source_type, reward_hint):
+        active_mode, ideology_idx = None, -1
+        if source_type != "owner" or reward_hint:
+            return active_mode, ideology_idx
+
+        if self.attention >= 4:
+            ideology_idx = self.conv_state.should_trigger_ideology(len(IDEOLOGY_PROMPTS))
+
+        if ideology_idx >= 0:
+            active_mode = "ideology"
+        elif self.conv_state.should_trigger_surprise(0.05):
+            active_mode = "surprise"
+
+        return active_mode, ideology_idx
+
+    def _build_api_messages(self, system_prompt, composed_message, source_type):
+        history_window = MAX_HISTORY * 2 if source_type == "owner" else 8
+        return [
+            {"role": "system", "content": system_prompt},
+            *self.messages[-history_window:],
+            {"role": "user", "content": composed_message},
+        ]
+
+    def _call_and_parse_vbrain(self, api_messages, dynamic_temp, dynamic_max_tokens, prompt_args):
+        content = self._call_model(api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens)
+        if not content:
+            return {"monologue": "", "emotion": "neutral", "action": "NONE", "reply": "..."}
+
+        parsed = parse_vbrain_response(content)
+        skill_name = parsed.get("skill_needed")
+        if not skill_name:
+            return parsed
+
+        skill_content = self._load_skill_content(skill_name)
+        if not skill_content:
+            return parsed
+
+        self._log_skill_usage(skill_name)
+        api_messages[0]["content"] = self.build_prompt(
+            *prompt_args["base"],
+            loaded_skill_content=skill_content,
+            reward_hint=prompt_args["reward_hint"],
+            active_inference_mode=prompt_args["active_inference_mode"],
+            perlocution_hint=prompt_args["perlocution_hint"],
+            self_disclosure_hint=prompt_args["self_disclosure_hint"],
+            precomputed_memory_context=prompt_args["memory_context"],
+        )
+        content = self._call_model(api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens)
+        return parse_vbrain_response(content) if content else parsed
+
+    def _enqueue_memory_extraction(self, user_input, intent, source_type):
+        if getattr(self._thread_local, "skip_memory_extraction", False):
+            self._thread_local.skip_memory_extraction = False
+            return
+        enqueue(PRIORITY_CRITICAL, self.extract_memory, user_input, intent, source_type)
+
+    def _persist_owner_turn(self, user_input, original_reply):
+        turn_rows = [
+            {"role": "user", "content": user_input},
+            {"role": "assistant", "content": original_reply},
+        ]
+        self.messages.extend(turn_rows)
+        self.memory.memory.setdefault("conversation", {}).setdefault("conversation_thread", []).extend(turn_rows)
+        self.memory.queue_conversation_row("user", user_input)
+        self.memory.queue_conversation_row("assistant", original_reply)
+        self.turn_counter += 1  # assistant; user was counted at turn start
+
+        self.recent_responses.append(original_reply.lower()[:30])
+        if len(self.recent_responses) > 10:
+            self.recent_responses.pop(0)
+
+        self.last_message_time = self.current_time.isoformat()
+        self.memory.memory.setdefault("relationship", {})["current_affection"] = int(round(self.emotion.affection))
+        self.memory.memory["time_tracking"]["last_message_time"] = self.last_message_time
+        enqueue(PRIORITY_NORMAL, self.memory.save)
+
+        if self.turn_counter % 25 == 0:
+            enqueue(PRIORITY_NORMAL, self.synthesizer.synthesize, self.messages[:], self)
+
+    def _build_chat_result(self, reply, original_reply, intent, illocution):
+        return {
+            "reply": reply,
+            "original_reply": original_reply,
+            "monologue": self.current_vbrain.get("monologue", ""),
+            "emotion": self.current_vbrain.get("emotion", "neutral"),
+            "action": self.current_vbrain.get("action", "NONE"),
+            "mood": self.emotion.mood,
+            "affection": self.emotion.affection,
+            "dominance": round(self.emotion.dominance, 2),
+            "vad": self.emotion.get_vad(),
+            "intent": intent,
+            "illocution": illocution,
+            "conv_state": self.conv_state.state,
+        }
+
+    def chat(self, user_input, source_type: str = "owner", viewer_data: dict = None, stream_context: str = ""):
+        """Main orchestration loop for Lyra's conversation."""
+        self._refresh_time_state()
+        self.turn_counter += 1
+
+        intent = self.detect_intent(user_input)
+        illocution, perlocution_hint, disclosure_hint = self._owner_behavior_hints(
+            user_input, intent, source_type
+        )
         self.emotion.update(user_input, self.time_gap_hours, intent=intent)
 
         if source_type == "owner" and self.is_streaming:
             enqueue(PRIORITY_HIGH, maybe_refresh_from_emotion, self.emotion.get_state())
 
-        _self_disclosure_hint = self._get_self_disclosure_hint(intent, _illocution_type) if source_type == "owner" else ""
+        self._track_stream_turn(user_input, source_type, viewer_data, stream_context)
 
-        # Stream Monitoring
-        if source_type != "owner" and stream_context:
-            self.stream_turn_counter += 1
-            viewer_name = (viewer_data or {}).get("viewer_name", "")
-            if viewer_name:
-                self.memory.add_session_item(f"{viewer_name} nhắn: {user_input[:80]}", kind="session")
-            if self.stream_turn_counter % STREAM_SUMMARY_THRESHOLD == 0:
-                enqueue(PRIORITY_HIGH, self.update_stream_summary)
-
-        # Reflection Loop (Generative Agents - Feature 2)
         if self.turn_counter % REFLECTION_INTERVAL == 0:
             enqueue(PRIORITY_NORMAL, self._reflect_on_session)
 
-        # Context Gathering (Parallel)
-        _original_affection = self.emotion.affection
-        _original_dominance = self.emotion.dominance
-        if source_type != "owner":
-            self.emotion.affection = float((viewer_data or {}).get("affection", 10))
-        
-        self.conv_state.update(user_input, self.messages)
-        enqueue(PRIORITY_NORMAL, self.summarize_history)
-        
-        _memory_future = self._executor.submit(self.memory.get_relevant_context, user_input, source_type != "owner")
-        _needs_search, _search_query = self._should_search(user_input) if source_type == "owner" else (False, None)
-        _search_future = self._executor.submit(self._search_web, _search_query) if _needs_search else None
+        original_emotion_state = self._apply_viewer_emotion_context(source_type, viewer_data)
+        memory_context, search_context = self._collect_turn_context(user_input, source_type)
 
-        _precomputed_memory = _memory_future.result() or ""
-        search_context = f"\n\n[SEARCH RESULTS]\n{_search_future.result()}\n" if _search_future else ""
+        reward_hint = self._build_reward_hint(source_type)
+        if reward_hint:
+            disclosure_hint = ""
 
-        # Reward System (Skinner)
-        reward_hint = ""
-        if source_type == "owner":
-            reward_type = self.conv_state.should_trigger_reward(0.07)
-            if reward_type == "deep_recall":
-                rare_mem = self.memory.get_rare_memory()
-                if rare_mem:
-                    reward_hint = random.choice(REWARD_HINTS["deep_recall"]).format(memory=rare_mem)
-                    self.conv_state.confirm_reward_delivered()
-                else: reward_type = "healthy_debate"
-            
-            if reward_type and reward_type in REWARD_HINTS and not reward_hint:
-                reward_hint = random.choice(REWARD_HINTS[reward_type])
-                self.conv_state.confirm_reward_delivered()
+        active_inference_mode, ideology_idx = self._choose_active_inference(source_type, reward_hint)
+        if active_inference_mode:
+            disclosure_hint = ""
 
-        if reward_hint: _self_disclosure_hint = ""
-
-        # Active Inference
-        active_inference_mode, _ideology_idx = None, -1
-        if source_type == "owner" and not reward_hint:
-            if self.attention >= 4:
-                _ideology_idx = self.conv_state.should_trigger_ideology(len(IDEOLOGY_PROMPTS))
-            if _ideology_idx >= 0:
-                active_inference_mode = "ideology"
-            elif self.conv_state.should_trigger_surprise(0.05):
-                active_inference_mode = "surprise"
-
-        if active_inference_mode: _self_disclosure_hint = ""
-
-        # Prompt Building & API Call
+        prompt_base = (intent, user_input, search_context, source_type, viewer_data, stream_context)
         system_prompt = self.build_prompt(
-            intent, user_input, search_context, source_type, viewer_data, stream_context,
+            *prompt_base,
             reward_hint=reward_hint, active_inference_mode=active_inference_mode,
-            perlocution_hint=_perlocution_hint, self_disclosure_hint=_self_disclosure_hint,
-            precomputed_memory_context=_precomputed_memory
+            perlocution_hint=perlocution_hint, self_disclosure_hint=disclosure_hint,
+            precomputed_memory_context=memory_context
         )
-        composed = self.compose_user_message(user_input, intent, bool(reward_hint), _ideology_idx)
-        
-        api_messages = [{"role": "system", "content": system_prompt}]
-        history_window = MAX_HISTORY * 2 if source_type == "owner" else 8
-        api_messages.extend(self.messages[-history_window:])
-        api_messages.append({"role": "user", "content": composed})
+        composed = self.compose_user_message(user_input, intent, bool(reward_hint), ideology_idx)
+        api_messages = self._build_api_messages(system_prompt, composed, source_type)
 
         dynamic_max_tokens = self.conv_state.get_pace_max_tokens(self.emotion.get_dynamic_max_tokens())
         dynamic_temp = self.conv_state.get_temperature(self.emotion.mood, self.emotion.attention, self.emotion.dominance)
 
-        content = self._call_model(api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens)
-        if content:
-            parsed = parse_vbrain_response(content)
-            # Skill Check
-            if parsed.get("skill_needed"):
-                skill_content = self._load_skill_content(parsed["skill_needed"])
-                if skill_content:
-                    self._log_skill_usage(parsed["skill_needed"])
-                    api_messages[0]["content"] = self.build_prompt(
-                        intent, user_input, search_context, source_type, viewer_data, stream_context,
-                        loaded_skill_content=skill_content, reward_hint=reward_hint,
-                        perlocution_hint=_perlocution_hint, self_disclosure_hint=_self_disclosure_hint,
-                        precomputed_memory_context=_precomputed_memory
-                    )
-                    content = self._call_model(api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens)
-                    if content: parsed = parse_vbrain_response(content)
-            self.current_vbrain = parsed
-
-        else:
-            self.current_vbrain = {"monologue": "", "emotion": "neutral", "action": "NONE", "reply": "..."}
+        prompt_args = {
+            "base": prompt_base,
+            "reward_hint": reward_hint,
+            "active_inference_mode": active_inference_mode,
+            "perlocution_hint": perlocution_hint,
+            "self_disclosure_hint": disclosure_hint,
+            "memory_context": memory_context,
+        }
+        self.current_vbrain = self._call_and_parse_vbrain(
+            api_messages, dynamic_temp, dynamic_max_tokens, prompt_args
+        )
 
         reply = self.clean_reply(self.current_vbrain.get("reply", "..."))
         original_reply = reply
         reply = self._maybe_add_filler(reply, user_input, source_type)
-        
-        if source_type != "owner":
-            self.emotion.affection, self.emotion.dominance = _original_affection, _original_dominance
 
-        # Background Tasks
-        if not getattr(self._thread_local, "skip_memory_extraction", False):
-            enqueue(PRIORITY_CRITICAL, self.extract_memory, user_input, intent, source_type)
-        else: self._thread_local.skip_memory_extraction = False
+        self._restore_viewer_emotion_context(source_type, original_emotion_state)
+        self._enqueue_memory_extraction(user_input, intent, source_type)
 
         if source_type == "owner":
-            self.messages.append({"role": "user", "content": user_input})
-            self.messages.append({"role": "assistant", "content": original_reply})
-            self.memory.memory.setdefault("conversation", {}).setdefault("conversation_thread", []).extend([
-                {"role": "user", "content": user_input}, {"role": "assistant", "content": original_reply}
-            ])
-            self.turn_counter += 2  # user + assistant
-            self.recent_responses.append(original_reply.lower()[:30])
-            if len(self.recent_responses) > 10: self.recent_responses.pop(0)
-            
-            self.last_message_time = self.current_time.isoformat()
-            self.memory.memory["time_tracking"]["last_message_time"] = self.last_message_time
-            enqueue(PRIORITY_NORMAL, self.memory.save)
+            self._persist_owner_turn(user_input, original_reply)
 
-            if self.turn_counter % 25 == 0:
-                enqueue(PRIORITY_NORMAL, self.synthesizer.synthesize, self.messages[:], self)
-
-        result_dict = {
-            "reply": reply, "original_reply": original_reply, "monologue": self.current_vbrain.get("monologue", ""),
-            "emotion": self.current_vbrain.get("emotion", "neutral"), "action": self.current_vbrain.get("action", "NONE"),
-            "mood": self.emotion.mood, "affection": self.emotion.affection, "dominance": round(self.emotion.dominance, 2),
-            "vad": self.emotion.get_vad(), "intent": intent, "illocution": _illocution_type, "conv_state": self.conv_state.state
-        }
-
-        # Reinforcement Learning: Track action for reward if it's a stream chat
+        result_dict = self._build_chat_result(reply, original_reply, intent, illocution)
         if source_type != "owner":
             self.rl_loop.register_action(reply, intent, self.emotion.get_state())
 

@@ -4,6 +4,7 @@
 
 import queue
 import threading
+import itertools
 
 
 # Priority levels (lower number = higher priority)
@@ -12,13 +13,14 @@ PRIORITY_HIGH = 2  # Stream summary, important updates
 PRIORITY_NORMAL = 3  # Diary, consolidation, non-critical background tasks
 
 _job_queue = queue.PriorityQueue()
+_job_counter = itertools.count()
 
 
 def _worker_loop():
     """Background thread: fetch jobs by priority and execute."""
     while True:
         try:
-            priority, job = _job_queue.get()
+            priority, _seq, job = _job_queue.get()
             func, args, kwargs = job
             try:
                 func(*args, **kwargs)
@@ -43,7 +45,7 @@ def enqueue(priority: int, func, *args, **kwargs):
 
     Use priority constants: PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_NORMAL
     """
-    _job_queue.put((priority, (func, args, kwargs)))
+    _job_queue.put((priority, next(_job_counter), (func, args, kwargs)))
 
 def get_queue_stats():
     """Returns the current number of pending jobs in the queue."""
