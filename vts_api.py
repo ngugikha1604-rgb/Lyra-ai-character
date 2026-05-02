@@ -86,15 +86,25 @@ class VTSController:
             asyncio.run_coroutine_threadsafe(self._trigger_hotkey(hotkey_id), self.loop)
 
     def trigger_action(self, action):
-        """Hàm đồng bộ để gọi action (WAVE, NOD...)"""
+        """Hàm đồng bộ để gọi action pose (WAVE, NOD...).
+
+        Actions là expression tĩnh giả lập animation:
+        trigger pose → giữ 1.2s → auto-reset về neutral.
+        """
         if not self.is_connected or not self.loop:
             return
         self.last_activity_time = time.time()
-        
-        # Mapping action sang VTS hotkey
-        # Thường action là animation ngắn
+
         action_hotkey = f"ACT_{action.upper()}"
-        asyncio.run_coroutine_threadsafe(self._trigger_hotkey(action_hotkey), self.loop)
+        asyncio.run_coroutine_threadsafe(
+            self._trigger_action_with_reset(action_hotkey), self.loop
+        )
+
+    async def _trigger_action_with_reset(self, hotkey_id: str, hold_seconds: float = 1.2):
+        """Trigger action hotkey → giữ → reset về RESET expression."""
+        await self._trigger_hotkey(hotkey_id)
+        await asyncio.sleep(hold_seconds)
+        await self._trigger_hotkey("RESET")
 
     def update_vad_params(self, valence: float, arousal: float, dominance: float):
         """
@@ -129,8 +139,8 @@ class VTSController:
         brow_value = valence * 0.4  # scale: -0.4 → +0.4
 
         # ParamEyeLOpen / ParamEyeROpen: 0.0 → 1.899999976158142 in this model.
-        # arousal 0.0 → eye = 0.4 (half-closed), arousal 1.0 → eye = 1.0 (wide open)
-        eye_value = 0.4 + arousal * 0.6  # scale: 0.4 → 1.0
+        # arousal 0.0 → eye = 0.76 (half-open), arousal 1.0 → eye = 1.9 (wide open)
+        eye_value = 0.76 + arousal * 1.14  # scale: 0.76 → 1.9 (40%→100% of range)
 
         # ParamBodyAngleX: thường -30 → +30 degrees trong VTS
         # dominance 0.0 → angle = -5 (slight bow), dominance 1.0 → angle = +5 (upright)
@@ -161,10 +171,9 @@ class VTSController:
 
     async def _trigger_hotkey(self, hotkey_id):
         try:
-            # Gửi yêu cầu trigger hotkey
-            # Lưu ý: Trong VTS, hotkey ID có thể là UUID hoặc tên. 
-            # pyvts hỗ trợ requestHotkeyTrigger
-            request = self.vts.vts_request.requestHotkeyTrigger(hotkey_id)
+            # pyvts 0.3.3 dùng requestTriggerHotKey (không phải requestHotkeyTrigger)
+            # hotkey_id là Name của hotkey trong VTS (ví dụ "RESET", "EXP_HAPPY")
+            request = self.vts.vts_request.requestTriggerHotKey(hotkey_id)
             await self.vts.request(request)
             print(f"[VTS] Triggered hotkey: {hotkey_id}")
         except Exception as e:
@@ -212,10 +221,8 @@ class VTSController:
                     params.append(("ParamAngleZ", sway * 1.5))
 
                     # ── 2. Breathing animation ───────────────────────────────
-                    # sin(t * 1.57) → ~0.25 Hz (1 nhịp thở / 4 giây)
-                    # ParamBreath range: 0.0 → 1.0
-                    breath = (math.sin(t * 1.57) + 1.0) / 2.0  # normalize 0→1
-                    params.append(("ParamBreath", breath))
+                    # ParamBreath đã được VTS quản lý qua UseBreathing=true
+                    # → KHÔNG ghi đè để tránh conflict với VTS breathing system
 
                     # ── 3. Micro-jitters ─────────────────────────────────────
                     # Noise ngẫu nhiên biên độ rất nhỏ — tránh avatar cứng đờ
