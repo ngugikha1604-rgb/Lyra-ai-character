@@ -1,4 +1,4 @@
-from flask import (
+﻿from flask import (
     Flask,
     render_template,
     request,
@@ -62,6 +62,10 @@ SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 
 load_dotenv()
 
+# Security configurations
+# SESSION_COOKIE_SECURE=True chỉ dùng trên HTTPS — tắt khi dev local (HTTP)
+_is_production = os.environ.get("FLASK_ENV", "development") == "production"
+
 # Cho phép OAuth qua HTTP khi dev local (không dùng trên production)
 if not _is_production:
     os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
@@ -69,9 +73,6 @@ if not _is_production:
 app = Flask(__name__)
 app.secret_key = FLASK_SECRET_KEY
 
-# Security configurations
-# SESSION_COOKIE_SECURE=True chỉ dùng trên HTTPS — tắt khi dev local (HTTP)
-_is_production = os.environ.get("FLASK_ENV", "development") == "production"
 app.config["SESSION_COOKIE_SECURE"] = _is_production
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"

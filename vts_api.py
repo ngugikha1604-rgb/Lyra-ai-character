@@ -16,6 +16,7 @@ class VTSController:
         self.loop = None
         self.thread = None
         self.last_activity_time = time.time()
+        self._request_lock = None  # asyncio.Lock — khởi tạo trong event loop
         
         # Mapping cảm xúc sang Hotkey ID (Tên tạm thời theo ý user)
         self.emotion_to_hotkey = {
@@ -53,6 +54,9 @@ class VTSController:
         self.loop.run_until_complete(self._main_logic())
 
     async def _main_logic(self):
+        # Tạo Lock trong event loop — phải tạo ở đây, không phải trong __init__
+        self._request_lock = asyncio.Lock()
+        idle_task = None
         while True:
             try:
                 print(f"[VTS] Đang kết nối tới port {self.port}...")
@@ -62,18 +66,21 @@ class VTSController:
                 await self.vts.request_authenticate()
                 self.is_connected = True
                 print("[VTS] Kết nối thành công!")
-                
-                # Chạy idle loop ngầm
-                asyncio.create_task(self._idle_loop())
-                
+
+                # Hủy idle task cũ nếu còn sót từ lần connect trước
+                if idle_task and not idle_task.done():
+                    idle_task.cancel()
+                idle_task = asyncio.create_task(self._idle_loop())
+
                 # Giữ kết nối sống
                 while self.is_connected:
                     await asyncio.sleep(5)
-                    # Có thể thêm heartbeat nếu cần
             except Exception as e:
                 print(f"[VTS] Lỗi kết nối: {e}")
                 self.is_connected = False
-                await asyncio.sleep(10) # Thử lại sau 10s
+                if idle_task and not idle_task.done():
+                    idle_task.cancel()
+                await asyncio.sleep(10)  # Thử lại sau 10s
 
     def trigger_emotion(self, emotion):
         """Hàm đồng bộ để gọi từ Flask"""
@@ -151,6 +158,13 @@ class VTSController:
             self.loop
         )
 
+    async def _safe_request(self, req):
+        """Serialize tất cả VTS requests qua Lock để tránh concurrent recv."""
+        if self._request_lock is None:
+            return None
+        async with self._request_lock:
+            return await self.vts.request(req)
+
     async def _update_vad_params_async(self, brow: float, eye: float, body_angle: float):
         """Async helper để update nhiều params cùng lúc."""
         if self.vts is None:
@@ -165,7 +179,7 @@ class VTSController:
             ]
             for name, value in params:
                 req = self.vts.vts_request.requestSetParameterValue(name, value)
-                await self.vts.request(req)
+                await self._safe_request(req)
         except Exception as e:
             print(f"[VTS] VAD params update error: {e}")
 
@@ -174,7 +188,7 @@ class VTSController:
             # pyvts 0.3.3 dùng requestTriggerHotKey (không phải requestHotkeyTrigger)
             # hotkey_id là Name của hotkey trong VTS (ví dụ "RESET", "EXP_HAPPY")
             request = self.vts.vts_request.requestTriggerHotKey(hotkey_id)
-            await self.vts.request(request)
+            await self._safe_request(request)
             print(f"[VTS] Triggered hotkey: {hotkey_id}")
         except Exception as e:
             print(f"[VTS] Lỗi trigger hotkey {hotkey_id}: {e}")
@@ -187,10 +201,8 @@ class VTSController:
 
     async def _update_param(self, name, val):
         try:
-            # Injecting parameter values
-            # value nên nằm trong khoảng 0-1 hoặc theo model definition
             request = self.vts.vts_request.requestSetParameterValue(name, val)
-            await self.vts.request(request)
+            await self._safe_request(request)
         except Exception as e:
             print(f"[VTS] Lỗi cập nhật parameter {name}: {e}")
 
@@ -245,7 +257,7 @@ class VTSController:
 
                     for name, value in params:
                         req = self.vts.vts_request.requestSetParameterValue(name, value)
-                        await self.vts.request(req)
+                        await self._safe_request(req)
                 except Exception:
                     pass
 
