@@ -4,7 +4,6 @@
     request,
     jsonify,
     session,
-    send_file,
     redirect,
     url_for,
 )
@@ -56,11 +55,17 @@ from live_context import (
 )
 from background_worker import enqueue, get_queue_stats, PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_NORMAL
 
+load_dotenv()
+
 # Đường dẫn tới file bạn tải từ Google Cloud
 CLIENT_SECRETS_FILE = "client_secret.json"
 SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
-
-load_dotenv()
+YOUTUBE_CREDENTIALS_FILE = os.environ.get(
+    "YOUTUBE_CREDENTIALS_FILE", "youtube_credentials.json"
+)
+DEFAULT_YOUTUBE_LIVE_CHAT_ID = os.environ.get("YOUTUBE_LIVE_CHAT_ID", "")
+DEFAULT_YOUTUBE_VIDEO_ID = os.environ.get("YOUTUBE_VIDEO_ID", "")
+VB_CABLE_DEVICE_ID = int(os.environ.get("VB_CABLE_DEVICE_ID", "15"))
 
 # Security configurations
 # SESSION_COOKIE_SECURE=True chỉ dùng trên HTTPS — tắt khi dev local (HTTP)
@@ -115,6 +120,28 @@ def sanitize_input(text, max_length=500):
     # Remove potentially dangerous characters
     text = re.sub(r'[<>\"\'%;)(&+]', '', text)
     return text.strip()[:max_length]
+
+
+def _save_youtube_credentials(credentials: dict) -> None:
+    """Persist local OAuth credentials so stream controls survive browser session loss."""
+    try:
+        with open(YOUTUBE_CREDENTIALS_FILE, "w", encoding="utf-8") as f:
+            json.dump(credentials, f)
+    except Exception as e:
+        print(f"[YouTube OAuth] Could not save credentials: {e}")
+
+
+def _load_youtube_credentials() -> dict | None:
+    try:
+        with open(YOUTUBE_CREDENTIALS_FILE, "r", encoding="utf-8") as f:
+            credentials = json.load(f)
+        if isinstance(credentials, dict) and credentials.get("token"):
+            return credentials
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        print(f"[YouTube OAuth] Could not load credentials: {e}")
+    return None
 
 
 
@@ -451,7 +478,7 @@ def apply_pitch_shift(audio_bytes, octaves=0.22):
         return audio_bytes
 
 
-def play_to_cable(audio_bytes, device_id=15):
+def play_to_cable(audio_bytes, device_id=VB_CABLE_DEVICE_ID):
     """
     Phát audio trực tiếp ra thiết bị VB Cable (ID 15) để OBS bắt được.
     """
@@ -549,15 +576,11 @@ def speak():
         try:
             final_audio = apply_pitch_shift(audio_res.content, octaves=0.22)
             # Phát ra VB Cable
-            play_to_cable(final_audio, device_id=15)
+            play_to_cable(final_audio, device_id=VB_CABLE_DEVICE_ID)
         except Exception:
             final_audio = audio_res.content
 
-        return send_file(
-            io.BytesIO(final_audio),
-            mimetype="audio/mpeg",
-            as_attachment=False,
-        )
+        return jsonify({"ok": True, "audio_output": "vb_cable", "device_id": VB_CABLE_DEVICE_ID})
 
     except Exception:
         print("[TTS] ERROR")
@@ -1360,13 +1383,17 @@ def stream_start():
     Dùng credentials từ session (phải authorize trước).
     """
     try:
-        credentials = session.get("credentials")
+        credentials = session.get("credentials") or _load_youtube_credentials()
         if not credentials:
-            return jsonify({"error": "Not authorized. Visit /authorize first."}), 401
+            return jsonify({
+                "error": "Not authorized. Visit /authorize first.",
+                "authorize_url": url_for("authorize"),
+            }), 401
+        session["credentials"] = credentials
 
         data = request.get_json() or {}
-        live_chat_id = data.get("live_chat_id", "").strip()
-        video_id = data.get("video_id", "").strip()
+        live_chat_id = (data.get("live_chat_id") or DEFAULT_YOUTUBE_LIVE_CHAT_ID).strip()
+        video_id = (data.get("video_id") or DEFAULT_YOUTUBE_VIDEO_ID).strip()
 
         # Nếu không có live_chat_id, thử lấy từ video_id
         if not live_chat_id and video_id:
@@ -1677,6 +1704,7 @@ def oauth2callback():
         "client_secret": credentials.client_secret,
         "scopes": list(credentials.scopes) if credentials.scopes else [],
     }
+    _save_youtube_credentials(session["credentials"])
     return "Xác thực thành công! Lyra đã có quyền truy cập YouTube."
 
 

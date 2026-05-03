@@ -42,6 +42,7 @@ config.py
 APIkey.txt
 *.bak
 client_secret.json
+youtube_credentials.json
 vts_token.json
 live_context.json
 PLAN.md
@@ -55,6 +56,8 @@ models/
 
 source_art/
 static/
+test_vts.py
+
 !.env.example
 
 #Vibe coding

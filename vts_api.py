@@ -90,7 +90,9 @@ class VTSController:
 
         hotkey_id = self.emotion_to_hotkey.get(emotion.lower())
         if hotkey_id:
-            asyncio.run_coroutine_threadsafe(self._trigger_hotkey(hotkey_id), self.loop)
+            asyncio.run_coroutine_threadsafe(
+                self._trigger_expression_with_reset(hotkey_id), self.loop
+            )
 
     def trigger_action(self, action):
         """Hàm đồng bộ để gọi action pose (WAVE, NOD...).
@@ -112,6 +114,15 @@ class VTSController:
         await self._trigger_hotkey(hotkey_id)
         await asyncio.sleep(hold_seconds)
         await self._trigger_hotkey("RESET")
+
+    async def _trigger_expression_with_reset(self, hotkey_id: str):
+        """Reset expression state immediately before applying a new expression hotkey."""
+        if hotkey_id == "RESET":
+            await self._trigger_hotkey("RESET")
+            return
+        await self._trigger_hotkey("RESET")
+        await asyncio.sleep(0.05)
+        await self._trigger_hotkey(hotkey_id)
 
     def update_vad_params(self, valence: float, arousal: float, dominance: float):
         """

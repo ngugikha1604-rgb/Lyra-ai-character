@@ -514,9 +514,15 @@
         // Bạn có thể tùy biến payload live_chat_id ở đây
         const res = await fetch("/stream/start", {
           method: "POST",
+          credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ platform: "youtube", channel_id: "default" })
         });
+        if (res.status === 401) {
+          const data = await res.json().catch(() => ({}));
+          window.location.href = data.authorize_url || "/authorize";
+          return;
+        }
         if (res.ok) {
           isStreaming = true;
           btnStart.style.display = "none";
@@ -531,6 +537,7 @@
       try {
         const res = await fetch("/stream/stop", {
           method: "POST",
+          credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ platform: "youtube", channel_id: "default" })
         });
@@ -554,12 +561,6 @@
           body: JSON.stringify({ text })
         });
         if (!res.ok) return;
-        
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const audio = document.getElementById("lyraVoice");
-        audio.src = url;
-        audio.play();
       } catch (err) { console.error("TTS output error:", err); }
     }
 
