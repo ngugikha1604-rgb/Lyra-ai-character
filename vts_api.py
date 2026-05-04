@@ -95,74 +95,44 @@ class VTSController:
             )
 
     def trigger_action(self, action):
-        """Hàm đồng bộ để gọi action pose (WAVE, NOD...).
-
-        Actions là expression tĩnh giả lập animation:
-        trigger pose → giữ 1.2s → auto-reset về neutral.
-        """
+        """Hàm đồng bộ để gọi action pose (WAVE, NOD...)."""
         if not self.is_connected or not self.loop:
             return
+        if not action or action.upper() == "NONE":
+            return
+            
         self.last_activity_time = time.time()
-
         action_hotkey = f"ACT_{action.upper()}"
         asyncio.run_coroutine_threadsafe(
             self._trigger_action_with_reset(action_hotkey), self.loop
         )
 
     async def _trigger_action_with_reset(self, hotkey_id: str, hold_seconds: float = 1.2):
-        """Trigger action hotkey → giữ → reset về RESET expression."""
+        """Trigger action hotkey.
+        
+        Lưu ý: Không dùng 'RESET' ở đây vì nó sẽ xóa luôn cả Expression đang có.
+        """
         await self._trigger_hotkey(hotkey_id)
-        await asyncio.sleep(hold_seconds)
-        await self._trigger_hotkey("RESET")
 
     async def _trigger_expression_with_reset(self, hotkey_id: str):
-        """Reset expression state immediately before applying a new expression hotkey."""
-        if hotkey_id == "RESET":
-            await self._trigger_hotkey("RESET")
-            return
-        await self._trigger_hotkey("RESET")
-        await asyncio.sleep(0.05)
+        """Áp dụng expression mới.
+        
+        User feedback: Không nên RESET trước mỗi expression vì làm mất hiệu ứng.
+        VTS sẽ tự thay thế expression nếu chúng cùng group.
+        """
         await self._trigger_hotkey(hotkey_id)
 
     def update_vad_params(self, valence: float, arousal: float, dominance: float):
         """
         VAD → Live2D Parameter Mapper (Paralinguistics — Module 5).
-
-        Map 3 chiều cảm xúc VAD sang Live2D parameters để tạo biểu cảm
-        liên tục thay vì chỉ trigger expression preset.
-
-        Mapping:
-          valence  (-1.0 → +1.0) → ParamBrowLY / ParamBrowRY
-            - Positive valence: lông mày nhẹ nhàng (raised slightly)
-            - Negative valence: lông mày cau lại (lowered/furrowed)
-
-          arousal  (0.0 → 1.0) → ParamEyeLOpen / ParamEyeROpen
-            - High arousal: mắt mở to (excited/alert)
-            - Low arousal: mắt nửa nhắm (tired/calm)
-
-          dominance (0.0 → 1.0) → ParamBodyAngleX (head tilt)
-            - High dominance: đầu thẳng hoặc hơi ngẩng (confident)
-            - Low dominance: đầu hơi cúi (uncertain/shy)
-
-        Tất cả values được normalize về range của từng parameter.
-        Fire-and-forget — không block Flask response.
         """
         if not self.is_connected or not self.loop:
             return
         self.last_activity_time = time.time()
 
-        # ── Normalize VAD → Live2D param ranges ──────────────────────────
-        # ParamBrowLY / ParamBrowRY: thường -1.0 → 1.0 trong VTS
-        # valence -1.0 → brow = -0.5 (furrowed), valence +1.0 → brow = 0.3 (raised)
-        brow_value = valence * 0.4  # scale: -0.4 → +0.4
-
-        # ParamEyeLOpen / ParamEyeROpen: 0.0 → 1.899999976158142 in this model.
-        # arousal 0.0 → eye = 0.76 (half-open), arousal 1.0 → eye = 1.9 (wide open)
-        eye_value = 0.76 + arousal * 1.14  # scale: 0.76 → 1.9 (40%→100% of range)
-
-        # ParamBodyAngleX: thường -30 → +30 degrees trong VTS
-        # dominance 0.0 → angle = -5 (slight bow), dominance 1.0 → angle = +5 (upright)
-        body_angle = (dominance - 0.5) * 10.0  # scale: -5.0 → +5.0
+        brow_value = valence * 0.4
+        eye_value = 0.76 + arousal * 1.14
+        body_angle = (dominance - 0.5) * 10.0
 
         asyncio.run_coroutine_threadsafe(
             self._update_vad_params_async(brow_value, eye_value, body_angle),
@@ -196,8 +166,6 @@ class VTSController:
 
     async def _trigger_hotkey(self, hotkey_id):
         try:
-            # pyvts 0.3.3 dùng requestTriggerHotKey (không phải requestHotkeyTrigger)
-            # hotkey_id là Name của hotkey trong VTS (ví dụ "RESET", "EXP_HAPPY")
             request = self.vts.vts_request.requestTriggerHotKey(hotkey_id)
             await self._safe_request(request)
             print(f"[VTS] Triggered hotkey: {hotkey_id}")
@@ -205,7 +173,6 @@ class VTSController:
             print(f"[VTS] Lỗi trigger hotkey {hotkey_id}: {e}")
 
     def update_parameter(self, parameter_name, value):
-        """Cập nhật trực tiếp tham số (cho miệng, mắt...) nếu cần"""
         if not self.is_connected or not self.loop:
             return
         asyncio.run_coroutine_threadsafe(self._update_param(parameter_name, value), self.loop)
@@ -218,48 +185,25 @@ class VTSController:
             print(f"[VTS] Lỗi cập nhật parameter {name}: {e}")
 
     async def _idle_loop(self):
-        """Loop chạy ngầm tạo chuyển động idle tự nhiên khi rảnh rỗi.
-
-        3 lớp chuyển động:
-          1. Swaying     — lắc lư thân/đầu nhịp nhàng qua sin wave
-          2. Breathing   — ParamBreath nhịp thở chậm (~0.25 Hz)
-          3. Micro-jitter — noise ngẫu nhiên nhỏ trên đầu/mắt để tránh cứng đờ
-          4. Random Blink — chớp mắt 3% mỗi 0.1s
-        """
         while self.is_connected:
             await asyncio.sleep(0.1)
             if self.vts is None:
                 continue
 
-            # Idle check: nếu không có cập nhật trong 5s, bắt đầu chuyển động idle
             if time.time() - self.last_activity_time > 5.0:
                 try:
                     params = []
                     t = time.time()
-
-                    # ── 1. Swaying (đung đưa nhẹ) ────────────────────────────
-                    # sin(t * 1.5) → ~0.24 Hz, biên độ ±2 độ
                     sway = math.sin(t * 1.5) * 2.0
                     params.append(("ParamBodyAngleX", sway))
                     params.append(("ParamAngleZ", sway * 1.5))
-
-                    # ── 2. Breathing animation ───────────────────────────────
-                    # ParamBreath đã được VTS quản lý qua UseBreathing=true
-                    # → KHÔNG ghi đè để tránh conflict với VTS breathing system
-
-                    # ── 3. Micro-jitters ─────────────────────────────────────
-                    # Noise ngẫu nhiên biên độ rất nhỏ — tránh avatar cứng đờ
-                    # Chỉ apply khi đang idle (không override VAD params đang active)
-                    jitter_head_x = random.gauss(0, 0.15)   # ParamAngleX ±0.15
-                    jitter_head_y = random.gauss(0, 0.10)   # ParamAngleY ±0.10
-                    jitter_brow   = random.gauss(0, 0.03)   # lông mày rung nhẹ
+                    jitter_head_x = random.gauss(0, 0.15)
+                    jitter_head_y = random.gauss(0, 0.10)
+                    jitter_brow   = random.gauss(0, 0.03)
                     params.append(("ParamAngleX", jitter_head_x))
                     params.append(("ParamAngleY", jitter_head_y))
                     params.append(("ParamBrowLY", jitter_brow))
                     params.append(("ParamBrowRY", jitter_brow))
-
-                    # ── 4. Random Blink ──────────────────────────────────────
-                    # 3% mỗi 0.1s → trung bình chớp mắt ~1 lần / 3.3 giây
                     eye_val = 1.0
                     if random.random() < 0.03:
                         eye_val = 0.0

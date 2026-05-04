@@ -339,3 +339,46 @@ def get_live_chat_id(credentials_dict: dict, video_id: str) -> str | None:
     except Exception as e:
         print(f"[YouTube] get_live_chat_id error: {e}")
         return None
+
+
+def get_current_live_stream_info(credentials_dict: dict):
+    """
+    Lấy thông tin stream đang chạy của user (video_id và liveChatId).
+    """
+    if not YOUTUBE_API_AVAILABLE:
+        return None, None
+
+    try:
+        creds = Credentials(
+            token=credentials_dict.get("token"),
+            refresh_token=credentials_dict.get("refresh_token"),
+            token_uri=credentials_dict.get("token_uri"),
+            client_id=credentials_dict.get("client_id"),
+            client_secret=credentials_dict.get("client_secret"),
+            scopes=credentials_dict.get("scopes"),
+        )
+        youtube = build("youtube", "v3", credentials=creds)
+        
+        # Gọi API lấy danh sách broadcast đang active
+        request = youtube.liveBroadcasts().list(
+            part="snippet,contentDetails",
+            broadcastStatus="active",
+            broadcastType="all"
+        )
+        response = request.execute()
+
+        if not response.get("items"):
+            print("[YouTube] Không tìm thấy buổi stream nào đang active.")
+            return None, None
+
+        # Lấy item đầu tiên tìm thấy
+        item = response["items"][0]
+        video_id = item["id"]
+        live_chat_id = item["snippet"].get("liveChatId")
+        
+        print(f"[YouTube] Đã tìm thấy Stream! Video ID: {video_id} | Chat ID: {live_chat_id}")
+        return video_id, live_chat_id
+
+    except Exception as e:
+        print(f"[YouTube] Lỗi khi lấy thông tin stream: {e}")
+        return None, None

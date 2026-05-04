@@ -10,7 +10,7 @@ from flask import (
 from flask_session import Session
 from core import MiniAI
 from viewer_tracker import ViewerTracker, ChatPatternAnalyzer
-from youtube_chat import YouTubeChatPoller, get_live_chat_id
+from youtube_chat import YouTubeChatPoller, get_live_chat_id, get_current_live_stream_info
 from datetime import timedelta, datetime
 import traceback
 import json
@@ -66,7 +66,22 @@ YOUTUBE_CREDENTIALS_FILE = os.environ.get(
 )
 DEFAULT_YOUTUBE_LIVE_CHAT_ID = os.environ.get("YOUTUBE_LIVE_CHAT_ID", "")
 DEFAULT_YOUTUBE_VIDEO_ID = os.environ.get("YOUTUBE_VIDEO_ID", "")
-VB_CABLE_DEVICE_ID = int(os.environ.get("VB_CABLE_DEVICE_ID", "15"))
+def find_vb_cable_device():
+    """Tự động tìm ID của thiết bị 'CABLE Input' (VB-Audio Virtual Cable)"""
+    try:
+        devices = sd.query_devices()
+        for i, dev in enumerate(devices):
+            # Tìm thiết bị có tên chứa 'CABLE Input' và có hỗ trợ output (từ góc nhìn của Python)
+            if "CABLE Input" in dev['name'] and dev['max_output_channels'] > 0:
+                print(f"[Audio] Đã tìm thấy VB-Cable tại ID: {i} ({dev['name']})")
+                return i
+    except Exception as e:
+        print(f"[Audio] Lỗi khi quét thiết bị âm thanh: {e}")
+    
+    # Fallback về giá trị từ môi trường hoặc mặc định
+    return int(os.environ.get("VB_CABLE_DEVICE_ID", "15"))
+
+VB_CABLE_DEVICE_ID = find_vb_cable_device()
 
 # Security configurations
 # SESSION_COOKIE_SECURE=True chỉ dùng trên HTTPS — tắt khi dev local (HTTP)
@@ -545,14 +560,21 @@ def speak():
         import time as _t
 
         audio_res = None
-        for attempt in range(4):
-            _t.sleep(1.0)
+        # Polling: FPT cần thời gian để xử lý (thường 2-10s).
+        # Tăng số lần thử lên 10 lần, mỗi lần cách nhau 1.5s.
+        for attempt in range(10):
+            _t.sleep(1.5)
             try:
                 temp_res = requests.get(audio_url, timeout=5)
                 if temp_res.status_code == 200 and len(temp_res.content) > 500:
                     audio_res = temp_res
                     break
-                print(f"[TTS] Retry {attempt + 1}/4 - Status: {temp_res.status_code}")
+                # 404 có nghĩa là file đang được xử lý, chưa sẵn sàng.
+                if temp_res.status_code != 404:
+                    print(f"[TTS] Polling status: {temp_res.status_code}")
+                
+                if attempt == 9: # Lần cuối cùng
+                    print(f"[TTS] Timeout: Không lấy được file audio sau 10 lần thử.")
             except Exception as _e:
                 print(f"[TTS] Lấy audio lỗi: {_e}")
 
@@ -1432,6 +1454,14 @@ def stream_start():
                 return jsonify(
                     {"error": f"Could not find live chat for video_id={video_id}"}
                 ), 404
+        
+        # Nếu vẫn không có live_chat_id, thử tìm stream đang active tự động
+        if not live_chat_id:
+            print("[YouTube] Đang tự động tìm buổi stream đang active...")
+            auto_video_id, auto_live_chat_id = get_current_live_stream_info(credentials)
+            if auto_live_chat_id:
+                video_id = auto_video_id
+                live_chat_id = auto_live_chat_id
 
         if not live_chat_id:
             return jsonify({"error": "Provide live_chat_id or video_id"}), 400
