@@ -313,13 +313,16 @@ class ConversationStateDetector:
         elif avg <= 40:
             adjusted = base_tokens
         elif avg <= 100:
-            # Chỉ mở rộng nếu Lyra không mệt (base >= 70)
-            adjusted = int(base_tokens * 1.2) if base_tokens >= 70 else base_tokens
+            # Chỉ mở rộng nếu Lyra không mệt (base >= 150 = attention bình thường)
+            adjusted = int(base_tokens * 1.2) if base_tokens >= 150 else base_tokens
         else:
-            # Chỉ mở rộng tối đa nếu Lyra hào hứng (base >= 100)
-            adjusted = int(base_tokens * 1.5) if base_tokens >= 100 else base_tokens
+            # Chỉ mở rộng tối đa nếu Lyra hào hứng (base >= 200 = attention cao)
+            adjusted = int(base_tokens * 1.3) if base_tokens >= 200 else base_tokens
 
-        return max(30, min(180, adjusted))
+        # JSON_MIN: minimum tokens để JSON 5-field không bị cắt giữa chừng.
+        # overhead(50) + monologue(80) + reply ngắn nhất(50) = 180
+        JSON_MIN = 180
+        return max(JSON_MIN, min(400, adjusted))
 
     def get_state_hint(self) -> str:
         """

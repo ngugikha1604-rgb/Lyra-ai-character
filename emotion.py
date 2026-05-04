@@ -504,9 +504,32 @@ class EmotionEngine:
         return " ".join(bias_instructions)
 
     def get_dynamic_max_tokens(self):
-        """Get dynamic max tokens based on attention - Optimized for short texting"""
+        """
+        Get dynamic max tokens for the full JSON vbrain response.
+
+        JSON overhead breakdown (fixed cost regardless of content):
+          - JSON structure + field names + quotes: ~40 tokens
+          - emotion + action fields (fixed short values): ~10 tokens
+          Total fixed overhead: ~50 tokens
+
+        Reply content budget (scales with attention/energy):
+          - Low attention (tired): ~50 tokens  → short 1-sentence reply
+          - Normal attention:      ~80 tokens  → 1-2 sentence reply
+          - High attention:        ~120 tokens → slightly more expressive
+
+        Monologue budget (chain-of-thought, always allocated):
+          ~80 tokens minimum for meaningful reasoning
+
+        Total = overhead + monologue + reply_budget
+        """
+        JSON_OVERHEAD = 50    # fixed cost for JSON skeleton
+        MONOLOGUE_BUDGET = 80 # chain-of-thought minimum
+
         if self.attention <= 3:
-            return 35
-        if self.attention >= 8:
-            return 100
-        return 70
+            reply_budget = 50   # tired → very short reply
+        elif self.attention >= 8:
+            reply_budget = 120  # energized → more expressive
+        else:
+            reply_budget = 80   # normal
+
+        return JSON_OVERHEAD + MONOLOGUE_BUDGET + reply_budget

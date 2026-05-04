@@ -41,11 +41,11 @@ class ModelUtilityMixin:
             print(f"[Light] Error: {e}, falling back")
         return self._call_model(messages, temperature=temperature, max_tokens=max_tokens)
 
-    def _call_model(self, messages, temperature=0.8, max_tokens=200):
+    def _call_model(self, messages, temperature=0.8, max_tokens=250):
         """Call local Ollama chat model."""
         return self._call_chat_model(messages, temperature=temperature, max_tokens=max_tokens)
 
-    def _call_chat_model(self, messages, temperature=0.8, max_tokens=200):
+    def _call_chat_model(self, messages, temperature=0.8, max_tokens=250):
         """Call Groq primary, fallback to local Ollama."""
         result = self._call_groq_model(messages, temperature=temperature, max_tokens=max_tokens)
         if result: return result
@@ -71,7 +71,7 @@ class ModelUtilityMixin:
                 print(f"[Chat] Ollama error: {e}")
         return None
 
-    def _call_groq_model(self, messages, temperature=0.4, max_tokens=150):
+    def _call_groq_model(self, messages, temperature=0.4, max_tokens=400):
         """Call Groq primary chat model."""
         if not GROQ_API_KEY:
             return None

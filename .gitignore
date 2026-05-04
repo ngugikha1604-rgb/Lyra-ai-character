@@ -56,7 +56,10 @@ models/
 
 source_art/
 static/
+
+#Tests
 test_vts.py
+test_start_stream.py
 
 !.env.example
 
