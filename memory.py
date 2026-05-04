@@ -18,7 +18,8 @@ from config import *
 from memory_utils import (
     BASE_DIR, DB_PATH, DB_LOCK, LAYER_USER, LAYER_SESSION, LAYER_TEMPORAL,
     _LAYER_MAP, _CONFLICTABLE_KINDS, KIND_IMPORTANCE,
-    _get_ollama_embedding, _cosine_similarity, _vectorized_cosine_similarity
+    _get_ollama_embedding, _cosine_similarity, _vectorized_cosine_similarity,
+    get_now_vn
 )
 from pinecone_layer import PineconeLayer
 from memory_ranker import MemoryRanker
@@ -77,7 +78,7 @@ class MemorySystem:
             try:
                 conn = self._get_db()
                 if not conn: continue
-                now_iso = datetime.now().isoformat()
+                now_iso = get_now_vn().isoformat()
                 with self.db_lock:
                     conn.execute(
                         "UPDATE memory_items SET is_valid=0 "
@@ -101,6 +102,7 @@ class MemorySystem:
             conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=60.0)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
             # Schema setup (omitted for brevity in this snippet, but kept in full file)
             self._init_db_schema(conn)
             with self.db_lock:
@@ -235,7 +237,7 @@ class MemorySystem:
 
     def _resolve_conflict(self, kind, old_row, new_value, c):
         """Resolves conflict by archiving the old fact and promoting the new one."""
-        now = datetime.now().isoformat()
+        now = get_now_vn().isoformat()
         c.execute("UPDATE memory_items SET superseded=1, last_used_at=? WHERE id=?", (now, old_row["id"]))
         change_note = f"[Thay đổi] {kind}: '{old_row['value']}' → '{new_value}'"
         c.execute("INSERT INTO memory_items (kind,value,layer,weight,saliency,source_turn,created_at) VALUES ('episodic',?,?,1.0,4,?,?)", (change_note, LAYER_TEMPORAL, self.turn_counter, now))
@@ -249,7 +251,7 @@ class MemorySystem:
     def add_session_item(self, value, kind="session"):
         """Adds a short-term awareness item to L2 memory."""
         self._expire_session_memory_if_idle()
-        now = datetime.now().isoformat()
+        now = get_now_vn().isoformat()
         self._session_items.append({"kind": kind, "value": value, "created_at": now})
         self._session_last_activity_at = now
         if len(self._session_items) > 30: self._session_items.pop(0)
@@ -276,7 +278,7 @@ class MemorySystem:
         return "[Session context (L2)]\n" + "\n\n".join(parts)
 
     def _expire_session_memory_if_idle(self, idle_hours=4.0):
-        if self._session_last_activity_at and datetime.now() - datetime.fromisoformat(self._session_last_activity_at) >= timedelta(hours=idle_hours):
+        if self._session_last_activity_at and get_now_vn() - datetime.fromisoformat(self._session_last_activity_at) >= timedelta(hours=idle_hours):
             self.clear_session_memory()
 
     def add_item(self, kind, value, weight=1.0, limit=12, importance=None):
@@ -292,7 +294,7 @@ class MemorySystem:
             c = conn.cursor()
             saliency = importance if importance is not None else self.estimate_saliency(kind, text)
             importance_val = KIND_IMPORTANCE.get(kind, 1.0)
-            now = datetime.now().isoformat()
+            now = get_now_vn().isoformat()
 
             with self.db_lock:
                 if layer == LAYER_USER:
@@ -323,7 +325,7 @@ class MemorySystem:
     def _current_persist_time(self):
         return (
             self.memory.get("time_tracking", {}).get("last_message_time")
-            or datetime.now().isoformat()
+            or get_now_vn().isoformat()
         )
 
     def _metadata_rows(self, now):
@@ -458,7 +460,7 @@ class MemorySystem:
     def touch_items(self, items):
         conn = self._get_db()
         if not conn: return
-        now = datetime.now().isoformat()
+        now = get_now_vn().isoformat()
         with self.db_lock:
             for kind, value in items:
                 conn.execute("UPDATE memory_items SET last_used_at=?, access_count=MIN(access_count+1,100) WHERE kind=? AND value=?", (now, kind, value))
@@ -519,7 +521,7 @@ class MemorySystem:
         conn = self._get_db()
         if not conn: return
         
-        now = datetime.now()
+        now = get_now_vn()
         fourteen_days_ago = (now - timedelta(days=14)).isoformat()
         thirty_days_ago = (now - timedelta(days=30)).isoformat()
         

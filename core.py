@@ -56,7 +56,7 @@ class MiniAI(
             "action": "NONE",
             "reply": "",
         }
-
+        self._skill_loop_count = 0  # To prevent infinite recursion
         self.emotion = EmotionEngine()
         self.memory = MemorySystem(max_summaries=MAX_SUMMARIES)
         self.conv_state = ConversationStateDetector(window=10)
@@ -209,17 +209,29 @@ class MiniAI(
             *self.messages[-history_window:],
             {"role": "user", "content": composed_message},
         ]
-
-    def _call_and_parse_vbrain(self, api_messages, dynamic_temp, dynamic_max_tokens, prompt_args):
-        content = self._call_model(api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens)
+    def _call_and_parse_vbrain(
+        self, api_messages, dynamic_temp, dynamic_max_tokens, prompt_args
+    ):
+        # Reset loop count on fresh call (not from within itself)
+        # But wait, this is called from chat(). We should manage count in chat().
+        # Actually, let's just use it here.
+        content = self._call_model(
+            api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens
+        )
         if not content:
             return {"monologue": "", "emotion": "neutral", "action": "NONE", "reply": "..."}
 
         parsed = parse_vbrain_response(content)
         skill_name = parsed.get("skill_needed")
-        if not skill_name:
+        
+        # Guard: Stop if recursion limit reached
+        if not skill_name or self._skill_loop_count >= 2:
+            self._skill_loop_count = 0 # Reset for next turn
             return parsed
 
+        self._skill_loop_count += 1
+        print(f"[Skill Loop] Iteration {self._skill_loop_count} for: {skill_name}")
+        
         skill_content = self._load_skill_content(skill_name)
         if not skill_content:
             return parsed
@@ -281,6 +293,7 @@ class MiniAI(
 
     def chat(self, user_input, source_type: str = "owner", viewer_data: dict = None, stream_context: str = ""):
         """Main orchestration loop for Lyra's conversation."""
+        self._skill_loop_count = 0 # Reset at start of each new turn
         self._refresh_time_state()
         self.turn_counter += 1
 

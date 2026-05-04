@@ -22,7 +22,7 @@ class MemoryRanker:
             resp = self._session.post(
                 self.url,
                 json={"model": self.model, "messages": [{"role": "user", "content": prompt}], "options": {"temperature": 0.1, "num_predict": 30}, "stream": False},
-                timeout=8, verify=False
+                timeout=4, verify=False
             )
             if resp.status_code == 200:
                 content = resp.json().get("message", {}).get("content", "").strip()
@@ -46,7 +46,7 @@ class MemoryRanker:
 
         scored_items.sort(key=lambda x: x[0], reverse=True)
         result, current_chars = [], 0
-        char_limit = token_budget * 3.8
+        char_limit = token_budget * 3.2 # Lowered from 3.8 for safer Vietnamese estimation
 
         for _, text in scored_items:
             if current_chars + len(text) > char_limit: break

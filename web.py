@@ -25,6 +25,7 @@ from pydub import AudioSegment
 import sounddevice as sd
 import numpy as np
 from memory import DB_PATH, DB_LOCK
+from memory_utils import get_now_vn
 from config import (
     ELEVENLABS_API_KEY,
     ELEVENLABS_VOICE_ID,
@@ -289,7 +290,7 @@ def _proactive_monitor():
             last_time = getattr(lyra_ai, "_last_viewer_message_time", None)
             if last_time is None:
                 continue
-            gap = (datetime.now() - last_time).total_seconds()
+            gap = (get_now_vn() - last_time).total_seconds()
             if gap > 120:
                 prompt = (
                     "Chat đã im lặng 2 phút. Đặt một câu hỏi ngắn, tò mò để khơi gợi mọi người tâm sự "
@@ -320,7 +321,7 @@ def _proactive_monitor():
                         }
                     )
                     # Reset timer to avoid spam
-                    lyra_ai._last_viewer_message_time = datetime.now()
+                    lyra_ai._last_viewer_message_time = get_now_vn()
         except Exception as e:
             print(f"[ProactiveMonitor] {e}")
 
@@ -1151,7 +1152,7 @@ def _handle_stream_event(chat_event: dict):
                     f"{stream_ctx}\n{velocity_hint}" if stream_ctx else velocity_hint
                 )
             composed_input = message  # consensus uses raw message
-            lyra_ai._last_viewer_message_time = datetime.now()
+            lyra_ai._last_viewer_message_time = get_now_vn()
             with ai_chat_lock:
                 result = lyra_ai.chat(
                     composed_input,
@@ -1277,7 +1278,7 @@ def _handle_stream_event(chat_event: dict):
             record_donation(viewer_name=sender_name, amount=amount)
 
         # Update last activity timestamp for proactive monitoring
-        lyra_ai._last_viewer_message_time = datetime.now()
+        lyra_ai._last_viewer_message_time = get_now_vn()
 
         with ai_chat_lock:
             result = lyra_ai.chat(

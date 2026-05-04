@@ -1,6 +1,8 @@
 import os
 import requests
 import threading
+import pytz
+from datetime import datetime
 try:
     import numpy as np
 except ImportError:
@@ -76,3 +78,7 @@ def _vectorized_cosine_similarity(query_vec: "np.ndarray", matrix: "np.ndarray")
     # Handle zero norms
     similarities = np.divide(dot_products, denominators, out=np.zeros_like(dot_products), where=denominators!=0)
     return similarities
+
+def get_now_vn():
+    """Returns the current time in Asia/Ho_Chi_Minh timezone."""
+    return datetime.now(pytz.timezone("Asia/Ho_Chi_Minh"))

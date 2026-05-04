@@ -65,7 +65,8 @@ class RLFeedbackLoop:
 
     def _trigger_evaluation(self, obs):
         """Moves observation to background worker for AI scoring."""
-        if not obs["reaction_buffer"]:
+        if len(obs["reaction_buffer"]) < 2:
+            # Not enough data for a meaningful reward (ignore silence in slow streams)
             return
         enqueue(PRIORITY_NORMAL, self._evaluate_observation, obs)
 
