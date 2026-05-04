@@ -59,12 +59,14 @@ static/
 
 #Tests
 test_vts.py
-test_start_stream.py
+test_stream.py
 
 !.env.example
 
 #Vibe coding
 /.vscode
+/.kilo
+/.kiro
 
 #Check Devices
 check_devices.py

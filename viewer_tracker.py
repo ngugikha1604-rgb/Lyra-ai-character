@@ -808,21 +808,21 @@ class ViewerTracker:
         try:
             parts = []
 
-            # --- Kiểm tra regular viewer ---
+            # --- Kiểm tra người xem quen (regular viewer) ---
             regular = self.is_regular_viewer(sender_id, platform)
             if regular:
                 aff = regular["affection"]
                 streams = regular["total_streams"]
                 parts.append(
-                    f"[VIEWER QUEN — {sender_name}] "
-                    f"Đã xem {streams} buổi stream. Affection: {aff}/100."
+                    f"NGƯỜI XEM QUEN — {sender_name}: "
+                    f"Đã xem {streams} buổi stream. Mức độ tình cảm: {aff}/100."
                 )
                 if aff >= 70:
-                    parts.append("→ Viewer rất thân, có thể nhắc tên và tương tác ấm áp hơn.")
+                    parts.append("Đây là người xem rất thân, hãy nhắc tên và tương tác ấm áp hơn.")
                 elif aff >= 50:
-                    parts.append("→ Viewer quen mặt, thân thiện tự nhiên.")
+                    parts.append("Đây là người xem quen mặt, hãy thân thiện tự nhiên.")
                 else:
-                    parts.append("→ Viewer mới được nhận ra, thân thiện nhẹ.")
+                    parts.append("Đây là người mới được nhận diện là khách quen, hãy thân thiện nhẹ nhàng.")
             else:
                 count = viewer_info.get("message_count", 1)
                 affinity = viewer_info.get("affinity_score", 1.0)
@@ -832,25 +832,25 @@ class ViewerTracker:
                 elif count >= 5:
                     familiarity = "đã chat vài lần"
                 else:
-                    familiarity = "viewer mới"
+                    familiarity = "người xem mới"
 
                 parts.append(
-                    f"[VIEWER — {sender_name}] {familiarity}, {count} tin nhắn hôm nay."
+                    f"NGƯỜI XEM — {sender_name}: {familiarity}, {count} tin nhắn hôm nay."
                 )
 
                 if affinity >= 3.0:
-                    parts.append("→ Tương tác nhiều hôm nay, có thể thân thiện hơn bình thường.")
+                    parts.append("Tương tác rất nhiều hôm nay, có thể thân thiện hơn bình thường.")
 
             # --- Top chatters (tối đa 3 người) ---
             top = self.get_top_viewers(platform=platform, channel_id=channel_id, limit=3)
             if top:
                 names = [f"{v['viewer_name']} ({v['message_count']})" for v in top]
-                parts.append(f"Top chatters hôm nay: {', '.join(names)}")
+                parts.append(f"Những người chat nhiều nhất hôm nay: {', '.join(names)}")
 
             if not parts:
                 return ""
 
-            return "[Stream context]\n" + "\n".join(f"- {p}" for p in parts)
+            return "BỐI CẢNH STREAM:\n" + "\n".join(f"{p}" for p in parts)
 
         except Exception as e:
             print(f"[ViewerTracker] get_stream_context error: {e}")

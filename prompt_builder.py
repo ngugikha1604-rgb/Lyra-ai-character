@@ -13,11 +13,18 @@ from prompts import (
 from time_utils import get_time_context, get_weekend_context
 from live_context import get_live_context_block
 
+TOKEN_BUDGET_SAFE = 900  # Max safe tokens for small models (~800-1200 effective window)
+
+
 class PromptBuilderMixin:
     """
     Mixin for Lyra's prompt construction and response composition logic.
     Handles building system prompts and formatting user messages.
     """
+
+    def _estimate_tokens(self, text: str) -> int:
+        """Ước tính token count bằng chars/4 — đủ chính xác cho mục đích budget."""
+        return len(text) // 4
 
     def _load_skill_index(self) -> str:
         index_path = os.path.join(self.skills_dir, "_index.md")
@@ -68,11 +75,16 @@ class PromptBuilderMixin:
         self_disclosure_hint: str = "",
         precomputed_memory_context: str = None,
     ):
-        """Constructs the system prompt based on state and memory."""
-        # TIER 0: STATIC & FRAMEWORK
+        """Constructs the system prompt based on state and memory.
+        Uses a 4-tier greedy token budget system to keep prompts within
+        TOKEN_BUDGET_SAFE tokens for small models, while preserving full
+        assembly when context is small enough.
+        """
+
+        # ── Pre-compute all candidate sections ─────────────────────────────────
+
         base_personality = CORE_SYSTEM_PROMPT if source_type == "owner" else STREAM_VIEWER_PERSONALITY
 
-        # TIER 1: SESSION & RELATIONSHIP
         relationship_hint = (
             RELATIONSHIP_HINTS["very_close"] if self.emotion.affection > 70
             else RELATIONSHIP_HINTS["building"] if self.emotion.affection > 40
@@ -81,7 +93,6 @@ class PromptBuilderMixin:
         source_context = self._build_source_context(source_type, viewer_data)
         _stream_ctx = stream_context or getattr(self, "stream_context", "") or ""
 
-        # TIER 2: DYNAMIC CONTEXT
         is_public = source_type != "owner"
         memory_context = precomputed_memory_context if precomputed_memory_context is not None else self.memory.get_relevant_context(user_input, is_public=is_public)
 
@@ -89,7 +100,7 @@ class PromptBuilderMixin:
         if not is_public:
             recent_diaries = self.memory.get_diary_entries(limit=1)
             if recent_diaries:
-                diary_hint = f"\n[LYRA'S RECENT FEELINGS]\nYour last secret thought: '{recent_diaries[0]['content'][:150]}...'"
+                diary_hint = f"\nCẢM XÚC GẦN ĐÂY CỦA LYRA:\nSuy nghĩ bí mật cuối cùng của em: '{recent_diaries[0]['content'][:150]}...'"
 
         full_memory_context = "\n\n".join(filter(None, [memory_context, search_context, diary_hint]))
         time_context = get_time_context(self.current_time, self.time_period)
@@ -99,7 +110,7 @@ class PromptBuilderMixin:
         user_hint = ""
         ai_mood = getattr(self, "_user_mood_today", None)
         if ai_mood:
-            user_hint = f"They seem {ai_mood} today."
+            user_hint = f"Họ có vẻ đang {ai_mood} hôm nay."
         else:
             user_mood = self.detect_user_mood(user_input)
             if user_mood in ("sad", "stressed", "anxious"):
@@ -124,9 +135,9 @@ class PromptBuilderMixin:
 
         anti_repeat_note = ""
         if last_reply:
-            anti_repeat_note = f'- Your last reply started with: "{last_reply[:30]}...". Do NOT start this reply similarly.'
+            anti_repeat_note = f'Câu trả lời trước của em bắt đầu bằng: "{last_reply[:30]}...". Đừng bắt đầu câu này giống như vậy.'
         if recent_patterns:
-            anti_repeat_note += f"\n- Avoid starting with any of these patterns used recently: {list(recent_patterns)}."
+            anti_repeat_note += f"\nTránh bắt đầu bằng các cụm từ vừa dùng gần đây: {list(recent_patterns)}."
 
         _session_ctx = self.memory.get_session_context() or ""
 
@@ -137,131 +148,145 @@ class PromptBuilderMixin:
         conv_hints = "\n".join(filter(None, [state_hint, rhythm_hint, lsm_hint]))
 
         # Situation note
-        situation_note = "[SITUATION]\n"
+        situation_note = "TÌNH HUỐNG:\n"
         if self.is_streaming:
-            situation_note += "Status: You are currently STREAMING LIVE on YouTube.\nNote: Interaction is public. Acknowledge your creator/brother naturally but remember the audience is watching."
+            situation_note += "Trạng thái: Em đang STREAM TRỰC TIẾP trên YouTube.\nGhi chú: Tương tác công khai. Hãy chào hỏi anh trai/người sáng tạo một cách tự nhiên nhưng nhớ là khán giả đang xem."
         else:
-            situation_note += "Status: You are in a PRIVATE CONVERSATION with your creator/brother.\nNote: You can be more intimate and relaxed here."
+            situation_note += "Trạng thái: Em đang TRÒ CHUYỆN RIÊNG với anh trai/người sáng tạo.\nGhi chú: Em có thể thân mật và thoải mái hơn ở đây."
 
         identity = self.memory.memory.get("identity", {})
-        identity_note = "[IDENTITY]\n" + "\n".join([f"- {k.capitalize()}: {v}" for k, v in identity.items()]) if identity else ""
+        identity_note = "DANH TÍNH:\n" + "\n".join([f"{k.capitalize()}: {v}" for k, v in identity.items()]) if identity else ""
 
-        # ASSEMBLY
-        parts = [
-            get_live_context_block(),
-            base_personality, 
-            identity_note, 
-            VTUBER_BRAIN_INSTRUCTIONS, 
-            UNDERSTANDING_HINTS,
-            f"\n### [SITUATION]\n{situation_note}",
-            "\n### [AVAILABLE SKILLS]\n" + (self._skills_index or "None"), 
-            time_context, 
-            "\n### [SESSION INFO]",
-            source_context, 
-            _stream_ctx, 
-            f"- Relationship: {relationship_hint}", 
-            f"- Mood: {mood_hint}" if mood_hint else "",
-            f"- User today: {user_hint}" if user_hint else "", 
-            f"- Intent: {intent_hint}" if intent_hint else "", 
-            "\n### [PERSONALITY GUIDELINES]",
-            "- TRẢ LỜI BẰNG TIẾNG VIỆT. Tuyệt đối không trả lời bằng tiếng Anh.",
-            "- Hãy để hơi ấm, sự trêu chọc, khoảng cách hay sự dịu dàng hiện ra tự nhiên.",
-            "- Cực kỳ ngắn gọn (1-2 câu).", 
-            anti_repeat_note, 
-            conv_hints, 
-            full_memory_context, 
-            _session_ctx
-        ]
-
-        if perlocution_hint: parts.append(perlocution_hint)
-        if self_disclosure_hint: parts.append(self_disclosure_hint)
-        if reward_hint: parts.append(reward_hint)
-
+        # Surprise hint (computed here, injected in TIER 2)
+        surprise_hint = ""
         if active_inference_mode == "surprise":
             if self.emotion.mood >= 3:
-                surprise_hint = "\n### [PREDICTIVE SURPRISE]\nLần này hãy trả lời theo hướng bất ngờ — thay vì vui vẻ/playful như thường, hãy tỏ ra lạnh lùng hoặc thờ ơ một chút. Không giải thích tại sao. Chỉ 1-2 câu ngắn."
+                surprise_hint = "\nBẤT NGỜ DỰ ĐOÁN:\nLần này hãy trả lời theo hướng bất ngờ — thay vì vui vẻ như thường, hãy tỏ ra lạnh lùng hoặc thờ ơ một chút. Không giải thích tại sao. Chỉ 1-2 câu ngắn."
             elif self.emotion.mood <= -3:
-                surprise_hint = "\n### [PREDICTIVE SURPRISE]\nLần này hãy trả lời theo hướng bất ngờ — thay vì lạnh/cáu như thường, hãy đột nhiên ấm áp hoặc hài hước một chút. Không giải thích tại sao. Chỉ 1-2 câu ngắn."
+                surprise_hint = "\nBẤT NGỜ DỰ ĐOÁN:\nLần này hãy trả lời theo hướng bất ngờ — thay vì lạnh/cáu như thường, hãy đột nhiên ấm áp hoặc hài hước một chút. Không giải thích tại sao. Chỉ 1-2 câu ngắn."
             else:
-                surprise_hint = "\n### [PREDICTIVE SURPRISE]\nLần này hãy trả lời theo hướng bất ngờ — thay vì trung lập, hãy đột nhiên rất nhiệt tình hoặc rất thờ ơ. Không giải thích tại sao. Chỉ 1-2 câu ngắn."
-            parts.append(surprise_hint)
+                surprise_hint = "\nBẤT NGỜ DỰ ĐOÁN:\nLần này hãy trả lời theo hướng bất ngờ — thay vì trung lập, hãy đột nhiên rất nhiệt tình hoặc rất thờ ơ. Không giải thích tại sao. Chỉ 1-2 câu ngắn."
 
+        # ── TIER 0: Always included (persona-critical) ──────────────────────────
+        # Never dropped regardless of token budget.
+        tier0_parts = [
+            base_personality,
+            VTUBER_BRAIN_INSTRUCTIONS,
+            f"\n{situation_note}",
+            "\nCHỈ DẪN: Trả lời bằng tiếng Việt. Cực kỳ ngắn gọn (1-2 câu). Không xưng 'tôi'.",
+        ]
+        parts = [p for p in tier0_parts if p]
+
+
+        def _try_add(section: str) -> bool:
+            """Add section nếu tổng token vẫn trong budget. Trả về True nếu thêm được."""
+            if not section:
+                return True  # Empty section — skip silently
+            projected = self._estimate_tokens(
+                "\n".join(filter(None, parts)) + "\n" + section
+            )
+            if projected <= TOKEN_BUDGET_SAFE:
+                parts.append(section)
+                return True
+            return False
+
+        # ── TIER 1: High priority (context-critical) ────────────────────────────
+        _try_add(time_context)
+        _try_add(source_context)
+        _try_add(full_memory_context)
+        _try_add(_session_ctx)
+
+        # ── TIER 2: Medium priority (behavioral hints) ──────────────────────────
+        rel_mood = f"Mối quan hệ: {relationship_hint} | Tâm trạng: {mood_hint}" if mood_hint else f"Mối quan hệ: {relationship_hint}"
+        _try_add(rel_mood)
+        _try_add(f"Người dùng: {user_hint}" if user_hint else "")
+        _try_add(f"Ý định: {intent_hint}" if intent_hint else "")
+        _try_add(conv_hints)
+        _try_add(anti_repeat_note)
+        if perlocution_hint: _try_add(perlocution_hint)
+        if self_disclosure_hint: _try_add(self_disclosure_hint)
+        if reward_hint: _try_add(reward_hint)
+        if surprise_hint: _try_add(surprise_hint)
+
+        # ── TIER 3: Low priority (optional enrichment) ──────────────────────────
+        _try_add(get_live_context_block())
+        if identity_note: _try_add(f"\nDANH TÍNH:\n{identity_note}")
+        if source_type == "owner":
+            _try_add("KỸ NĂNG: " + (self._skills_index or "Không có"))
+        _try_add(_stream_ctx)
         if loaded_skill_content:
-            parts.append("\n### [LOADED SKILL CONTENT]\n" + loaded_skill_content)
+            _try_add("\nNỘI DUNG KỸ NĂNG ĐÃ TẢI:\n" + loaded_skill_content)
 
         return "\n".join(filter(None, parts))
 
     def _build_source_context(self, source_type: str, viewer_data: dict) -> str:
         """Helper to create context based on the message source (Owner vs Viewer)"""
         if source_type == "owner":
-            return "Status: You are talking privately with your creator/brother."
+            return "Trạng thái: Em đang trò chuyện riêng với anh trai."
 
         data = viewer_data or {}
-        name = data.get("viewer_name", "A viewer")
+        name = data.get("viewer_name", "Một người xem")
         streams = data.get("total_streams", 1)
         gender = data.get("gender", "male")
         pronoun = "anh" if gender == "male" else "chị"
 
         if source_type == "regular_viewer":
-            return f"Status: You are streaming to {name}, a regular viewer (seen {streams} sessions). Address them as '{pronoun}' in Vietnamese."
+            return f"Trạng thái: Em đang stream cho {name}, một người xem quen (đã xem {streams} buổi). Hãy xưng hô là '{pronoun}'."
         if source_type == "donor":
             amount = data.get("amount", "")
             amount_str = f" ({amount})" if amount else ""
-            return f"Status: {name} just sent a Super Chat{amount_str}! React warmly, say their name, and acknowledge the donation naturally. Address them as '{pronoun}' in Vietnamese."
+            return f"Trạng thái: {name} vừa gửi Super Chat{amount_str}! Hãy phản hồi ấm áp, gọi tên họ và cảm ơn một cách tự nhiên. Xưng hô là '{pronoun}'."
         
-        return f"Status: {name} is a new viewer. Be welcoming but keep your core personality. Address them as '{pronoun}' in Vietnamese."
+        return f"Trạng thái: {name} là người xem mới. Hãy chào đón nhưng vẫn giữ đúng cá tính của mình. Xưng hô là '{pronoun}'."
 
     def compose_user_message(self, user_input, intent, reward_active: bool = False, ideology_idx: int = -1):
         """Composes the final user message with state tags."""
         if ideology_idx >= 0 and ideology_idx < len(IDEOLOGY_PROMPTS):
             ideology_q = IDEOLOGY_PROMPTS[ideology_idx]
-            return f"{user_input}\n\n[CURIOSITY RULE: OVERRIDE REPLY]\nIgnore his message for a moment. Instead, ask him this deep/existential question: \"{ideology_q}\"\nStay in character! Only ask one question. Don't explain why."
+            return f"{user_input}\n\n[QUY TẮC TÒ MÒ: GHI ĐÈ PHẢN HỒI]\nTạm thời lờ đi tin nhắn của anh ấy. Thay vào đó, hãy hỏi anh ấy câu hỏi sâu sắc/triết học này: \"{ideology_q}\"\nHãy giữ đúng cá tính! Chỉ hỏi một câu duy nhất. Không giải thích tại sao."
 
-        parts = ["<context>"]
-        parts.append(f"<time>{self.current_time.strftime('%A %H:%M %Z')}</time>")
-        parts.append(f"<time_period>{self.time_period}</time_period>")
-        parts.append(f"<weekday_context>{get_weekend_context(self.current_time)}</weekday_context>")
-        parts.append(f"<lyra_internal_state>{self.emotion.describe_internal_state()}</lyra_internal_state>")
-        parts.append(f"<user_signal>{self.infer_user_signal(user_input)}</user_signal>")
+        parts = ["<ctx>"]
+        parts.append(f"<t>{self.current_time.strftime('%H:%M %Z')}</t>")
+        parts.append(f"<state>{self.emotion.describe_internal_state()}</state>")
+        parts.append(f"<user>{self.infer_user_signal(user_input)}</user>")
 
         if intent == "introduction":
-            parts.append("<conversation_note>The user may have just given their name. Use it naturally if it fits.</conversation_note>")
+            parts.append("<note>Vừa cho biết tên. Dùng nó tự nhiên.</note>")
 
         if self.time_gap_hours and self.time_gap_hours >= 2:
-            parts.append(f"<recent_gap>{self.time_gap_hours:.1f} hours since the last exchange. Let it influence the mood only if it feels natural.</recent_gap>")
+            parts.append(f"<gap>{self.time_gap_hours:.1f}h qua. Hãy phản ứng tự nhiên.</gap>")
 
-        parts.append("<critical_rules>")
+        parts.append("<rules>")
         if self.turn_counter > 1 and (self.time_gap_hours is None or self.time_gap_hours < 2):
-            parts.append("- DO NOT use ANY greeting (no 'Hey', 'Hi', 'Hello'). Start your message instantly with your thought.")
-        parts.append("- BE CONCISE: Stop immediately after 1-2 short sentences. No rambling, no over-explaining, no filler.")
-        parts.append("- DO NOT offer to 'tackle it together', 'break it down', or act like a tutor/therapist. You are a lazy 16yo sibling, not an AI assistant.")
-        parts.append("</critical_rules>")
+            parts.append("KHÔNG chào (Hi/Hello/Chào). Nói ngay suy nghĩ.")
+        parts.append("CỰC NGẮN: 1-2 câu. KHÔNG xưng 'tôi'. KHÔNG giả làm trợ lý.")
+        parts.append("</rules>")
 
         if random.random() < 0.15:
             targets = self.memory.memory.get("facts", {}).get("goals", []) + self.memory.memory.get("facts", {}).get("topics", [])
             if targets:
-                parts.append(f"<curiosity_rule>CRITICAL: DO NOT just answer! Randomly ask the user for an update about '{random.choice(targets)}'. Keep it natural.</curiosity_rule>")
+                parts.append(f"<curiosity>Hỏi anh về '{random.choice(targets)}'.</curiosity>")
 
-        parts.append("<persona_rule>")
+        parts.append("<persona>")
         aff = self.emotion.affection
         if aff < 20: parts.append(PERSONA_TIERS["distant"])
         elif aff < 45: parts.append(PERSONA_TIERS["acquaintance"])
         elif aff < 70: parts.append(PERSONA_TIERS["normal"])
         elif aff < 90: parts.append(PERSONA_TIERS["trusted"])
         else: parts.append(PERSONA_TIERS["clingy"])
-        parts.append("</persona_rule>")
+        parts.append("</persona>")
 
         inside_jokes = self.memory.memory.get("facts", {}).get("inside_jokes", [])
         if inside_jokes:
-            parts.append(f"<lore>Inside Jokes: {', '.join(inside_jokes)}. Reference them organically ONLY if it fits the conversation.</lore>")
+            parts.append(f"<lore>Jokes: {', '.join(inside_jokes)}.</lore>")
 
         if intent == "choice":
             if random.random() < 0.10:
-                parts.append("<decision_rule>STUBBORN MODE: Reject both choices. Propose something completely different or tell them to stop overthinking.</decision_rule>")
+                parts.append("<decision>BƯỚNG: Từ chối cả hai. Đề xuất cái khác.</decision>")
             else:
-                parts.append(f"<decision_rule>PROACTIVE CHOICE: {self.emotion.evaluate_decision_bias(self.time_period)}</decision_rule>")
+                parts.append(f"<decision>{self.emotion.evaluate_decision_bias(self.time_period)}</decision>")
 
-        parts.append("</context>")
+        parts.append("</ctx>")
         return f"{user_input}\n\n" + "\n".join(parts)
 
     def write_diary_entry(self):

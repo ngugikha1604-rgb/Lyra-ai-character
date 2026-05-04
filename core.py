@@ -163,7 +163,7 @@ class MiniAI(
         if search_future:
             search_result = search_future.result()
             if search_result:
-                search_context = f"\n\n[SEARCH RESULTS]\n{search_result}\n"
+                search_context = f"\n\nKẾT QUẢ TÌM KIẾM:\n{search_result}\n"
         return memory_context, search_context
 
     def _build_reward_hint(self, source_type):
@@ -296,8 +296,10 @@ class MiniAI(
         self._track_stream_turn(user_input, source_type, viewer_data, stream_context)
 
         if self.turn_counter % REFLECTION_INTERVAL == 0:
-            enqueue(PRIORITY_NORMAL, self._reflect_on_session)
-
+            # Chỉ enqueue nếu không phải stream hoặc là chủ kênh (để tránh quá tải khi stream đông viewer)
+            if not self.is_streaming or source_type == "owner":
+                enqueue(PRIORITY_NORMAL, self._reflect_on_session)
+        
         original_emotion_state = self._apply_viewer_emotion_context(source_type, viewer_data)
         memory_context, search_context = self._collect_turn_context(user_input, source_type)
 
@@ -392,10 +394,10 @@ class MiniAI(
             prompt = (
                 f"Bạn là tiềm thức của Lyra. Hãy tự suy ngẫm về diễn biến gần đây.\n\n"
                 f"Lịch sử chat gần đây:\n{recent_convo}\n\n"
-                f"Diễn biến session (L2):\n{session_items}\n\n"
+                f"Diễn biến phiên chat (L2):\n{session_items}\n\n"
                 f"Trạng thái cảm xúc: {emotion_state}\n\n"
-                f"Nhiệm vụ: Tóm tắt 2-3 'Key Insights' (thấu hiểu) về tình hình hiện tại (ví dụ: User đang bận, Viewer thích đùa nhây, Lyra đang mệt). "
-                f"Trả về JSON cực ngắn: {{\"insights\": [\"insight 1\", \"insight 2\"]}}"
+                f"Nhiệm vụ: Tóm tắt 2-3 'Thấu hiểu quan trọng' về tình hình hiện tại (ví dụ: Người dùng đang bận, Người xem thích đùa nhây, Lyra đang mệt). "
+                f"Trả về JSON cực ngắn: {{\"insights\": [\"thấu hiểu 1\", \"thấu hiểu 2\"]}}"
             )
             
             raw = self._call_light_model([
@@ -413,38 +415,23 @@ class MiniAI(
                         update_insights(insights)
                         print(f"[Reflection] New insights: {insights}")
                         
-                        # Feature 3: Auto-update plan if exists
-                        self._update_plan_status(insights)
+                        # Tính năng tự động cập nhật kế hoạch stream đã bị vô hiệu hóa
 
         except Exception as e:
             print(f"[Core] Reflection loop error: {e}")
 
     def _update_plan_status(self, insights):
-        """Updates the status of plan items based on recent insights."""
-        from live_context import load_live_context, update_plan
-        lc = load_live_context()
-        plan = lc.get("stream_plan", [])
-        if not plan: return
-        
-        updated = False
-        insight_text = " ".join(insights).lower()
-        
-        # Simple heuristic to mark goals as done based on insights
-        for item in plan:
-            if item["status"] == "pending":
-                # If any insight word matches plan goal keywords
-                keywords = re.findall(r"\w{4,}", item["goal"].lower())
-                if any(kw in insight_text for kw in keywords if kw not in ("chủ", "nhân", "lyra", "người", "khán", "giả")):
-                    item["status"] = "done"
-                    updated = True
-                    print(f"[Plan] Goal marked as done: {item['goal']}")
-        
-        if updated:
-            update_plan(plan)
+        """(Disabled) Trước đây dùng để cập nhật trạng thái các mục tiêu kế hoạch stream."""
+        pass
 
     def get_proactive_message(self):
         """Generates a proactive message based on time and situation."""
         from prompts import PROACTIVE_TIME_TEMPLATES
         situation = "morning" if self.time_period == "morning" else "generic"
         template = random.choice(PROACTIVE_TIME_TEMPLATES.get(situation, ["..."]))
-        return self._call_light_model([{"role": "user", "content": template}], temperature=0.7)
+        
+        messages = [
+            {"role": "system", "content": "Bạn là Lyra, em gái 16 tuổi. Bạn luôn xưng 'em' và gọi 'anh'. Hãy nói lại câu sau một cách tự nhiên, đáng yêu nhất. Trả về văn bản thuần."},
+            {"role": "user", "content": template}
+        ]
+        return self._call_light_model(messages, temperature=0.8)

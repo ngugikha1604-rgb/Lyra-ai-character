@@ -47,7 +47,7 @@ class StreamHandlerMixin:
         except Exception as e:
             print(f"[Core] update_stream_summary error: {e}")
 
-    def generate_stream_event_reply(self, event_type: str, context: dict = None) -> str:
+    def generate_stream_event_reply(self, event_type: str, context: dict = None, temperature: float = None) -> str:
         """
         Generates Lyra's reaction to a stream event.
         event_type: 'greeting' | 'farewell' | 'milestone' | 'regular_arrival' | 'silence_fill'
@@ -56,12 +56,11 @@ class StreamHandlerMixin:
         messages = []
 
         if event_type == "greeting":
-            goals_str = ", ".join(STREAM_GOALS) if STREAM_GOALS else "chưa có mục tiêu cụ thể"
             prompt_text = STREAM_GREETING_PROMPT.format(
-                title=STREAM_TITLE or "stream hôm nay",
-                game=STREAM_GAME or "chưa rõ",
-                goals=goals_str,
-                notes=STREAM_NOTES or "",
+                title="stream hôm nay",
+                game="chuyện phiếm",
+                goals="tâm sự với viewer",
+                notes="",
             )
             messages = [
                 {"role": "system", "content": STREAM_EVENT_SYSTEM},
@@ -85,8 +84,8 @@ class StreamHandlerMixin:
             ]
         elif event_type == "silence_fill":
             prompt_text = PROACTIVE_STREAM_PROMPT.format(
-                current_activity=ctx.get("current_activity", "đang chơi game"),
-                game=STREAM_GAME or "game",
+                current_activity="đang thả hồn ở đâu đó", # Thay đổi hoạt động mặc định
+                game="nghĩ vẩn vơ", # Thay đổi game mặc định
             )
             messages = [
                 {"role": "system", "content": STREAM_EVENT_SYSTEM},
@@ -96,43 +95,19 @@ class StreamHandlerMixin:
             return ""
 
         try:
-            reply = self._call_light_model(messages, temperature=0.9, max_tokens=60)
+            # Dùng temperature truyền vào, nếu không dùng logic mặc định
+            if temperature is not None:
+                event_temp = temperature
+            else:
+                # Lower temperature for greetings (0.2) and others (0.3) for stability
+                event_temp = 0.2 if event_type == "greeting" else 0.3
+            
+            reply = self._call_light_model(messages, temperature=event_temp, max_tokens=60)
             return self.clean_reply(reply or "")
         except Exception as e:
             print(f"[Stream Event] generate error: {e}")
             return ""
 
     def _generate_stream_plan(self):
-        """Generates a 3-5 item agenda for the current stream session."""
-        try:
-            from live_context import update_plan
-            
-            print("[Core] Generating dynamic stream plan...")
-            goals_str = ", ".join(STREAM_GOALS) if STREAM_GOALS else "chưa có"
-            
-            prompt = (
-                f"Bạn là Lyra. Hãy tạo một bản kế hoạch (Agenda) cho buổi stream hôm nay.\n"
-                f"Tiêu đề: {STREAM_TITLE or 'Không có'}\n"
-                f"Game: {STREAM_GAME or 'Không có'}\n"
-                f"Mục tiêu ban đầu: {goals_str}\n"
-                f"Ghi chú: {STREAM_NOTES or 'Không có'}\n\n"
-                f"Hãy tạo 3-5 mục tiêu nhỏ, cụ thể và 'nhập vai' (ví dụ: 'Trêu chủ nhân khi thua game', 'Hỏi thăm 3 bạn viewer mới').\n"
-                f"Trả về JSON: {{\"plan\": [\"mục tiêu 1\", \"mục tiêu 2\"]}}"
-            )
-            
-            raw = self._call_light_model([
-                {"role": "system", "content": "Bạn là planner cho Lyra. Chỉ trả về JSON."},
-                {"role": "user", "content": prompt}
-            ], temperature=0.7, max_tokens=250)
-            
-            if raw:
-                match = re.search(r'\{.*\}', raw, re.DOTALL)
-                if match:
-                    data = json.loads(match.group())
-                    plan_texts = data.get("plan", [])
-                    if plan_texts:
-                        structured_plan = [{"goal": text, "status": "pending"} for text in plan_texts]
-                        update_plan(structured_plan)
-                        print(f"[Plan] Stream plan generated: {len(structured_plan)} items.")
-        except Exception as e:
-            print(f"[Core] generate_stream_plan error: {e}")
+        """(Disabled) Previously generated an agenda for the stream."""
+        pass

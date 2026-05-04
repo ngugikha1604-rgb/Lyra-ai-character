@@ -196,27 +196,27 @@ class ConversationStateDetector:
         # ── Vibe Sync: tier-specific mirroring instruction ──────────────────
         if tier == "slang":
             vibe_note = (
-                " [VIBE SYNC — SLANG]: User đang dùng ngôn ngữ teen/casual (vl, đỉnh, chill...). "
-                "Mirror their energy: dùng từ lóng tự nhiên, viết tắt, emoji nếu hợp. "
-                "Đừng formal, đừng giải thích dài dòng."
+                " ĐỒNG BỘ PHONG CÁCH — TỰ NHIÊN: Người dùng đang dùng ngôn ngữ đời thường/bình dân (vl, đỉnh, chill...). "
+                "Hãy bắt chước năng lượng của họ: dùng từ lóng tự nhiên, viết tắt, hoặc biểu tượng cảm xúc nếu hợp. "
+                "Đừng trang trọng, đừng giải thích dài dòng."
             )
         elif tier == "intellectual":
             vibe_note = (
-                " [VIBE SYNC — DEEP]: User đang dùng từ ngữ học thuật/sâu sắc. "
-                "Match their depth: dùng từ chính xác, có thể đặt câu hỏi triết học, "
-                "tránh dùng slang hoặc emoji."
+                " ĐỒNG BỘ PHONG CÁCH — SÂU SẮC: Người dùng đang dùng từ ngữ có chiều sâu hoặc học thuật. "
+                "Hãy bắt khớp với độ sâu của họ: dùng từ chính xác, có thể hỏi về triết học hoặc quan điểm, "
+                "tránh dùng từ lóng quá đà."
             )
         else:
             vibe_note = ""
 
         # ── Pace Sync: length-based instruction ─────────────────────────────
         if avg <= 15:
-            return f"User writes very short messages. Match their brevity — 1 sentence max.{vibe_note}"
+            return f"Người dùng viết rất ngắn. Hãy đáp lại cực kỳ ngắn gọn — tối đa 1 câu.{vibe_note}"
         if avg <= 40:
-            return f"User writes short-to-medium messages. Keep replies to 1-2 sentences.{vibe_note}"
+            return f"Người dùng viết ngắn. Giữ câu trả lời trong khoảng 1-2 câu ngắn.{vibe_note}"
         if avg <= 100:
-            return f"User writes medium-length messages. 2 sentences is fine.{vibe_note}"
-        return f"User writes longer messages. You can be slightly more expressive, but still concise.{vibe_note}"
+            return f"Người dùng viết ở mức trung bình. Có thể trả lời 1-2 câu đầy đủ hơn.{vibe_note}"
+        return f"Người dùng viết khá dài. Em có thể biểu đạt nhiều hơn một chút, nhưng vẫn phải súc tích.{vibe_note}"
 
     def get_lsm_directive(self, dominance: float = 0.5) -> str:
         """
@@ -260,8 +260,8 @@ class ConversationStateDetector:
             # User rất expressive — converge: Lyra cũng expressive hơn
             # Guard: không inject khi DIVERGE sẽ trigger (2 hints mâu thuẫn)
             parts.append(
-                "[LSM — EXPRESSIVE]: User đang rất biểu cảm (emoji, dấu cảm, năng lượng cao). "
-                "Match their energy — phản hồi sôi nổi hơn bình thường một chút."
+                "ĐỒNG BỘ PHONG CÁCH — SÔI NỔI: Người dùng đang rất biểu cảm (dùng nhiều biểu tượng, dấu cảm, năng lượng cao). "
+                "Hãy khớp với năng lượng của họ — phản hồi sôi nổi và hào hứng hơn một chút."
             )
         elif (
             self._expressiveness_score <= 1.0
@@ -270,16 +270,16 @@ class ConversationStateDetector:
         ):
             # User rất flat — converge: Lyra cũng bình tĩnh hơn
             parts.append(
-                "[LSM — FLAT]: User đang nói chuyện rất bình tĩnh, ít biểu cảm. "
-                "Tone down — đừng quá sôi nổi hay dùng nhiều emoji."
+                "ĐỒNG BỘ PHONG CÁCH — ĐIỀM TĨNH: Người dùng đang nói chuyện rất bình tĩnh, ít biểu cảm. "
+                "Hãy hạ tông giọng xuống — đừng quá sôi nổi hay dùng quá nhiều biểu tượng cảm xúc."
             )
 
         # ── Divergence inject ─────────────────────────────────────────────
         if will_diverge:
             parts.append(
-                "[LSM — DIVERGE]: Conversation đã đủ sâu và bạn đủ tự tin. "
-                "Đừng mirror hoàn toàn — giữ nét riêng của mình. "
-                "Có thể dùng style khác một chút để thể hiện bản sắc."
+                "DUY TRÌ BẢN SẮC: Cuộc hội thoại đã đủ sâu và em đang đủ tự tin. "
+                "Đừng bắt chước hoàn toàn — hãy giữ nét riêng của mình. "
+                "Có thể dùng phong cách khác một chút để thể hiện cá tính."
             )
 
         return "\n".join(parts)
@@ -330,12 +330,12 @@ class ConversationStateDetector:
         the current conversation state.
         """
         hints = {
-            STATE_GREETING:  "This is the start of the conversation. A brief, natural acknowledgment is enough.",
-            STATE_BUILDING:  "The conversation is warming up. Follow their lead, ask at most one follow-up if it feels natural.",
-            STATE_DEEPENING: "The conversation has depth now. You can reference past context or go a bit further.",
-            STATE_SHIFTING:  "The topic just changed. Adapt quickly, don't drag the old topic.",
-            STATE_CLOSING:   "They seem to be wrapping up. Keep it short, don't open new threads.",
-            STATE_GOODBYE:   "They are saying goodbye. Respond warmly but briefly. Do NOT ask questions.",
+            STATE_GREETING:  "Đây là lúc bắt đầu cuộc trò chuyện. Chỉ cần một lời chào hỏi hoặc ghi nhận ngắn gọn, tự nhiên là đủ.",
+            STATE_BUILDING:  "Cuộc trò chuyện đang dần bắt nhịp. Hãy theo sát ý của họ, có thể hỏi thêm tối đa một câu nếu thấy tự nhiên.",
+            STATE_DEEPENING: "Cuộc trò chuyện đã có chiều sâu. Em có thể nhắc lại bối cảnh cũ hoặc đào sâu thêm vấn đề.",
+            STATE_SHIFTING:  "Chủ đề vừa mới thay đổi. Hãy thích nghi nhanh chóng, đừng kéo dài chủ đề cũ nữa.",
+            STATE_CLOSING:   "Họ có vẻ đang muốn kết thúc cuộc trò chuyện. Hãy trả lời ngắn gọn, đừng mở thêm chủ đề mới.",
+            STATE_GOODBYE:   "Họ đang chào tạm biệt. Hãy đáp lại ấm áp nhưng ngắn gọn. TUYỆT ĐỐI không hỏi thêm câu nào.",
         }
         return hints.get(self._state, "")
 

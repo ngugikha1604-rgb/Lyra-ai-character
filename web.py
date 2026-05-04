@@ -1,4 +1,4 @@
-﻿from flask import (
+from flask import (
     Flask,
     render_template,
     request,
@@ -167,19 +167,9 @@ Session(app)
 
 
 def _build_stream_content_context() -> str:
-    """Tạo string inject vào prompt từ stream content trong config.py + stream milestones"""
-    if not any([STREAM_TITLE, STREAM_GAME, STREAM_GOALS, STREAM_NOTES]):
-        return ""
+    """Tạo string inject vào prompt - Đã loại bỏ bối cảnh game và mục tiêu."""
     lines = ["[STREAM CONTEXT]"]
-    if STREAM_TITLE:
-        lines.append(f"Hôm nay stream: {STREAM_TITLE}")
-    if STREAM_GAME:
-        lines.append(f"Game/Nội dung: {STREAM_GAME}")
-    if STREAM_GOALS:
-        goals = STREAM_GOALS if isinstance(STREAM_GOALS, list) else [STREAM_GOALS]
-        lines.append(f"Mục tiêu: {', '.join(goals)}")
-    if STREAM_NOTES:
-        lines.append(f"Ghi chú: {STREAM_NOTES}")
+    lines.append("Hôm nay Lyra stream chuyện phiếm, tâm sự với mọi người.")
 
     # Inject stream milestones để Lyra có thể reference tự nhiên
     try:
@@ -301,11 +291,8 @@ def _proactive_monitor():
                 continue
             gap = (datetime.now() - last_time).total_seconds()
             if gap > 120:
-                # Load current focus from live context
-                lc = load_live_context()
-                focus = lc.get("current_focus", "stream")
                 prompt = (
-                    f"Chat đã im lặng 2 phút. Đặt một câu hỏi ngắn, tò mò về {focus} "
+                    "Chat đã im lặng 2 phút. Đặt một câu hỏi ngắn, tò mò để khơi gợi mọi người tâm sự "
                     "để giữ người xem ở lại."
                 )
                 with ai_chat_lock:
@@ -317,7 +304,7 @@ def _proactive_monitor():
                             },
                             {"role": "user", "content": prompt},
                         ],
-                        temperature=0.9,
+                        temperature=0.4,
                         max_tokens=60,
                     )
                 if question:
@@ -820,6 +807,7 @@ def stream_chat():
         content_ctx = _build_stream_content_context()
         if content_ctx:
             stream_ctx = f"{content_ctx}\n{stream_ctx}" if stream_ctx else content_ctx
+        # Giữ nguyên việc inject stream_ctx
         lyra_ai.stream_context = stream_ctx
 
         if not chat_analyzer.should_extract_memory(viewer_info):
@@ -1375,6 +1363,47 @@ def stream_get_content():
     )
 
 
+def _send_farewell_async(channel_id: str, platform: str) -> None:
+    """Generate và broadcast lời tạm biệt cuối stream. Module-level function — không cần closure."""
+    try:
+        recent_summaries = chat_analyzer.get_recent_summaries(channel_id, platform, limit=1)
+        summary_text = recent_summaries[0]["summary"] if recent_summaries else ""
+        top_viewers_list = viewer_tracker.get_top_viewers(
+            platform=platform, channel_id=channel_id, limit=3
+        )
+        top_names = (
+            ", ".join(v["viewer_name"] for v in top_viewers_list)
+            if top_viewers_list
+            else "mọi người"
+        )
+
+        with ai_chat_lock:
+            farewell = lyra_ai.generate_stream_event_reply(
+                "farewell",
+                {
+                    "summary": summary_text,
+                    "top_viewers": top_names,
+                    "duration": "",
+                },
+                temperature=0.1,
+            )
+        if farewell:
+            _sse_broadcast(
+                {
+                    "type": "stream_event",
+                    "event": "stream_stop",
+                    "reply": farewell,
+                    "emotion": "friendly",
+                    "action": "WAVE",
+                    "sender_name": "Lyra",
+                    "source_type": "system",
+                }
+            )
+            print(f"[Stream] Farewell: {farewell}")
+    except Exception as e:
+        print(f"[Stream] Farewell error: {e}")
+
+
 @app.route("/stream/start", methods=["POST"])
 def stream_start():
     """
@@ -1432,7 +1461,8 @@ def stream_start():
         def _send_greeting():
             try:
                 with ai_chat_lock:
-                    greeting = lyra_ai.generate_stream_event_reply("greeting")
+                    # Sử dụng temperature thấp nhất cho greeting
+                    greeting = lyra_ai.generate_stream_event_reply("greeting", temperature=0.1)
                 if greeting:
                     _sse_broadcast(
                         {
