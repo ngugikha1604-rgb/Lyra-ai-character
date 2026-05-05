@@ -6,7 +6,7 @@ from config import (
     LIGHT_MODEL, CHAT_MODEL, LIGHT_BASE_URL, CHAT_BASE_URL,
     TRANSLATE_MODEL, TRANSLATE_BASE_URL, SEARCH_ENABLED,
     OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_BASE_URL,
-    GEMINI_API_KEY, GEMINI_MODEL, GEMINI_BASE_URL
+    GEMINI_API_KEY, GEMINI_MODELS, GEMINI_BASE_URL
 )
 
 class BaseLLMClient:
@@ -49,7 +49,9 @@ class OpenRouterClient(BaseLLMClient):
         if not OPENROUTER_API_KEY: return None
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://lyra-ai.local",
+            "X-Title": "Lyra AI"
         }
         data = {
             "model": OPENROUTER_MODEL,
@@ -62,10 +64,14 @@ class OpenRouterClient(BaseLLMClient):
             start = time.time()
             response = self.session.post(OPENROUTER_BASE_URL, headers=headers, json=data, timeout=60)
             if response.status_code == 200:
-                content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                resp_json = response.json()
+                content = resp_json.get("choices", [{}])[0].get("message", {}).get("content", "")
                 if content:
+                    content = content.strip()
                     print(f"[OpenRouter] Responded in {time.time() - start:.1f}s")
                     return content
+                else:
+                    print(f"[OpenRouter] Empty content. Full response: {resp_json}")
             else:
                 print(f"[OpenRouter] Failed: {response.status_code} - {response.text}")
         except Exception as e:
@@ -73,14 +79,21 @@ class OpenRouterClient(BaseLLMClient):
         return None
 
 class GeminiClient(BaseLLMClient):
+    _current_idx = 0
+
     def call(self, messages, temperature=0.8, max_tokens=250):
-        if not GEMINI_API_KEY: return None
+        if not GEMINI_API_KEY or not GEMINI_MODELS: return None
+        
+        # Luân phiên model để tránh lỗi quota 429
+        model = GEMINI_MODELS[GeminiClient._current_idx % len(GEMINI_MODELS)]
+        GeminiClient._current_idx += 1
+
         headers = {
             "Authorization": f"Bearer {GEMINI_API_KEY}",
             "Content-Type": "application/json"
         }
         data = {
-            "model": GEMINI_MODEL,
+            "model": model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
@@ -92,10 +105,10 @@ class GeminiClient(BaseLLMClient):
             if response.status_code == 200:
                 content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
                 if content:
-                    print(f"[Gemini] Responded in {time.time() - start:.1f}s")
+                    print(f"[Gemini - {model}] Responded in {time.time() - start:.1f}s")
                     return content
             else:
-                print(f"[Gemini] Failed: {response.status_code} - {response.text}")
+                print(f"[Gemini - {model}] Failed: {response.status_code} - {response.text}")
         except Exception as e:
             print(f"[Gemini] Error: {e}")
         return None

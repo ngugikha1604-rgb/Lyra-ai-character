@@ -14,8 +14,22 @@ def main():
         # 2. Khởi tạo AI engine
         print("[System] Loading Lyra AI...")
         ai = MiniAI()
+        
+        print("\n[System] Testing OpenRouter via _call_light_model...")
+        try:
+            or_test = ai._call_light_model([{"role": "user", "content": "Say 'OpenRouter is working' in English."}], provider="openrouter")
+            print(f"OpenRouter response: {or_test}")
+        except Exception as e:
+            print(f"OpenRouter test failed: {e}")
+            
+        print("\n[System] Testing Gemini via _call_light_model...")
+        try:
+            gm_test = ai._call_light_model([{"role": "user", "content": "Say 'Gemini is working' in English."}], provider="gemini")
+            print(f"Gemini response: {gm_test}")
+        except Exception as e:
+            print(f"Gemini test failed: {e}")
 
-        print(f"[System] AI Loaded. Current Mood: {ai.mood}, Affection: {ai.affection}")
+        print(f"\n[System] AI Loaded. Current Mood: {ai.mood}, Affection: {ai.affection}")
         if ai.should_greet:
             print("[System] Note: Time-based greeting triggered upon startup.")
 
