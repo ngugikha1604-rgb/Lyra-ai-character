@@ -98,7 +98,7 @@ class RLFeedbackLoop:
             raw = self.ai._call_light_model([
                 {"role": "system", "content": "Bạn là chuyên gia phân tích cảm xúc livestream. Chỉ trả về JSON."},
                 {"role": "user", "content": prompt}
-            ], temperature=0.1)
+            ], temperature=0.1, provider="openrouter")
             
             if not raw: return
             
@@ -161,7 +161,7 @@ class RLFeedbackLoop:
             vibe_instruction = self.ai._call_light_model([
                 {"role": "system", "content": "Bạn là cố vấn cá tính cho AI Lyra."},
                 {"role": "user", "content": evolution_prompt}
-            ], temperature=0.7)
+            ], temperature=0.7, provider="openrouter")
             
             if vibe_instruction:
                 from live_context import add_constraint

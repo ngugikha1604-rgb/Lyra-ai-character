@@ -69,7 +69,7 @@ class SkillSynthesizer:
             resp = core_engine._call_light_model([
                 {"role": "system", "content": SKILL_SYNTHESIZE_PROMPT},
                 {"role": "user", "content": prompt}
-            ])
+            ], provider="gemini")
 
             skill_data = self._parse_skill_response(resp)
             if not skill_data:
@@ -99,7 +99,7 @@ class SkillSynthesizer:
             resp = core_engine._call_light_model([
                 {"role": "system", "content": SKILL_SYNTHESIZE_PROMPT},
                 {"role": "user", "content": f"Analyze this conversation for new skills:\n\n{snippet_text}"}
-            ])
+            ], provider="gemini")
 
             skill_data = self._parse_skill_response(resp)
             if not skill_data:

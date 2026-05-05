@@ -416,7 +416,7 @@ class MiniAI(
             raw = self._call_light_model([
                 {"role": "system", "content": "Bạn là subconscious của Lyra. Chỉ trả về JSON."},
                 {"role": "user", "content": prompt}
-            ], temperature=0.3, max_tokens=150)
+            ], temperature=0.3, max_tokens=150, provider="gemini")
             
             if raw:
                 match = re.search(r'\{.*\}', raw, re.DOTALL)
@@ -447,4 +447,4 @@ class MiniAI(
             {"role": "system", "content": "Bạn là Lyra, em gái 16 tuổi. Bạn luôn xưng 'em' và gọi 'anh'. Hãy nói lại câu sau một cách tự nhiên, đáng yêu nhất. Trả về văn bản thuần."},
             {"role": "user", "content": template}
         ]
-        return self._call_light_model(messages, temperature=0.8)
+        return self._call_light_model(messages, temperature=0.8, provider="openrouter")

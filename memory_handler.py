@@ -62,7 +62,7 @@ class MemoryHandlerMixin:
         ]
 
         try:
-            raw = self._call_light_model(extract_prompt, temperature=0.1, max_tokens=200) or ""
+            raw = self._call_light_model(extract_prompt, temperature=0.1, max_tokens=200, provider="gemini") or ""
             raw = re.sub(r"```json|```", "", raw).strip()
             if not raw or raw == "{}": return
 
@@ -113,7 +113,7 @@ class MemoryHandlerMixin:
             summary = self._call_light_model([
                 {"role": "system", "content": SUMMARIZE_PROMPT},
                 {"role": "user", "content": f"Summarize this conversation:\n\n{convo_text}"},
-            ], temperature=0.4, max_tokens=120)
+            ], temperature=0.4, max_tokens=120, provider="openrouter")
 
             if summary := summary.strip():
                 ts = self.current_time.strftime("%Y-%m-%d %H:%M")
@@ -148,7 +148,7 @@ class MemoryHandlerMixin:
                 mega_text = self._call_light_model([
                     {"role": "system", "content": MEMORY_COMPRESSION_PROMPT},
                     {"role": "user", "content": f"Compress these summaries:\n\n" + "\n".join(parts)},
-                ], temperature=0.3, max_tokens=200)
+                ], temperature=0.3, max_tokens=200, provider="openrouter")
                 if mega_text:
                     with self.memory.db_lock:
                         c.execute("DELETE FROM summaries WHERE is_mega=1")
