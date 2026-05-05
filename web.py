@@ -418,16 +418,8 @@ def chat():
 
         response_payload = build_state_payload(lyra_ai, result=result)
 
-        # Sync with VTube Studio
-        if result:
-            if result.get("emotion"):
-                vts_bridge.trigger_emotion(result["emotion"])
-            if result.get("action"):
-                vts_bridge.trigger_action(result["action"])
-            # ── VAD → Live2D params (Paralinguistics — Module 5) ─────────────
-            if result.get("vad"):
-                v, a, d = result["vad"]
-                vts_bridge.update_vad_params(v, a, d)
+        # VTube Studio triggering is now handled by the Orchestrator in lyra_ai.chat()
+        # including emotions, actions, and VAD parameters.
 
         return jsonify(response_payload)
 

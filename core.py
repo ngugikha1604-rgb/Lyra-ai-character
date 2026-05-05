@@ -130,12 +130,18 @@ class MiniAI(
 
     def _track_stream_turn(self, user_input, source_type, viewer_data, stream_context):
         if source_type == "owner" or not stream_context:
+            if source_type == "owner":
+                # Key Decision Detection (Plandex logic)
+                is_decision = any(w in user_input.lower() for w in ["thống nhất", "chốt", "kế hoạch", "nhớ nhé", "agree", "decided"])
+                self.memory.add_session_item(f"Anh nói: {user_input[:100]}", kind="owner_input", is_sticky=is_decision)
             return
 
         self.stream_turn_counter += 1
         viewer_name = (viewer_data or {}).get("viewer_name", "")
         if viewer_name:
-            self.memory.add_session_item(f"{viewer_name} nhắn: {user_input[:80]}", kind="session")
+            # Viewer profile check (if affection > 30, consider it more sticky/important)
+            is_important = float((viewer_data or {}).get("affection", 0)) > 30
+            self.memory.add_session_item(f"{viewer_name} nhắn: {user_input[:80]}", kind="session", is_sticky=is_important)
         if self.stream_turn_counter % STREAM_SUMMARY_THRESHOLD == 0:
             enqueue(PRIORITY_HIGH, self.update_stream_summary)
 
@@ -209,12 +215,35 @@ class MiniAI(
             *self.messages[-history_window:],
             {"role": "user", "content": composed_message},
         ]
+    def _execute_vts_tools(self, emotion, action, vad=None):
+        """Feedback Loop: Thực thi VTS tools và trả về lỗi nếu có (Agent-Zero logic)."""
+        try:
+            from vts_api import vts_bridge
+            errors = []
+            
+            # 1. Update VAD parameters (Paralinguistics)
+            if vad:
+                vts_bridge.update_vad_params(*vad)
+            
+            # 2. Trigger Emotion Hotkey
+            if emotion and emotion.lower() != "neutral":
+                res = vts_bridge.trigger_emotion(emotion)
+                if isinstance(res, dict) and res.get("status") == "error":
+                    errors.append(f"VTS (Emotion) {res.get('reason')}")
+            
+            # 3. Trigger Action Hotkey
+            if action and action.upper() != "NONE":
+                res = vts_bridge.trigger_action(action)
+                if isinstance(res, dict) and res.get("status") == "error":
+                    errors.append(f"VTS (Action) {res.get('reason')}")
+                    
+            return ". ".join(errors) if errors else None
+        except Exception as e:
+            return f"Internal Tool Error: {str(e)}"
+
     def _call_and_parse_vbrain(
         self, api_messages, dynamic_temp, dynamic_max_tokens, prompt_args
     ):
-        # Reset loop count on fresh call (not from within itself)
-        # But wait, this is called from chat(). We should manage count in chat().
-        # Actually, let's just use it here.
         content = self._call_model(
             api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens
         )
@@ -224,30 +253,45 @@ class MiniAI(
         parsed = parse_vbrain_response(content)
         skill_name = parsed.get("skill_needed")
         
-        # Guard: Stop if recursion limit reached
-        if not skill_name or self._skill_loop_count >= 2:
-            self._skill_loop_count = 0 # Reset for next turn
-            return parsed
+        # 1. Skill Loop (Master-Subordinate)
+        if skill_name and self._skill_loop_count < 2:
+            self._skill_loop_count += 1
+            print(f"[Skill Loop] Iteration {self._skill_loop_count} for: {skill_name}")
+            
+            skill_content = self._load_skill_content(skill_name)
+            if skill_content:
+                self._log_skill_usage(skill_name)
+                api_messages[0]["content"] = self.build_prompt(
+                    *prompt_args["base"],
+                    loaded_skill_content=skill_content,
+                    reward_hint=prompt_args["reward_hint"],
+                    active_inference_mode=prompt_args["active_inference_mode"],
+                    perlocution_hint=prompt_args["perlocution_hint"],
+                    self_disclosure_hint=prompt_args["self_disclosure_hint"],
+                    precomputed_memory_context=prompt_args["memory_context"],
+                )
+                content = self._call_model(api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens)
+                parsed = parse_vbrain_response(content) if content else parsed
 
-        self._skill_loop_count += 1
-        print(f"[Skill Loop] Iteration {self._skill_loop_count} for: {skill_name}")
-        
-        skill_content = self._load_skill_content(skill_name)
-        if not skill_content:
-            return parsed
-
-        self._log_skill_usage(skill_name)
-        api_messages[0]["content"] = self.build_prompt(
-            *prompt_args["base"],
-            loaded_skill_content=skill_content,
-            reward_hint=prompt_args["reward_hint"],
-            active_inference_mode=prompt_args["active_inference_mode"],
-            perlocution_hint=prompt_args["perlocution_hint"],
-            self_disclosure_hint=prompt_args["self_disclosure_hint"],
-            precomputed_memory_context=prompt_args["memory_context"],
+        # 2. VTS Feedback Loop (Agent-Zero)
+        # Chỉ thực thi khi đã có kết quả cuối cùng (không còn gọi skill nữa)
+        vts_error = self._execute_vts_tools(
+            parsed.get("emotion"), 
+            parsed.get("action"), 
+            vad=self.emotion.get_vad()
         )
-        content = self._call_model(api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens)
-        return parse_vbrain_response(content) if content else parsed
+        if vts_error:
+            print(f"[Orchestrator] VTS Error detected: {vts_error}")
+            api_messages.append({"role": "assistant", "content": content})
+            api_messages.append({
+                "role": "system", 
+                "content": f"[FEEDBACK]: {vts_error}. Hãy phản hồi người dùng nhưng khéo léo nhắc về việc bạn bị 'đơ' hoặc lỗi váy/mạng (Agent-Zero way). Trả về JSON."
+            })
+            content = self._call_model(api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens)
+            if content:
+                parsed = parse_vbrain_response(content)
+
+        return parsed
 
     def _enqueue_memory_extraction(self, user_input, intent, source_type):
         if getattr(self._thread_local, "skip_memory_extraction", False):
@@ -305,6 +349,8 @@ class MiniAI(
 
         if source_type == "owner" and self.is_streaming:
             enqueue(PRIORITY_HIGH, maybe_refresh_from_emotion, self.emotion.get_state())
+            # Sticky Context: Livestreaming (Plandex logic)
+            self.memory.add_session_item("Em đang livestream và tâm sự với mọi người.", kind="context", is_sticky=True)
 
         self._track_stream_turn(user_input, source_type, viewer_data, stream_context)
 

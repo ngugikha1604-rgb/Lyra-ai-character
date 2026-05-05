@@ -83,29 +83,39 @@ class VTSController:
                 await asyncio.sleep(10)  # Thử lại sau 10s
 
     def trigger_emotion(self, emotion):
-        """Hàm đồng bộ để gọi từ Flask"""
+        """Hàm đồng bộ để gọi từ Flask. Trả về kết quả thực thi (Future result)."""
         if not self.is_connected or not self.loop:
-            return
+            return {"status": "error", "reason": "disconnected"}
         self.last_activity_time = time.time()
 
         hotkey_id = self.emotion_to_hotkey.get(emotion.lower())
         if hotkey_id:
-            asyncio.run_coroutine_threadsafe(
+            future = asyncio.run_coroutine_threadsafe(
                 self._trigger_expression_with_reset(hotkey_id), self.loop
             )
+            try:
+                # Chờ tối đa 1s để xác nhận lệnh đã được gửi
+                return future.result(timeout=1.0)
+            except Exception:
+                return {"status": "error", "reason": "dispatch_failed"}
+        return {"status": "error", "reason": "invalid_emotion"}
 
     def trigger_action(self, action):
-        """Hàm đồng bộ để gọi action pose (WAVE, NOD...)."""
+        """Hàm đồng bộ để gọi action pose. Trả về kết quả thực thi."""
         if not self.is_connected or not self.loop:
-            return
+            return {"status": "error", "reason": "disconnected"}
         if not action or action.upper() == "NONE":
-            return
+            return {"status": "success", "reason": "none"}
             
         self.last_activity_time = time.time()
         action_hotkey = f"ACT_{action.upper()}"
-        asyncio.run_coroutine_threadsafe(
+        future = asyncio.run_coroutine_threadsafe(
             self._trigger_action_with_reset(action_hotkey), self.loop
         )
+        try:
+            return future.result(timeout=1.0)
+        except Exception:
+            return {"status": "error", "reason": "dispatch_failed"}
 
     async def _trigger_action_with_reset(self, hotkey_id: str, hold_seconds: float = 1.2):
         """Trigger action hotkey.
@@ -139,12 +149,21 @@ class VTSController:
             self.loop
         )
 
-    async def _safe_request(self, req):
-        """Serialize tất cả VTS requests qua Lock để tránh concurrent recv."""
-        if self._request_lock is None:
-            return None
-        async with self._request_lock:
-            return await self.vts.request(req)
+    async def _safe_request(self, req, timeout=2.0):
+        """Serialize tất cả VTS requests qua Lock để tránh concurrent recv với timeout."""
+        if self._request_lock is None or not self.vts:
+            return {"status": "error", "reason": "not_initialized"}
+        
+        try:
+            async with self._request_lock:
+                # Sử dụng wait_for để tránh treo vĩnh viễn nếu WebSocket bị nghẽn
+                return await asyncio.wait_for(self.vts.request(req), timeout=timeout)
+        except asyncio.TimeoutError:
+            print("[VTS] Request timeout!")
+            return {"status": "error", "reason": "timeout"}
+        except Exception as e:
+            print(f"[VTS] Request error: {e}")
+            return {"status": "error", "reason": str(e)}
 
     async def _update_vad_params_async(self, brow: float, eye: float, body_angle: float):
         """Async helper để update nhiều params cùng lúc."""
@@ -167,10 +186,14 @@ class VTSController:
     async def _trigger_hotkey(self, hotkey_id):
         try:
             request = self.vts.vts_request.requestTriggerHotKey(hotkey_id)
-            await self._safe_request(request)
+            res = await self._safe_request(request)
+            if isinstance(res, dict) and res.get("status") == "error":
+                return res
             print(f"[VTS] Triggered hotkey: {hotkey_id}")
+            return {"status": "success", "hotkey": hotkey_id}
         except Exception as e:
             print(f"[VTS] Lỗi trigger hotkey {hotkey_id}: {e}")
+            return {"status": "error", "reason": str(e)}
 
     def update_parameter(self, parameter_name, value):
         if not self.is_connected or not self.loop:

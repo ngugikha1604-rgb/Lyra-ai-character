@@ -248,13 +248,26 @@ class MemorySystem:
         vec = _get_ollama_embedding(text)
         return vec.tobytes() if vec is not None and np is not None else None
 
-    def add_session_item(self, value, kind="session"):
-        """Adds a short-term awareness item to L2 memory."""
+    def add_session_item(self, value, kind="session", is_sticky=False):
+        """Adds a short-term awareness item to L2 memory. Transient items expire in 5m."""
         self._expire_session_memory_if_idle()
-        now = get_now_vn().isoformat()
-        self._session_items.append({"kind": kind, "value": value, "created_at": now})
-        self._session_last_activity_at = now
-        if len(self._session_items) > 30: self._session_items.pop(0)
+        now = get_now_vn()
+        now_iso = now.isoformat()
+        
+        expires_at = None
+        if not is_sticky:
+            # Transient items (social chats) only stay for 5 minutes
+            expires_at = (now + timedelta(minutes=5)).isoformat()
+            
+        self._session_items.append({
+            "kind": kind, 
+            "value": value, 
+            "created_at": now_iso,
+            "expires_at": expires_at,
+            "is_sticky": is_sticky
+        })
+        self._session_last_activity_at = now_iso
+        if len(self._session_items) > 50: self._session_items.pop(0) # Increased capacity for mix
 
     def queue_conversation_row(self, role, content):
         """Stage one chat message for durable SQLite persistence."""
@@ -270,11 +283,22 @@ class MemorySystem:
         self._session_last_activity_at = None
 
     def get_session_context(self):
+        """Retrieves session context, pruning expired transient items."""
         self._expire_session_memory_if_idle()
-        if not self._session_items and not self._rolling_stream_summary: return ""
+        now_iso = get_now_vn().isoformat()
+        
+        # Context Pruning: Filter out expired transient items
+        valid_items = [
+            i for i in self._session_items 
+            if i.get("is_sticky") or (i.get("expires_at") and i["expires_at"] > now_iso)
+        ]
+        
+        if not valid_items and not self._rolling_stream_summary: return ""
         parts = []
         if self._rolling_stream_summary: parts.append(f"[Tóm tắt stream]\n{self._rolling_stream_summary}")
-        if self._session_items: parts.append("[Diễn biến mới nhất]\n" + "\n".join([f"- {i['value']}" for i in self._session_items[-5:]]))
+        if valid_items: 
+            # Show up to 10 latest valid items
+            parts.append("[Diễn biến mới nhất]\n" + "\n".join([f"- {i['value']}" for i in valid_items[-10:]]))
         return "[Session context (L2)]\n" + "\n\n".join(parts)
 
     def _expire_session_memory_if_idle(self, idle_hours=4.0):
