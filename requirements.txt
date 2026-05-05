@@ -13,3 +13,4 @@ pinecone
 flask-limiter
 pydub
 sounddevice
+dspy-ai

@@ -20,6 +20,10 @@ from skill_synthesizer import SkillSynthesizer
 from prompts import REWARD_HINTS, IDEOLOGY_PROMPTS
 from rl_feedback_loop import RLFeedbackLoop
 
+# DSPy Integration
+import dspy
+from dspy_modules.brain_module import LyraBrain
+
 # Mixins
 from behavioral_logic import BehavioralMixin
 from prompt_builder import PromptBuilderMixin
@@ -88,6 +92,26 @@ class MiniAI(
 
         print("[Core] Pre-loading embedding model...")
         self.memory._get_embedding("init")
+        
+        # DSPy Setup
+        print("[Core] Initializing DSPy Brain...")
+        try:
+            # Configure DSPy LM (using the same settings as in PLAN.md/dspy_test_compile.py)
+            # Default to Ollama llama3 as per current setup, can be adjusted via config
+            self.dspy_lm = dspy.LM('ollama_chat/llama3', api_base=CHAT_BASE_URL.replace("/v1/chat/completions", ""))
+            dspy.configure(lm=self.dspy_lm)
+            
+            self.brain = LyraBrain()
+            compiled_path = os.path.join(BASE_DIR, "lyra_compiled_v1.json")
+            if os.path.exists(compiled_path):
+                self.brain.load(compiled_path)
+                print(f"[Core] Loaded compiled brain from {compiled_path}")
+            else:
+                print("[Core] No compiled brain found, using base module")
+        except Exception as e:
+            print(f"[Core] DSPy Initialization failed: {e}")
+            self.brain = None
+
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
     @property
@@ -244,13 +268,52 @@ class MiniAI(
     def _call_and_parse_vbrain(
         self, api_messages, dynamic_temp, dynamic_max_tokens, prompt_args
     ):
-        content = self._call_model(
-            api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens
-        )
-        if not content:
-            return {"monologue": "", "emotion": "neutral", "action": "NONE", "reply": "..."}
+        """
+        Orchestrates the brain call using DSPy (Programming) instead of pure Prompting.
+        """
+        if not self.brain:
+            # Fallback to old behavior if DSPy isn't ready
+            content = self._call_model(
+                api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens
+            )
+            if not content:
+                return {"monologue": "", "emotion": "neutral", "action": "NONE", "reply": "..."}
+            parsed = parse_vbrain_response(content)
+        else:
+            try:
+                # Prepare inputs for DSPy
+                system_prompt = api_messages[0]["content"]
+                # Format chat history for DSPy input
+                history_str = "\n".join([f"{m['role']}: {m['content']}" for m in api_messages[1:-1]])
+                user_msg = api_messages[-1]["content"]
 
-        parsed = parse_vbrain_response(content)
+                # Call DSPy Brain
+                with dspy.context(lm=self.dspy_lm): # Ensure correct LM is used
+                    result = self.brain(
+                        system_context=system_prompt,
+                        chat_history=history_str,
+                        user_message=user_msg
+                    )
+
+                parsed = {
+                    "monologue": getattr(result, 'rationale', ""),
+                    "emotion": getattr(result, 'emotion', "neutral"),
+                    "action": getattr(result, 'action', "NONE"),
+                    "reply": getattr(result, 'reply', "..."),
+                    "skill_needed": getattr(result, 'skill_needed', "NONE")
+                }
+                
+                # Sanitize skill_needed
+                if parsed["skill_needed"].upper() == "NONE":
+                    parsed["skill_needed"] = None
+
+            except Exception as e:
+                print(f"[Core] DSPy Brain Error: {e}. Falling back to standard LLM call.")
+                content = self._call_model(
+                    api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens
+                )
+                parsed = parse_vbrain_response(content) if content else {"monologue": "", "emotion": "neutral", "action": "NONE", "reply": "..."}
+
         skill_name = parsed.get("skill_needed")
         
         # 1. Skill Loop (Master-Subordinate)
