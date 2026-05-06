@@ -33,9 +33,13 @@ def _worker_loop():
             pass
 
 
-# Start daemon worker at import time
-_thread = threading.Thread(target=_worker_loop, daemon=True)
-_thread.start()
+# Start multiple daemon workers at import time to prevent head-of-line blocking
+NUM_WORKERS = 4
+_threads = []
+for _ in range(NUM_WORKERS):
+    t = threading.Thread(target=_worker_loop, daemon=True)
+    t.start()
+    _threads.append(t)
 
 
 def enqueue(priority: int, func, *args, **kwargs):

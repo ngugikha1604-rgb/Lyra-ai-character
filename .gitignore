@@ -60,6 +60,7 @@ static/
 #Tests
 test_vts.py
 test_stream.py
+test_ollama_conn.py
 
 !.env.example
 

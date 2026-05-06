@@ -4,6 +4,7 @@ import json
 import random
 import threading
 import concurrent.futures
+import time
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
@@ -60,7 +61,8 @@ class MiniAI(
             "action": "NONE",
             "reply": "",
         }
-        self._skill_loop_count = 0  # To prevent infinite recursion
+        self._skill_loop_count = 0  
+        self._vts_loop_count = 0  # Limit VTS feedback loops
         self.emotion = EmotionEngine()
         self.memory = MemorySystem(max_summaries=MAX_SUMMARIES)
         self.conv_state = ConversationStateDetector(window=10)
@@ -96,9 +98,16 @@ class MiniAI(
         # DSPy Setup
         print("[Core] Initializing DSPy Brain...")
         try:
-            # Configure DSPy LM (using the same settings as in PLAN.md/dspy_test_compile.py)
-            # Default to Ollama llama3 as per current setup, can be adjusted via config
-            self.dspy_lm = dspy.LM('ollama_chat/llama3', api_base=CHAT_BASE_URL.replace("/v1/chat/completions", ""))
+            # Ưu tiên Groq cho DSPy để đạt hiệu suất cao nhất (theo yêu cầu người dùng)
+            if GROQ_API_KEY:
+                print(f"[Core] Using Groq ({TRANSLATE_MODEL}) for DSPy")
+                self.dspy_lm = dspy.LM(f'groq/{TRANSLATE_MODEL}', api_key=GROQ_API_KEY)
+            else:
+                # Fallback to Ollama using config values
+                print(f"[Core] Groq key missing, falling back to Ollama ({CHAT_MODEL})")
+                dspy_base_url = CHAT_BASE_URL.replace("/api/chat", "").replace("/v1/chat/completions", "")
+                self.dspy_lm = dspy.LM(f'ollama_chat/{CHAT_MODEL}', api_base=dspy_base_url)
+            
             dspy.configure(lm=self.dspy_lm)
             
             self.brain = LyraBrain()
@@ -288,12 +297,14 @@ class MiniAI(
                 user_msg = api_messages[-1]["content"]
 
                 # Call DSPy Brain
+                start_brain = time.time()
                 with dspy.context(lm=self.dspy_lm): # Ensure correct LM is used
                     result = self.brain(
                         system_context=system_prompt,
                         chat_history=history_str,
                         user_message=user_msg
                     )
+                print(f"[Brain] Main generation took {time.time() - start_brain:.2f}s")
 
                 parsed = {
                     "monologue": getattr(result, 'rationale', ""),
@@ -324,7 +335,7 @@ class MiniAI(
             skill_content = self._load_skill_content(skill_name)
             if skill_content:
                 self._log_skill_usage(skill_name)
-                api_messages[0]["content"] = self.build_prompt(
+                new_system_prompt = self.build_prompt(
                     *prompt_args["base"],
                     loaded_skill_content=skill_content,
                     reward_hint=prompt_args["reward_hint"],
@@ -333,26 +344,71 @@ class MiniAI(
                     self_disclosure_hint=prompt_args["self_disclosure_hint"],
                     precomputed_memory_context=prompt_args["memory_context"],
                 )
-                content = self._call_model(api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens)
-                parsed = parse_vbrain_response(content) if content else parsed
+                
+                if not self.brain:
+                    api_messages[0]["content"] = new_system_prompt
+                    content = self._call_model(api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens)
+                    parsed = parse_vbrain_response(content) if content else parsed
+                else:
+                    # Re-call DSPy Brain with new skill context
+                    history_str = "\n".join([f"{m['role']}: {m['content']}" for m in api_messages[1:-1]])
+                    user_msg = api_messages[-1]["content"]
+                    
+                    start_skill = time.time()
+                    with dspy.context(lm=self.dspy_lm):
+                        result = self.brain(
+                            system_context=new_system_prompt,
+                            chat_history=history_str,
+                            user_message=user_msg
+                        )
+                    print(f"[Brain] Skill loop generation took {time.time() - start_skill:.2f}s")
+                    parsed = {
+                        "monologue": getattr(result, 'rationale', ""),
+                        "emotion": getattr(result, 'emotion', "neutral"),
+                        "action": getattr(result, 'action', "NONE"),
+                        "reply": getattr(result, 'reply', "..."),
+                        "skill_needed": getattr(result, 'skill_needed', "NONE")
+                    }
 
         # 2. VTS Feedback Loop (Agent-Zero)
-        # Chỉ thực thi khi đã có kết quả cuối cùng (không còn gọi skill nữa)
         vts_error = self._execute_vts_tools(
             parsed.get("emotion"), 
             parsed.get("action"), 
             vad=self.emotion.get_vad()
         )
-        if vts_error:
+        if vts_error and self._vts_loop_count < 1: # Only allow one feedback turn per message
+            self._vts_loop_count += 1
             print(f"[Orchestrator] VTS Error detected: {vts_error}")
-            api_messages.append({"role": "assistant", "content": content})
-            api_messages.append({
-                "role": "system", 
-                "content": f"[FEEDBACK]: {vts_error}. Hãy phản hồi người dùng nhưng khéo léo nhắc về việc bạn bị 'đơ' hoặc lỗi váy/mạng (Agent-Zero way). Trả về JSON."
-            })
-            content = self._call_model(api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens)
-            if content:
-                parsed = parse_vbrain_response(content)
+            feedback_msg = f"[FEEDBACK]: {vts_error}. Hãy phản hồi người dùng nhưng khéo léo nhắc về việc bạn bị 'đơ' hoặc lỗi váy/ mạng (Agent-Zero way)."
+            
+            if not self.brain:
+                api_messages.append({"role": "assistant", "content": parsed.get("reply", "")})
+                api_messages.append({"role": "system", "content": f"{feedback_msg} Trả về JSON."})
+                content = self._call_model(api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens)
+                if content:
+                    parsed = parse_vbrain_response(content)
+            else:
+                # Add feedback to history for DSPy
+                history_str = "\n".join([f"{m['role']}: {m['content']}" for m in api_messages[1:-1]])
+                history_str += f"\nassistant: {parsed.get('reply', '')}"
+                history_str += f"\nsystem: {feedback_msg}"
+                user_msg = api_messages[-1]["content"]
+                
+                start_vts = time.time()
+                with dspy.context(lm=self.dspy_lm):
+                    result = self.brain(
+                        system_context=api_messages[0]["content"],
+                        chat_history=history_str,
+                        user_message=user_msg
+                    )
+                print(f"[Brain] VTS feedback generation took {time.time() - start_vts:.2f}s")
+                parsed = {
+                    "monologue": getattr(result, 'rationale', ""),
+                    "emotion": getattr(result, 'emotion', "neutral"),
+                    "action": getattr(result, 'action', "NONE"),
+                    "reply": getattr(result, 'reply', "..."),
+                    "skill_needed": getattr(result, 'skill_needed', "NONE")
+                }
 
         return parsed
 
@@ -401,6 +457,7 @@ class MiniAI(
     def chat(self, user_input, source_type: str = "owner", viewer_data: dict = None, stream_context: str = ""):
         """Main orchestration loop for Lyra's conversation."""
         self._skill_loop_count = 0 # Reset at start of each new turn
+        self._vts_loop_count = 0
         self._refresh_time_state()
         self.turn_counter += 1
 

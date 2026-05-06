@@ -56,14 +56,11 @@ def load_live_context() -> Dict[str, Any]:
 
 
 def save_live_context(data: Dict[str, Any]) -> None:
-    """Atomically write live_context.json to disk."""
+    """Write live_context.json to disk."""
     with _context_lock:
-        # Write to temp file then rename for atomicity
-        tmp_path = LIVE_CONTEXT_PATH + ".tmp"
         try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
+            with open(LIVE_CONTEXT_PATH, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            os.replace(tmp_path, LIVE_CONTEXT_PATH)
         except OSError as e:
             print(f"[LiveContext] Save error: {e}")
 
