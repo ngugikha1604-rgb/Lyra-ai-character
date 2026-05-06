@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 import json
 import sqlite3
@@ -422,9 +422,9 @@ class MemorySystem:
             conn.commit()
         self._is_dirty = False
 
-    def get_relevant_context(self, user_input: str, is_public: bool = False) -> str:
+    def get_relevant_context(self, user_input: str, is_public: bool = False, precomputed_vec=None) -> str:
         """Retrieves and ranks the most relevant memories for the current turn."""
-        query_vec = self._get_embedding(user_input)
+        query_vec = precomputed_vec if precomputed_vec is not None else self._get_embedding(user_input)
         
         # 1. Check Semantic Cache
         if query_vec is not None and np is not None and len(self._semantic_cache) > 0:
@@ -624,6 +624,37 @@ class MemorySystem:
             rows = conn.execute("SELECT description, achieved_at FROM stream_milestones ORDER BY achieved_at DESC LIMIT ?", (limit,)).fetchall()
             return [{"description": r[0], "achieved_at": r[1]} for r in rows]
         except Exception: return []
+
+    def increment_stream_count(self):
+        """Increments and returns the total number of streams performed."""
+        conn = self._get_db()
+        if not conn: return 1
+        with self.db_lock:
+            try:
+                row = conn.execute("SELECT value FROM metadata WHERE key='stream_count'").fetchone()
+                count = int(row[0]) if row else 0
+                count += 1
+                conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('stream_count', ?)", (str(count),))
+                conn.commit()
+                return count
+            except Exception: return 1
+
+    def check_stream_milestone(self, event_type, description, stream_title=""):
+        """Checks if a milestone was already achieved. If not, records it."""
+        conn = self._get_db()
+        if not conn: return False
+        with self.db_lock:
+            try:
+                row = conn.execute("SELECT 1 FROM stream_milestones WHERE event_type=?", (event_type,)).fetchone()
+                if row: return False
+                now_iso = get_now_vn().isoformat()
+                conn.execute(
+                    "INSERT INTO stream_milestones (event_type, description, achieved_at, stream_title) VALUES (?,?,?,?)",
+                    (event_type, description, now_iso, stream_title)
+                )
+                conn.commit()
+                return True
+            except Exception: return False
 
     def extract_candidates_heuristic(self, text):
         """Fast heuristic-based memory extraction."""

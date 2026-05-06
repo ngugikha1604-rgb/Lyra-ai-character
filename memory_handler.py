@@ -161,3 +161,31 @@ class MemoryHandlerMixin:
         with self.memory.db_lock:
             c.execute("INSERT INTO summaries (summary, timestamp, is_mega) VALUES (?,?,0)", (text, timestamp))
             conn.commit()
+    def write_diary_entry(self):
+        """Generates a secret diary entry for the session."""
+        try:
+            print("[MemoryHandler] Writing diary entry...")
+            # 1. Gather session highlights
+            recent_convo = "\n".join([f"{'User' if m['role'] == 'user' else 'Lyra'}: {m['content']}" for m in self.messages[-15:]])
+            session_items = "\n".join([f"- {i['value']}" for i in self.memory._session_items])
+            emotion_state = self.emotion.describe_internal_state()
+            
+            prompt = (
+                f"{DIARY_GENERATION_PROMPT}\n\n"
+                f"Lịch sử chat gần đây:\n{recent_convo}\n\n"
+                f"Các sự kiện trong phiên chat:\n{session_items}\n\n"
+                f"Trạng thái nội tâm cuối cùng: {emotion_state}"
+            )
+            
+            raw = self._call_light_model([
+                {"role": "system", "content": "Bạn là tiềm thức của Lyra. Viết nhật ký bí mật bằng tiếng Việt."},
+                {"role": "user", "content": prompt}
+            ], temperature=0.7, max_tokens=350, provider="gemini")
+            
+            if raw:
+                # Clean markdown tags
+                raw = re.sub(r"```.*?```", "", raw, flags=re.DOTALL).strip()
+                self.memory.add_diary_entry(raw, mood=self.emotion.mood, affection=self.emotion.affection)
+                print(f"✓ Diary entry saved ({len(raw)} chars)")
+        except Exception as e:
+            print(f"[MemoryHandler] Diary error: {e}")

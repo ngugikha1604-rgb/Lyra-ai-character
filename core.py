@@ -15,7 +15,7 @@ from background_worker import enqueue, PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORIT
 from time_utils import get_vietnam_time, get_time_period, calculate_time_gap, should_send_greeting
 from emotion import EmotionEngine
 from memory import MemorySystem
-from vbrain import parse_vbrain_response
+from vbrain import parse_vbrain_response, validate_emotion, validate_action
 from conversation_state import ConversationStateDetector
 from skill_synthesizer import SkillSynthesizer
 from prompts import REWARD_HINTS, IDEOLOGY_PROMPTS
@@ -24,6 +24,7 @@ from rl_feedback_loop import RLFeedbackLoop
 # DSPy Integration
 import dspy
 from dspy_modules.brain_module import LyraBrain
+
 
 # Mixins
 from behavioral_logic import BehavioralMixin
@@ -86,7 +87,7 @@ class MiniAI(
 
         self.skills_dir = os.path.join(BASE_DIR, "skills")
         self.synthesizer = SkillSynthesizer(self.skills_dir)
-        self._skills_index = self._load_skill_index()
+        self.skills_index = self.synthesizer.load_skill_index() # Use synthesizer method
         
         self.last_message_time = self.memory.memory.get("time_tracking", {}).get("last_message_time")
         self.time_gap_hours = calculate_time_gap(self.last_message_time, self.current_time)
@@ -111,7 +112,7 @@ class MiniAI(
             dspy.configure(lm=self.dspy_lm)
             
             self.brain = LyraBrain()
-            compiled_path = os.path.join(BASE_DIR, "lyra_compiled_v1.json")
+            compiled_path = os.path.join(BASE_DIR, "lyra_compiled.json")
             if os.path.exists(compiled_path):
                 self.brain.load(compiled_path)
                 print(f"[Core] Loaded compiled brain from {compiled_path}")
@@ -243,11 +244,49 @@ class MiniAI(
 
     def _build_api_messages(self, system_prompt, composed_message, source_type):
         history_window = MAX_HISTORY * 2 if source_type == "owner" else 8
+        # Fallback: Convert dict prompt to string for standard LLM APIs
+        system_str = self._dict_to_prompt_string(system_prompt)
         return [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": system_str},
             *self.messages[-history_window:],
             {"role": "user", "content": composed_message},
         ]
+
+    def _dict_to_prompt_string(self, prompt_dict: dict) -> str:
+        """Converts structured prompt dict back to a monolithic string for fallback LLM calls."""
+        if not isinstance(prompt_dict, dict): return str(prompt_dict)
+        return "\n".join([f"{k.upper()}:\n{v}" for k, v in prompt_dict.items() if v])
+
+    def _get_brain_inputs(self, structured_prompt):
+        persona = structured_prompt["persona"]
+        situation = structured_prompt["situation"]
+        memory = structured_prompt["memory"]
+        if structured_prompt.get("behavior_hints"):
+            situation += f"\nBEHAVIOR_HINTS:\n{structured_prompt['behavior_hints']}"
+        return persona, situation, memory
+
+    def _call_brain(self, structured_prompt, history_str, user_msg):
+        persona, situation, memory = self._get_brain_inputs(structured_prompt)
+        return self.brain(
+            persona=persona,
+            situation=situation,
+            memory=memory,
+            chat_history=history_str,
+            user_message=user_msg,
+        )
+
+    def _parse_brain_result(self, result):
+        skill_needed = getattr(result, "skill_needed", "NONE")
+        if skill_needed and skill_needed.upper() == "NONE":
+            skill_needed = None
+        return {
+            "monologue": getattr(result, "rationale", ""),
+            "emotion": getattr(result, "emotion", "neutral"),
+            "action": getattr(result, "action", "NONE"),
+            "reply": getattr(result, "reply", "..."),
+            "skill_needed": skill_needed,
+        }
+
     def _execute_vts_tools(self, emotion, action, vad=None):
         """Feedback Loop: Thực thi VTS tools và trả về lỗi nếu có (Agent-Zero logic)."""
         try:
@@ -281,7 +320,7 @@ class MiniAI(
         Orchestrates the brain call using DSPy (Programming) instead of pure Prompting.
         """
         if not self.brain:
-            # Fallback to old behavior if DSPy isn't ready
+            # Fallback uses api_messages which already has string content
             content = self._call_model(
                 api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens
             )
@@ -290,33 +329,14 @@ class MiniAI(
             parsed = parse_vbrain_response(content)
         else:
             try:
-                # Prepare inputs for DSPy
-                system_prompt = api_messages[0]["content"]
-                # Format chat history for DSPy input
                 history_str = "\n".join([f"{m['role']}: {m['content']}" for m in api_messages[1:-1]])
                 user_msg = api_messages[-1]["content"]
 
-                # Call DSPy Brain
                 start_brain = time.time()
-                with dspy.context(lm=self.dspy_lm): # Ensure correct LM is used
-                    result = self.brain(
-                        system_context=system_prompt,
-                        chat_history=history_str,
-                        user_message=user_msg
-                    )
+                with dspy.context(lm=self.dspy_lm):
+                    result = self._call_brain(prompt_args["structured"], history_str, user_msg)
                 print(f"[Brain] Main generation took {time.time() - start_brain:.2f}s")
-
-                parsed = {
-                    "monologue": getattr(result, 'rationale', ""),
-                    "emotion": getattr(result, 'emotion', "neutral"),
-                    "action": getattr(result, 'action', "NONE"),
-                    "reply": getattr(result, 'reply', "..."),
-                    "skill_needed": getattr(result, 'skill_needed', "NONE")
-                }
-                
-                # Sanitize skill_needed
-                if parsed["skill_needed"].upper() == "NONE":
-                    parsed["skill_needed"] = None
+                parsed = self._parse_brain_result(result)
 
             except Exception as e:
                 print(f"[Core] DSPy Brain Error: {e}. Falling back to standard LLM call.")
@@ -346,34 +366,22 @@ class MiniAI(
                 )
                 
                 if not self.brain:
-                    api_messages[0]["content"] = new_system_prompt
+                    api_messages[0]["content"] = self._dict_to_prompt_string(new_system_prompt)
                     content = self._call_model(api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens)
                     parsed = parse_vbrain_response(content) if content else parsed
                 else:
-                    # Re-call DSPy Brain with new skill context
                     history_str = "\n".join([f"{m['role']}: {m['content']}" for m in api_messages[1:-1]])
                     user_msg = api_messages[-1]["content"]
-                    
                     start_skill = time.time()
                     with dspy.context(lm=self.dspy_lm):
-                        result = self.brain(
-                            system_context=new_system_prompt,
-                            chat_history=history_str,
-                            user_message=user_msg
-                        )
+                        result = self._call_brain(new_system_prompt, history_str, user_msg)
                     print(f"[Brain] Skill loop generation took {time.time() - start_skill:.2f}s")
-                    parsed = {
-                        "monologue": getattr(result, 'rationale', ""),
-                        "emotion": getattr(result, 'emotion', "neutral"),
-                        "action": getattr(result, 'action', "NONE"),
-                        "reply": getattr(result, 'reply', "..."),
-                        "skill_needed": getattr(result, 'skill_needed', "NONE")
-                    }
+                    parsed = self._parse_brain_result(result)
 
         # 2. VTS Feedback Loop (Agent-Zero)
         vts_error = self._execute_vts_tools(
-            parsed.get("emotion"), 
-            parsed.get("action"), 
+            validate_emotion(parsed.get("emotion")),
+            validate_action(parsed.get("action")),
             vad=self.emotion.get_vad()
         )
         if vts_error and self._vts_loop_count < 1: # Only allow one feedback turn per message
@@ -388,27 +396,16 @@ class MiniAI(
                 if content:
                     parsed = parse_vbrain_response(content)
             else:
-                # Add feedback to history for DSPy
                 history_str = "\n".join([f"{m['role']}: {m['content']}" for m in api_messages[1:-1]])
                 history_str += f"\nassistant: {parsed.get('reply', '')}"
                 history_str += f"\nsystem: {feedback_msg}"
                 user_msg = api_messages[-1]["content"]
-                
+
                 start_vts = time.time()
                 with dspy.context(lm=self.dspy_lm):
-                    result = self.brain(
-                        system_context=api_messages[0]["content"],
-                        chat_history=history_str,
-                        user_message=user_msg
-                    )
+                    result = self._call_brain(prompt_args["structured"], history_str, user_msg)
                 print(f"[Brain] VTS feedback generation took {time.time() - start_vts:.2f}s")
-                parsed = {
-                    "monologue": getattr(result, 'rationale', ""),
-                    "emotion": getattr(result, 'emotion', "neutral"),
-                    "action": getattr(result, 'action', "NONE"),
-                    "reply": getattr(result, 'reply', "..."),
-                    "skill_needed": getattr(result, 'skill_needed', "NONE")
-                }
+                parsed = self._parse_brain_result(result)
 
         return parsed
 
@@ -505,6 +502,7 @@ class MiniAI(
 
         prompt_args = {
             "base": prompt_base,
+            "structured": system_prompt,
             "reward_hint": reward_hint,
             "active_inference_mode": active_inference_mode,
             "perlocution_hint": perlocution_hint,
@@ -533,33 +531,7 @@ class MiniAI(
 
     def emotion_from_state(self): return self.emotion.emotion_from_state()
 
-    def _load_skill_index(self):
-        if os.path.exists(self.synthesizer.index_path):
-            try:
-                with open(self.synthesizer.index_path, "r", encoding="utf-8") as f:
-                    return f.read()
-            except: pass
-        return ""
 
-    def _load_skill_content(self, skill_name):
-        return self.synthesizer.get_skill_context(skill_name)
-
-    def _log_skill_usage(self, skill_name):
-        import time
-        print(f"[Skill] Using: {skill_name}")
-        stats_path = self.synthesizer.stats_path
-        try:
-            stats = {}
-            if os.path.exists(stats_path):
-                with open(stats_path, "r", encoding="utf-8") as f:
-                    stats = json.load(f)
-            if skill_name not in stats:
-                stats[skill_name] = {"call_count": 0, "last_used": 0}
-            stats[skill_name]["call_count"] += 1
-            stats[skill_name]["last_used"] = time.time()
-            with open(stats_path, "w", encoding="utf-8") as f:
-                json.dump(stats, f, indent=2)
-        except: pass
 
     def _reflect_on_session(self):
         """Mid-session reflection loop to generate high-level insights."""
@@ -603,6 +575,38 @@ class MiniAI(
         """(Disabled) Trước đây dùng để cập nhật trạng thái các mục tiêu kế hoạch stream."""
         pass
 
+    def _generate_stream_plan(self):
+        """Generates dynamic goals for the session (Plandex/Letta-style)."""
+        from config import STREAM_TITLE, STREAM_GOALS, STREAM_NOTES
+        from live_context import update_plan
+        
+        print("[Core] Generating dynamic stream plan...")
+        prompt = (
+            f"Bạn là Lyra, Vtuber đang chuẩn bị stream.\n"
+            f"Tiêu đề: {STREAM_TITLE}\n"
+            f"Mục tiêu định sẵn: {', '.join(STREAM_GOALS)}\n"
+            f"Ghi chú: {STREAM_NOTES}\n\n"
+            f"Nhiệm vụ: Dựa trên thông tin trên, hãy liệt kê 3-4 mục tiêu cụ thể, vui vẻ cho buổi stream hôm nay. "
+            f"Trả về JSON: {{\"plan\": [{{\"goal\": \"tên mục tiêu\", \"status\": \"pending\"}}]}}"
+        )
+        
+        try:
+            raw = self._call_light_model([
+                {"role": "system", "content": "Chỉ trả về JSON."},
+                {"role": "user", "content": prompt}
+            ], temperature=0.7, provider="openrouter")
+            
+            if raw:
+                match = re.search(r'\{.*\}', raw, re.DOTALL)
+                if match:
+                    data = json.loads(match.group())
+                    plan = data.get("plan", [])
+                    if plan:
+                        update_plan(plan)
+                        print(f"✓ Dynamic plan generated: {len(plan)} items")
+        except Exception as e:
+            print(f"[Core] Planning error: {e}")
+
     def get_proactive_message(self):
         """Generates a proactive message based on time and situation."""
         from prompts import PROACTIVE_TIME_TEMPLATES
@@ -614,3 +618,5 @@ class MiniAI(
             {"role": "user", "content": template}
         ]
         return self._call_light_model(messages, temperature=0.8, provider="openrouter")
+
+    # [END OF MINIAI]

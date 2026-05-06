@@ -73,14 +73,7 @@ def parse_vbrain_response(content):
     return default_res
 
 
-def format_vbrain_output(parsed):
-    """Format VTuber output for frontend"""
-    return {
-        "reply": parsed.get("reply", "..."),
-        "monologue": parsed.get("monologue", ""),
-        "emotion": parsed.get("emotion", "neutral"),
-        "action": parsed.get("action", "NONE"),
-    }
+
 
 
 VALID_EMOTIONS = [

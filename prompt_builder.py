@@ -1,16 +1,10 @@
-import os
-import re
-import json
-import time
 import random
-from datetime import datetime
 from prompts import (
     CORE_SYSTEM_PROMPT, STREAM_VIEWER_PERSONALITY, RELATIONSHIP_HINTS,
     MOOD_HINTS, USER_MOOD_HINTS, INTENT_HINTS, VTUBER_BRAIN_INSTRUCTIONS,
-    PERSONA_TIERS, IDEOLOGY_PROMPTS, DIARY_GENERATION_PROMPT, THOUGHT_CHAIN_SYSTEM,
-    UNDERSTANDING_HINTS
+    PERSONA_TIERS, IDEOLOGY_PROMPTS
 )
-from time_utils import get_time_context, get_weekend_context
+from time_utils import get_time_context
 from live_context import get_live_context_block
 
 TOKEN_BUDGET_SAFE = 900  # Max safe tokens for small models (~800-1200 effective window)
@@ -26,39 +20,7 @@ class PromptBuilderMixin:
         """Ước tính token count bằng chars/4 — đủ chính xác cho mục đích budget."""
         return len(text) // 4
 
-    def _load_skill_index(self) -> str:
-        index_path = os.path.join(self.skills_dir, "_index.md")
-        if os.path.exists(index_path):
-            with open(index_path, "r", encoding="utf-8") as f:
-                return f.read()
-        return ""
 
-    def _load_skill_content(self, skill_name: str) -> str:
-        safe_name = re.sub(r"[^a-zA-Z0-9_]", "", skill_name)
-        skill_path = os.path.join(self.skills_dir, f"{safe_name}.md")
-        if os.path.exists(skill_path):
-            with open(skill_path, "r", encoding="utf-8") as f:
-                return f.read()
-        return ""
-
-    def _log_skill_usage(self, skill_name: str):
-        """Updates skill usage statistics in JSON."""
-        stats_path = os.path.join(self.skills_dir, "skill_stats.json")
-        stats = {}
-        if os.path.exists(stats_path):
-            try:
-                with open(stats_path, "r", encoding="utf-8") as f:
-                    stats = json.load(f)
-            except Exception:
-                pass
-
-        entry = stats.get(skill_name, {"call_count": 0, "first_used": time.time(), "description": "Kỹ năng tự học"})
-        entry["call_count"] += 1
-        entry["last_used"] = time.time()
-        stats[skill_name] = entry
-
-        with open(stats_path, "w", encoding="utf-8") as f:
-            json.dump(stats, f, indent=2)
 
     def build_prompt(
         self,
@@ -167,57 +129,62 @@ class PromptBuilderMixin:
             else:
                 surprise_hint = "\nBẤT NGỜ DỰ ĐOÁN:\nLần này hãy trả lời theo hướng bất ngờ — thay vì trung lập, hãy đột nhiên rất nhiệt tình hoặc rất thờ ơ. Không giải thích tại sao. Chỉ 1-2 câu ngắn."
 
-        # ── TIER 0: Always included (persona-critical) ──────────────────────────
-        # Never dropped regardless of token budget.
-        tier0_parts = [
-            base_personality,
-            VTUBER_BRAIN_INSTRUCTIONS,
-            f"\n{situation_note}",
-            "\nCHỈ DẪN: Trả lời bằng tiếng Việt. Cực kỳ ngắn gọn (1-2 câu). Không xưng 'tôi'.",
-        ]
-        parts = [p for p in tier0_parts if p]
+        # ── Grouping into Categories for DSPy ──────────────────────────────────
+        persona_cat = [base_personality, VTUBER_BRAIN_INSTRUCTIONS, "\nCHỈ DẪN: Trả lời bằng tiếng Việt. Cực kỳ ngắn gọn (1-2 câu). Không xưng 'tôi'."]
+        situation_cat = [f"\n{situation_note}"]
+        memory_cat = []
+        hints_cat = []
 
+        # Optimization: Use a running total for token count to avoid O(n^2) string joins.
+        # Seed it with always-included categories so the budget reflects the real prompt size.
+        current_tokens = 0
+        for cat in (persona_cat, situation_cat):
+            for item in cat:
+                current_tokens += self._estimate_tokens(item)
 
-        def _try_add(section: str) -> bool:
-            """Add section nếu tổng token vẫn trong budget. Trả về True nếu thêm được."""
-            if not section:
-                return True  # Empty section — skip silently
-            projected = self._estimate_tokens(
-                "\n".join(filter(None, parts)) + "\n" + section
-            )
-            if projected <= TOKEN_BUDGET_SAFE:
-                parts.append(section)
+        def _try_add_to_cat(section: str, cat: list) -> bool:
+            nonlocal current_tokens
+            if not section: return True
+            section_tokens = self._estimate_tokens(section)
+            if current_tokens + section_tokens <= TOKEN_BUDGET_SAFE:
+                cat.append(section)
+                current_tokens += section_tokens
                 return True
             return False
 
-        # ── TIER 1: High priority (context-critical) ────────────────────────────
-        _try_add(time_context)
-        _try_add(source_context)
-        _try_add(full_memory_context)
-        _try_add(_session_ctx)
+        # Budgeting TIER 1
+        _try_add_to_cat(time_context, situation_cat)
+        _try_add_to_cat(source_context, situation_cat)
+        _try_add_to_cat(full_memory_context, memory_cat)
+        _try_add_to_cat(_session_ctx, memory_cat)
 
-        # ── TIER 2: Medium priority (behavioral hints) ──────────────────────────
+        # Budgeting TIER 2
         rel_mood = f"Mối quan hệ: {relationship_hint} | Tâm trạng: {mood_hint}" if mood_hint else f"Mối quan hệ: {relationship_hint}"
-        _try_add(rel_mood)
-        _try_add(f"Người dùng: {user_hint}" if user_hint else "")
-        _try_add(f"Ý định: {intent_hint}" if intent_hint else "")
-        _try_add(conv_hints)
-        _try_add(anti_repeat_note)
-        if perlocution_hint: _try_add(perlocution_hint)
-        if self_disclosure_hint: _try_add(self_disclosure_hint)
-        if reward_hint: _try_add(reward_hint)
-        if surprise_hint: _try_add(surprise_hint)
+        _try_add_to_cat(rel_mood, situation_cat)
+        _try_add_to_cat(f"Người dùng: {user_hint}" if user_hint else "", situation_cat)
+        _try_add_to_cat(f"Ý định: {intent_hint}" if intent_hint else "", situation_cat)
+        _try_add_to_cat(conv_hints, hints_cat)
+        _try_add_to_cat(anti_repeat_note, hints_cat)
+        if perlocution_hint: _try_add_to_cat(perlocution_hint, hints_cat)
+        if self_disclosure_hint: _try_add_to_cat(self_disclosure_hint, hints_cat)
+        if reward_hint: _try_add_to_cat(reward_hint, hints_cat)
+        if surprise_hint: _try_add_to_cat(surprise_hint, situation_cat)
 
-        # ── TIER 3: Low priority (optional enrichment) ──────────────────────────
-        _try_add(get_live_context_block())
-        if identity_note: _try_add(f"\nDANH TÍNH:\n{identity_note}")
+        # Budgeting TIER 3
+        _try_add_to_cat(get_live_context_block(), memory_cat)
+        if identity_note: _try_add_to_cat(f"\nDANH TÍNH:\n{identity_note}", memory_cat)
         if source_type == "owner":
-            _try_add("KỸ NĂNG: " + (self._skills_index or "Không có"))
-        _try_add(_stream_ctx)
+            _try_add_to_cat("KỸ NĂNG: " + (self.skills_index or "Không có"), hints_cat)
+        _try_add_to_cat(_stream_ctx, situation_cat)
         if loaded_skill_content:
-            _try_add("\nNỘI DUNG KỸ NĂNG ĐÃ TẢI:\n" + loaded_skill_content)
+            _try_add_to_cat("\nNỘI DUNG KỸ NĂNG ĐÃ TẢI:\n" + loaded_skill_content, hints_cat)
 
-        return "\n".join(filter(None, parts))
+        return {
+            "persona": "\n".join(filter(None, persona_cat)),
+            "situation": "\n".join(filter(None, situation_cat)),
+            "memory": "\n".join(filter(None, memory_cat)),
+            "behavior_hints": "\n".join(filter(None, hints_cat))
+        }
 
     def _build_source_context(self, source_type: str, viewer_data: dict) -> str:
         """Helper to create context based on the message source (Owner vs Viewer)"""
@@ -289,36 +256,3 @@ class PromptBuilderMixin:
         parts.append("</ctx>")
         return f"{user_input}\n\n" + "\n".join(parts)
 
-    def write_diary_entry(self):
-        """Generates and saves a secret diary entry after a session."""
-        try:
-            print("[Core] Writing secret diary...")
-            session_ctx = self.memory.get_session_context()
-            if not session_ctx:
-                summaries = self.memory.get_diary_entries(limit=3)
-                session_ctx = "\n".join([d["content"] for d in summaries])
-
-            prompt = DIARY_GENERATION_PROMPT.format(
-                session_summary=session_ctx[:800],
-                emotion_state=self.emotion.describe_internal_state(),
-                affection_level=f"{int(self.emotion.affection)}/100",
-                turns=self.turn_counter,
-            )
-
-            entry_content = self._call_light_model([
-                {"role": "system", "content": "Bạn là Lyra đang viết nhật ký. Trả về plain text."},
-                {"role": "user", "content": prompt},
-            ])
-
-            if entry_content and len(entry_content.strip()) > 10:
-                self.memory.add_diary_entry(
-                    content=entry_content.strip(),
-                    mood=self.emotion.mood,
-                    affection=self.emotion.affection,
-                )
-                print("=" * 60 + "\n✅ SECRET DIARY - ĐÃ GHI XONG!\n" + "─" * 60 + f"\n{entry_content.strip()}\n" + "=" * 60)
-                return True
-            return False
-        except Exception as e:
-            print(f"[Core] write_diary_entry error: {e}")
-            return False
