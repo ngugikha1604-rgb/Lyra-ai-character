@@ -48,8 +48,16 @@ class RLFeedbackLoop:
         with self.lock:
             self.active_observations.append(obs)
         
-        # Schedule evaluation after window closes
-        threading.Timer(self.reward_window + 0.5, self._trigger_evaluation, args=[obs]).start()
+        # Schedule evaluation after window closes using background_worker
+        # (Avoids threading.Timer overhead for each action)
+        enqueue(PRIORITY_NORMAL, self._delayed_evaluation, obs, delay=self.reward_window + 0.5)
+    
+    def _delayed_evaluation(self, obs, delay=0):
+        """Wrapper to add delay before evaluation."""
+        import time
+        if delay > 0:
+            time.sleep(delay)
+        self._trigger_evaluation(obs)
 
     def ingest_viewer_message(self, message, sender_name):
         """Called for every incoming viewer message to build the reaction context."""

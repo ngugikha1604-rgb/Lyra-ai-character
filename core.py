@@ -232,6 +232,13 @@ class MiniAI(
         if source_type != "owner" or reward_hint:
             return active_mode, ideology_idx
 
+        # Guard: không trigger khi user đang buồn/stress/tức — không phù hợp để hỏi triết học
+        _blocked_moods = {"sad", "stressed", "anxious", "frustrated"}
+        _current_user_mood = getattr(self, "_last_user_mood", "neutral")
+        _in_closing = self.conv_state.state in ("closing", "goodbye")
+        if _current_user_mood in _blocked_moods or _in_closing:
+            return active_mode, ideology_idx
+
         if self.attention >= 4:
             ideology_idx = self.conv_state.should_trigger_ideology(len(IDEOLOGY_PROMPTS))
 
@@ -459,6 +466,8 @@ class MiniAI(
         self.turn_counter += 1
 
         intent = self.detect_intent(user_input)
+        # Lưu user mood để guard active inference triggers (ideology/surprise)
+        self._last_user_mood = self.detect_user_mood(user_input)
         illocution, perlocution_hint, disclosure_hint = self._owner_behavior_hints(
             user_input, intent, source_type
         )

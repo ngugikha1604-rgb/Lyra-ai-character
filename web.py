@@ -129,7 +129,7 @@ def require_auth(f):
     return decorated_function
 
 # Input sanitization
-def sanitize_input(text, max_length=500):
+def sanitize_input(text, max_length=1000):
     if not text or not isinstance(text, str):
         return ''
     import re
@@ -154,6 +154,13 @@ def _load_youtube_credentials() -> dict | None:
         if isinstance(credentials, dict) and credentials.get("token"):
             return credentials
     except FileNotFoundError:
+        return None
+    except json.JSONDecodeError as e:
+        print(f"[YouTube OAuth] Credentials file corrupted, deleting: {e}")
+        try:
+            os.remove(YOUTUBE_CREDENTIALS_FILE)
+        except Exception:
+            pass
         return None
     except Exception as e:
         print(f"[YouTube OAuth] Could not load credentials: {e}")
@@ -307,6 +314,9 @@ def _proactive_monitor():
                 continue
             gap = (get_now_vn() - last_time).total_seconds()
             if gap > 120:
+                # Không trigger nếu audio đang phát — tránh ngắt giữa câu
+                if not audio_play_queue.empty():
+                    continue
                 prompt = (
                     "Chat đã im lặng 2 phút. Đặt một câu hỏi ngắn, tò mò để khơi gợi mọi người tâm sự "
                     "để giữ người xem ở lại."
@@ -518,13 +528,13 @@ def speak():
         # attention: 0 → 10 (từ EmotionEngine)
         attention = lyra_ai.emotion.attention
         if attention <= 2:
-            tts_speed = "-2"  # Lyra mệt → nói chậm, kéo dài
+            tts_speed = "-1"  # Lyra mệt → nói chậm, kéo dài
         elif attention <= 4:
-            tts_speed = "-1"  # Hơi mệt → hơi chậm
+            tts_speed = "0"  # Hơi mệt → hơi chậm
         elif attention >= 8:
-            tts_speed = "1"  # Hào hứng → nói nhanh hơn
+            tts_speed = "2"  # Hào hứng → nói nhanh hơn
         else:
-            tts_speed = "0"  # Bình thường
+            tts_speed = "1"  # Bình thường
 
         response = requests.post(
             FPT_TTS_URL,
@@ -558,7 +568,7 @@ def speak():
             _t.sleep(1.5)
             try:
                 temp_res = requests.get(audio_url, timeout=5)
-                if temp_res.status_code == 200 and len(temp_res.content) > 500:
+                if temp_res.status_code == 200 and temp_res.headers.get('Content-Type', '').startswith('audio/'):
                     audio_res = temp_res
                     break
                 # 404 có nghĩa là file đang được xử lý, chưa sẵn sàng.
@@ -606,20 +616,20 @@ def get_analytics():
                 }
             )
 
-        conn = get_db()
-        c = conn.cursor()
-
-        name_row = c.execute("SELECT value FROM profile WHERE key='name'").fetchone()
-        total_row = c.execute(
-            "SELECT value FROM metadata WHERE key='total_messages'"
-        ).fetchone()
-        topics = [
-            r[0]
-            for r in c.execute(
-                "SELECT value FROM facts WHERE type='topic' ORDER BY id DESC LIMIT 10"
-            )
-        ]
-        conn.close()
+        with DB_LOCK:
+            conn = get_db()
+            c = conn.cursor()
+            name_row = c.execute("SELECT value FROM profile WHERE key='name'").fetchone()
+            total_row = c.execute(
+                "SELECT value FROM metadata WHERE key='total_messages'"
+            ).fetchone()
+            topics = [
+                r[0]
+                for r in c.execute(
+                    "SELECT value FROM facts WHERE type='topic' ORDER BY id DESC LIMIT 10"
+                )
+            ]
+            conn.close()
 
         return jsonify(
             {
@@ -665,14 +675,15 @@ def get_history():
     try:
         if not os.path.exists(DB_PATH):
             return jsonify({"history": []})
-        conn = get_db()
-        messages = [
-            {"role": r[0], "content": r[1]}
-            for r in conn.execute(
-                "SELECT role, content FROM conversation ORDER BY id ASC"
-            )
-        ]
-        conn.close()
+        with DB_LOCK:
+            conn = get_db()
+            messages = [
+                {"role": r[0], "content": r[1]}
+                for r in conn.execute(
+                    "SELECT role, content FROM conversation ORDER BY id ASC"
+                )
+            ]
+            conn.close()
         return jsonify({"history": messages})
     except Exception:
         return jsonify({"history": []})
@@ -782,7 +793,7 @@ def stream_chat():
                 {"error": "Missing required fields: message, sender_id"}
             ), 400
 
-        message = sanitize_input(data["message"], max_length=500)
+        message = sanitize_input(data["message"], max_length=1000)
         sender_id = str(data["sender_id"]).strip()
         sender_name = str(data.get("sender_name", "Viewer")).strip()
         channel_id = str(data.get("channel_id", "default")).strip()
@@ -1117,11 +1128,13 @@ def _process_queue_loop():
                 now = _time.time()
                 if (now - _last_new_viewer_pick) >= NEW_VIEWER_PICK_INTERVAL:
                     with _pool_lock:
-                        if _new_viewer_pool:
+                        pool_copy = list(_new_viewer_pool)  # snapshot để tránh race condition
+                        if pool_copy:
                             import random as _random
-
-                            event = _random.choice(_new_viewer_pool)
-                            _new_viewer_pool.remove(event)  # chỉ xóa entry đã chọn
+                            event = _random.choice(pool_copy)
+                            # Chỉ xóa nếu vẫn còn trong pool (tránh KeyError nếu bị clear đồng thời)
+                            if event in _new_viewer_pool:
+                                _new_viewer_pool.remove(event)
                     _last_new_viewer_pick = now
 
             if event is None:
@@ -1343,6 +1356,7 @@ import json as _json
 
 _sse_subscribers: list = []
 _sse_lock = threading.Lock()
+MAX_SSE_SUBSCRIBERS = 10  # Giới hạn để tránh memory leak khi nhiều client bị drop đột ngột
 
 
 def _sse_broadcast(data: dict):
@@ -1518,46 +1532,8 @@ def stream_stop():
     platform = data.get("platform", "youtube")
     channel_id = data.get("channel_id", "default")
 
-    # ── IDEA-02: Stream farewell ───────────────────────────────────────────────
-    # Lấy summary + top viewers trước khi stop
-    try:
-        recent_summaries = chat_analyzer.get_recent_summaries(
-            channel_id, platform, limit=1
-        )
-        summary_text = recent_summaries[0]["summary"] if recent_summaries else ""
-        top_viewers_list = viewer_tracker.get_top_viewers(
-            platform=platform, channel_id=channel_id, limit=3
-        )
-        top_names = (
-            ", ".join(v["viewer_name"] for v in top_viewers_list)
-            if top_viewers_list
-            else "mọi người"
-        )
-
-        with ai_chat_lock:
-            farewell = lyra_ai.generate_stream_event_reply(
-                "farewell",
-                {
-                    "summary": summary_text,
-                    "top_viewers": top_names,
-                    "duration": "",
-                },
-            )
-        if farewell:
-            _sse_broadcast(
-                {
-                    "type": "stream_event",
-                    "event": "stream_stop",
-                    "reply": farewell,
-                    "emotion": "friendly",
-                    "action": "WAVE",
-                    "sender_name": "Lyra",
-                    "source_type": "system",
-                }
-            )
-            print(f"[Stream] Farewell: {farewell}")
-    except Exception as e:
-        print(f"[Stream] Farewell error: {e}")
+    # ── IDEA-02: Stream farewell — chạy qua background worker để không block response ──
+    enqueue(PRIORITY_HIGH, _send_farewell_async, channel_id, platform)
 
     promoted = viewer_tracker.promote_regular_viewers(
         platform=platform, channel_id=channel_id
@@ -1673,6 +1649,9 @@ def stream_events():
     def generate():
         q = _queue.Queue(maxsize=50)
         with _sse_lock:
+            if len(_sse_subscribers) >= MAX_SSE_SUBSCRIBERS:
+                # Quá nhiều subscriber — trả về ngay, không add vào list
+                return
             _sse_subscribers.append(q)
         try:
             # Gửi heartbeat ngay để giữ connection

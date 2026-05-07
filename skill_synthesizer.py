@@ -20,6 +20,24 @@ Return a JSON object:
 
 If no new unique skill is found, return {}."""
 
+
+def safe_json_parse(text):
+    """Parse JSON from model output, handling markdown code blocks and trailing text."""
+    if not text:
+        return {}
+    text = re.sub(r'^```json\s*|\s*```$', '', text.strip())
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+
+
 class SkillSynthesizer:
     def __init__(self, skills_dir):
         self.skills_dir = skills_dir
@@ -116,7 +134,7 @@ class SkillSynthesizer:
             print(f"[Synthesizer] Error: {e}")
             return None
 
-    def save_skill(self, skill_data):
+    def save_skill(self, skill_data, overwrite=False):
         name = skill_data["skill_name"]
         content = skill_data["content_md"]
         description = skill_data.get("description", "Kỹ năng tự học")
@@ -125,9 +143,11 @@ class SkillSynthesizer:
         # 1. Lưu file .md
         file_path = os.path.join(self.skills_dir, f"{name}.md")
         if os.path.exists(file_path):
-            # Nếu skill đã tồn tại, có thể merge hoặc skip
-            # Ở đây ta skip để tránh loop vô tận
-            return None
+            # Nếu skill đã tồn tại và overwrite=False, skip để tránh loop vô tận
+            if not overwrite:
+                return None
+            # Nếu overwrite=True, xóa file cũ để ghi đè
+            self._delete_skill(name)
 
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
@@ -184,16 +204,20 @@ class SkillSynthesizer:
         changed = False
 
         for name, data in list(stats.items()):
-            # Bỏ qua các skill cốt lõi (built-in)
+            # Bỏ qua các skill cốt lõi (built-in) hoặc được đánh dấu protected
             if name in ["web_search", "memory_recall", "emotion_deep", "stream_manager"]:
+                continue
+            if data.get("protected", False):
                 continue
             
             last_used = data.get("last_used", 0)
             call_count = data.get("call_count", 0)
+            created_at = data.get("created_at", last_used)
+            age_days = (now - created_at) / thirty_days_sec * 30
             
-            # Nếu skill đã tồn tại quá 30 ngày (dựa theo last_used hoặc created_at)
-            # Ở đây ta dùng đơn giản: if (now - last_used) > 30 ngày AND call_count <= 2
-            if (now - last_used) > thirty_days_sec and call_count <= 2:
+            # Chỉ xóa skill nếu: quá 30 ngày tuổi VÀ ít được dùng (≤2 lần)
+            # Hoặc: rất ít dùng (0 lần) VÀ trên 60 ngày tuổi
+            if (age_days > 30 and call_count <= 2) or (call_count == 0 and age_days > 60):
                 print(f"[Synthesizer] Forgetting stale skill: {name}")
                 self._delete_skill(name)
                 del stats[name]

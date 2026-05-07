@@ -7,7 +7,7 @@ from prompts import (
 from time_utils import get_time_context
 from live_context import get_live_context_block
 
-TOKEN_BUDGET_SAFE = 900  # Max safe tokens for small models (~800-1200 effective window)
+TOKEN_BUDGET_SAFE = 1200  # Max safe tokens for small models (~800-1200 effective window)
 
 
 class PromptBuilderMixin:
@@ -18,7 +18,7 @@ class PromptBuilderMixin:
 
     def _estimate_tokens(self, text: str) -> int:
         """Ước tính token count bằng chars/4 — đủ chính xác cho mục đích budget."""
-        return len(text) // 4
+        return len(text.encode('utf-8')) // 4
 
 
 
@@ -155,7 +155,11 @@ class PromptBuilderMixin:
         # Budgeting TIER 1
         _try_add_to_cat(time_context, situation_cat)
         _try_add_to_cat(source_context, situation_cat)
-        _try_add_to_cat(full_memory_context, memory_cat)
+        # _stream_ctx được ưu tiên cao — luôn inject trước memory để Lyra biết đang stream gì
+        _try_add_to_cat(_stream_ctx, situation_cat)
+        # Cap memory context để không ăn hết budget của stream ctx và hints
+        _capped_memory = full_memory_context[:1200] if full_memory_context else ""
+        _try_add_to_cat(_capped_memory, memory_cat)
         _try_add_to_cat(_session_ctx, memory_cat)
 
         # Budgeting TIER 2
@@ -175,7 +179,6 @@ class PromptBuilderMixin:
         if identity_note: _try_add_to_cat(f"\nDANH TÍNH:\n{identity_note}", memory_cat)
         if source_type == "owner":
             _try_add_to_cat("KỸ NĂNG: " + (self.skills_index or "Không có"), hints_cat)
-        _try_add_to_cat(_stream_ctx, situation_cat)
         if loaded_skill_content:
             _try_add_to_cat("\nNỘI DUNG KỸ NĂNG ĐÃ TẢI:\n" + loaded_skill_content, hints_cat)
 
