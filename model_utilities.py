@@ -6,7 +6,8 @@ from config import (
     LIGHT_MODEL, CHAT_MODEL, LIGHT_BASE_URL, CHAT_BASE_URL,
     TRANSLATE_MODEL, TRANSLATE_BASE_URL, SEARCH_ENABLED,
     OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_BASE_URL,
-    GEMINI_API_KEY, GEMINI_MODELS, GEMINI_BASE_URL
+    GEMINI_API_KEY, GEMINI_MODELS, GEMINI_BASE_URL,
+    ROUTER9_BASE_URL, ROUTER9_API_KEY
 )
 
 class BaseLLMClient:
@@ -113,6 +114,38 @@ class GeminiClient(BaseLLMClient):
             print(f"[Gemini] Error: {e}")
         return None
 
+class Router9Client(BaseLLMClient):
+    """Central client for all LLM calls via 9router reverse proxy."""
+    
+    def call(self, messages, model="auto", temperature=0.8, max_tokens=250):
+        if not ROUTER9_BASE_URL: return None
+        try:
+            headers = {"Content-Type": "application/json"}
+            if ROUTER9_API_KEY:
+                headers["Authorization"] = f"Bearer {ROUTER9_API_KEY}"
+            data = {
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "top_p": 0.9
+            }
+            start = time.time()
+            response = self.session.post(f"{ROUTER9_BASE_URL}/chat/completions", headers=headers, json=data, timeout=60, verify=False)
+            if response.status_code == 200:
+                resp_json = response.json()
+                content = resp_json.get("choices", [{}])[0].get("message", {}).get("content", "")
+                if content:
+                    print(f"[Router9 - {model}] Responded in {time.time() - start:.1f}s")
+                    return content.strip()
+                else:
+                    print(f"[Router9] Empty content: {resp_json}")
+            else:
+                print(f"[Router9] Failed: {response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"[Router9] Error: {e}")
+        return None
+
 class GroqClient(BaseLLMClient):
     def call(self, messages, temperature=0.8, max_tokens=250):
         if not GROQ_API_KEY: return None
@@ -155,6 +188,7 @@ class ModelUtilityMixin:
     def _clients(self):
         if not hasattr(self, '_llm_clients'):
             self._llm_clients = {
+                'router9': Router9Client(self._session),
                 'ollama_light': OllamaClient(LIGHT_MODEL, LIGHT_BASE_URL, self._session),
                 'ollama_chat': OllamaClient(CHAT_MODEL, CHAT_BASE_URL, self._session),
                 'openrouter': OpenRouterClient(self._session),
@@ -164,35 +198,35 @@ class ModelUtilityMixin:
         return self._llm_clients
 
     def _call_light_model(self, messages, temperature=0.3, max_tokens=200, provider="ollama"):
-        """Call internal model for internal tasks (supports ollama, openrouter, gemini)."""
-        if provider == "openrouter" and OPENROUTER_API_KEY:
-            res = self._clients['openrouter'].call(messages, temperature, max_tokens)
-            if res: return res
-            print("[Light] OpenRouter failed, falling back to Ollama")
-        elif provider == "gemini" and GEMINI_API_KEY:
-            res = self._clients['gemini'].call(messages, temperature, max_tokens)
-            if res: return res
-            print("[Light] Gemini failed, falling back to Ollama")
-            
-        res = self._clients['ollama_light'].call(messages, temperature, max_tokens)
+        """Call internal model via 9router (supports ollama, openrouter, gemini, groq)."""
+        # Map provider sang model name cho LiteLLM/9router format
+        model_map = {
+            "ollama": f"ollama-local/{LIGHT_MODEL}",
+            "openrouter": f"openrouter/{OPENROUTER_MODEL}",
+            "gemini": f"gemini/{GEMINI_MODELS[0]}",
+            "groq": f"groq/{TRANSLATE_MODEL}"
+        }
+        model = model_map.get(provider, f"ollama/{LIGHT_MODEL}")
+        res = self._clients['router9'].call(messages, model=model, temperature=temperature, max_tokens=max_tokens)
         if res: return res
-        return self._call_model(messages, temperature=temperature, max_tokens=max_tokens)
+        
+        # Fallback thử các provider khác
+        for fallback_model in [f"ollama/{LIGHT_MODEL}", f"gemini/{GEMINI_MODELS[0]}", f"openrouter/{OPENROUTER_MODEL}"]:
+            res = self._clients['router9'].call(messages, model=fallback_model, temperature=temperature, max_tokens=max_tokens)
+            if res: return res
+        return None
 
     def _call_model(self, messages, temperature=0.8, max_tokens=250):
-        """Call local Ollama chat model."""
+        """Call main chat model via 9router."""
         return self._call_chat_model(messages, temperature=temperature, max_tokens=max_tokens)
 
     def _call_chat_model(self, messages, temperature=0.8, max_tokens=250):
-        """Call Groq primary, fallback to local Ollama."""
-        result = self._clients['groq'].call(messages, temperature=temperature, max_tokens=max_tokens)
-        if result: return result
-
-        print("[Chat] Groq unavailable, falling back to Ollama...")
-        return self._clients['ollama_chat'].call(messages, temperature=temperature, max_tokens=max_tokens)
+        """Call main chat model via 9router (Groq primary)."""
+        return self._clients['router9'].call(messages, model=f"groq/{TRANSLATE_MODEL}", temperature=temperature, max_tokens=max_tokens)
 
     def _call_groq_model(self, messages, temperature=0.4, max_tokens=400):
-        """Call Groq primary chat model."""
-        return self._clients['groq'].call(messages, temperature=temperature, max_tokens=max_tokens)
+        """Call Groq model via 9router."""
+        return self._clients['router9'].call(messages, model=f"groq/{TRANSLATE_MODEL}", temperature=temperature, max_tokens=max_tokens)
 
     def _translate_response(self, text):
         """Standardizes translation if needed, currently no-op."""

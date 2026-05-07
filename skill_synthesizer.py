@@ -1,10 +1,13 @@
 import os
 import json
 import re
+import threading
 from datetime import datetime, timedelta
 from config import LIGHT_MODEL, LIGHT_BASE_URL
 import requests
 import time
+
+DB_LOCK = threading.Lock()
 
 SKILL_SYNTHESIZE_PROMPT = """You are a meta-learning assistant for Lyra, an AI character.
 Analyze the following successful conversation snippets and identify a "Skill" or "Behavior Pattern" that Lyra demonstrated.
@@ -237,10 +240,49 @@ class SkillSynthesizer:
             except: pass
         return ""
 
+    def _load_skill_content(self, skill_name):
+        """Load skill content from markdown file."""
+        return self.get_skill_context(skill_name)
+
+    def _log_skill_usage(self, skill_name):
+        """Log skill usage for stats tracking."""
+        try:
+            stats = {}
+            if os.path.exists(self.stats_path):
+                with open(self.stats_path, "r", encoding="utf-8") as f:
+                    stats = json.load(f)
+            
+            if skill_name in stats:
+                stats[skill_name]["call_count"] = stats[skill_name].get("call_count", 0) + 1
+                stats[skill_name]["last_used"] = time.time()
+            else:
+                stats[skill_name] = {
+                    "call_count": 1,
+                    "last_used": time.time(),
+                    "created_at": time.time(),
+                    "description": "Auto-tracked skill"
+                }
+            
+            with open(self.stats_path, "w", encoding="utf-8") as f:
+                json.dump(stats, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[SkillSynthesizer] Error logging skill usage: {e}")
+
     def _delete_skill(self, name):
         md_path = os.path.join(self.skills_dir, f"{name}.md")
         if os.path.exists(md_path):
             os.remove(md_path)
+
+    def load_skill_index(self):
+        """Load and return all skills from the index."""
+        skills = {}
+        if os.path.exists(self.stats_path):
+            try:
+                with open(self.stats_path, "r", encoding="utf-8") as f:
+                    skills = json.load(f)
+            except Exception:
+                skills = {}
+        return skills
 
     def _rebuild_index(self, stats):
         """Xây dựng lại file _index.md dựa trên stats hiện tại"""

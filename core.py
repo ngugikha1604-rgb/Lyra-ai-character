@@ -96,18 +96,20 @@ class MiniAI(
         print("[Core] Pre-loading embedding model...")
         self.memory._get_embedding("init")
         
-        # DSPy Setup
-        print("[Core] Initializing DSPy Brain...")
+        # DSPy Setup - Use 9router for all LLM calls
+        print("[Core] Initializing DSPy Brain via 9router...")
         try:
-            # Ưu tiên Groq cho DSPy để đạt hiệu suất cao nhất (theo yêu cầu người dùng)
-            if GROQ_API_KEY:
-                print(f"[Core] Using Groq ({TRANSLATE_MODEL}) for DSPy")
-                self.dspy_lm = dspy.LM(f'groq/{TRANSLATE_MODEL}', api_key=GROQ_API_KEY)
-            else:
-                # Fallback to Ollama using config values
-                print(f"[Core] Groq key missing, falling back to Ollama ({CHAT_MODEL})")
-                dspy_base_url = CHAT_BASE_URL.replace("/api/chat", "").replace("/v1/chat/completions", "")
-                self.dspy_lm = dspy.LM(f'ollama_chat/{CHAT_MODEL}', api_base=dspy_base_url)
+            # Sử dụng 9router làm central router cho DSPy/LiteLLM
+            # Format: "openai/provider/model" để LiteLLM hiểu protocol và 9router route đúng
+            # LiteLLM dùng "openai/" prefix để biết dùng OpenAI-compatible protocol
+            # Phần sau "openai/" là model string gửi tới 9router: "groq/llama-..."
+            # 9router đọc "groq/" để biết route tới Groq provider
+            self.dspy_lm = dspy.LM(
+                f"openai/groq/{TRANSLATE_MODEL}",
+                api_base=ROUTER9_BASE_URL,
+                api_key=ROUTER9_API_KEY or "router9-local"
+            )
+            print(f"[Core] DSPy using 9router → model: groq/{TRANSLATE_MODEL}")
             
             dspy.configure(lm=self.dspy_lm)
             
@@ -153,6 +155,14 @@ class MiniAI(
         self.time_period = get_time_period(self.current_time.hour)
         self.time_gap_hours = calculate_time_gap(self.last_message_time, self.current_time)
         self.should_greet = should_send_greeting(self.time_gap_hours, self.last_message_time)
+
+    def _load_skill_content(self, skill_name):
+        """Delegate to synthesizer."""
+        return self.synthesizer._load_skill_content(skill_name)
+
+    def _log_skill_usage(self, skill_name):
+        """Delegate to synthesizer."""
+        return self.synthesizer._log_skill_usage(skill_name)
 
     def _owner_behavior_hints(self, user_input, intent, source_type):
         if source_type != "owner":
