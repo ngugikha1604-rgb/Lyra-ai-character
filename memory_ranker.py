@@ -11,6 +11,7 @@ class MemoryRanker:
         self.model = LIGHT_MODEL or "qwen2.5:0.5b"
         self.url = LIGHT_BASE_URL or "http://localhost:11434/api/chat"
         self._session = requests.Session()
+        self._BATCH_SIZE = 20  # max items per LLM scoring call — prevents Ollama timeout on large inputs
 
     def _call_scoring_model(self, query: str, candidates: list[str]) -> list[float]:
         """Calls the light model to get relevance scores (1-10) for candidates."""
@@ -27,21 +28,40 @@ class MemoryRanker:
             if resp.status_code == 200:
                 content = resp.json().get("message", {}).get("content", "").strip()
                 scores = [float(s.strip()) for s in re.findall(r"\b\d+\b", content)]
-                if len(scores) < len(candidates): scores.extend([1.0] * (len(candidates) - len(scores)))
+                if len(scores) < len(candidates): scores.extend([5.0] * (len(candidates) - len(scores)))
                 return scores[:len(candidates)]
         except Exception:
             pass
-        return [1.0] * len(candidates)
+        return None  # Signal failure — rank() will use weight-based saliency fallback
+
+    def _score_in_batches(self, query: str, candidates: list[str]) -> list[float] | None:
+        """Scores candidates in chunks of _BATCH_SIZE to avoid Ollama timeout on large inputs."""
+        all_scores: list[float | None] = []
+        any_success = False
+        for i in range(0, len(candidates), self._BATCH_SIZE):
+            batch = candidates[i:i + self._BATCH_SIZE]
+            result = self._call_scoring_model(query, batch)
+            if result is None:
+                all_scores.extend([None] * len(batch))
+            else:
+                any_success = True
+                all_scores.extend(result)
+        return all_scores if any_success else None
 
     def rank(self, query: str, items: list[dict], token_budget: int = 550) -> list[str]:
         """Sorts items by Score * Weight and fits them into the token budget."""
         if not items: return []
         candidates_text = [i["value"] for i in items]
-        scores = self._call_scoring_model(query, candidates_text)
+        scores = self._score_in_batches(query, candidates_text)
         
         scored_items = []
         for i, item in enumerate(items):
-            relevancy = scores[i] if i < len(scores) else 1.0
+            if scores is not None and i < len(scores) and scores[i] is not None:
+                relevancy = scores[i]
+            else:
+                # Fallback: weight đã encode saliency (weight * (1 + saliency/10) từ L1)
+                # Scale lên ~1-10 để khớp với relevancy range của LLM scorer
+                relevancy = item.get("weight", 1.0) * 5.0
             scored_items.append((relevancy * item.get("weight", 1.0), item["value"]))
 
         scored_items.sort(key=lambda x: x[0], reverse=True)

@@ -101,6 +101,15 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB max request size
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import functools
+import logging
+
+# Audit logger cho admin actions
+_audit_logger = logging.getLogger('lyra.audit')
+if not _audit_logger.handlers:
+    _audit_handler = logging.FileHandler('security_audit.log', encoding='utf-8')
+    _audit_handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    _audit_logger.addHandler(_audit_handler)
+    _audit_logger.setLevel(logging.INFO)
 
 # CORS Protection - only allow localhost during development
 @app.after_request
@@ -118,12 +127,20 @@ limiter = Limiter(
 )
 
 # Simple authentication decorator for sensitive endpoints
+# Key được load 1 lần lúc khởi động — bắt buộc phải có trong .env
+_ADMIN_API_KEY = os.environ.get('ADMIN_API_KEY')
+if not _ADMIN_API_KEY:
+    raise RuntimeError(
+        "[Security] ADMIN_API_KEY chưa được set trong .env!\n"
+        "Chạy lệnh sau để tạo key ngẫu nhiên:\n"
+        "  python -c \"import secrets; print(secrets.token_hex(32))\""
+    )
+
 def require_auth(f):
     @functools.wraps(f)
     def decorated_function(*args, **kwargs):
-        # Check for admin session or API key
         auth_header = request.headers.get('X-Admin-Key')
-        if auth_header != os.environ.get('ADMIN_API_KEY', 'lyra-admin-key-change-me'):
+        if not auth_header or auth_header != _ADMIN_API_KEY:
             return jsonify({'error': 'Unauthorized'}), 401
         return f(*args, **kwargs)
     return decorated_function
@@ -133,7 +150,9 @@ def sanitize_input(text, max_length=1000):
     if not text or not isinstance(text, str):
         return ''
     import re
-    # Remove potentially dangerous characters
+    # Loại bỏ control characters (\n, \r, \t...) để chống prompt injection
+    text = ''.join(ch for ch in text if ord(ch) >= 32)
+    # Loại bỏ ký tự HTML/script nguy hiểm
     text = re.sub(r'[<>\"\'%;)(&+]', '', text)
     return text.strip()[:max_length]
 
@@ -369,6 +388,7 @@ def index():
 def reset():
     """Xóa session nhưng GIỮ memory.db"""
     global lyra_ai
+    _audit_logger.info(f"RESET called from IP={request.remote_addr}")
     session.clear()
     lyra_ai = MiniAI()  # Reload AI base state
     return "Session cleared (memory.db preserved)"
@@ -380,6 +400,7 @@ def reset():
 def reset_all():
     """Xóa toàn bộ session + memory.db"""
     global lyra_ai
+    _audit_logger.warning(f"RESET_ALL called from IP={request.remote_addr} — memory.db will be deleted")
     session.clear()
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)

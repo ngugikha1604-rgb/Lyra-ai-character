@@ -96,7 +96,8 @@ class PineconeLayer:
                 timeout=10
             )
             if resp.status_code == 200:
-                matches = [{"id": m["id"], "score": m["score"], "metadata": m.get("metadata", {})} for m in resp.json().get("matches", [])]
+                # score_raw = cosine gốc từ Pinecone (không bị ảnh hưởng bởi temporal decay)
+                matches = [{"id": m["id"], "score": m["score"], "score_raw": m["score"], "metadata": m.get("metadata", {})} for m in resp.json().get("matches", [])]
                 
                 # Zep-style temporal ranking
                 from datetime import datetime, timezone
@@ -116,9 +117,13 @@ class PineconeLayer:
                             pass
                     
                     # Freshness weight: Halves every 48 hours, floors at 0.15
+                    # score_raw giữ nguyên cosine gốc; score dùng temporal decay để sort
                     freshness = max(0.15, 1.0 / ((time_diff_hours / 48.0) + 1.0))
-                    m["score"] = m["score"] * freshness
+                    m["score"] = m["score_raw"] * freshness
                 
+                # FIX: Filter bằng score_raw (cosine thực), không phải post-decay score.
+                # Bug cũ: memory 30 ngày tuổi có cosine 0.9 → post-decay 0.135 → bị filter mất.
+                matches = [m for m in matches if m["score_raw"] > 0.45]
                 matches.sort(key=lambda x: x["score"], reverse=True)
                 return matches[:top_k]
         except Exception as e:

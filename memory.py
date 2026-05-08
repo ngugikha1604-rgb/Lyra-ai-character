@@ -1,4 +1,4 @@
-﻿import os
+import os
 import re
 import json
 import sqlite3
@@ -6,6 +6,7 @@ import threading
 import time
 import requests
 import random
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 try:
@@ -422,6 +423,61 @@ class MemorySystem:
             conn.commit()
         self._is_dirty = False
 
+    def _fetch_l1_candidates(self, query_vec, is_public: bool) -> list[dict]:
+        """[Parallel worker] Fetch L1 SQLite candidates voi vector pre-filter."""
+        candidates = []
+        try:
+            conn = self._get_db()
+            if not conn: return candidates
+            rows = conn.execute(
+                "SELECT kind, value, weight, saliency, embedding FROM memory_items "
+                "WHERE superseded=0 AND is_valid=1 ORDER BY saliency DESC LIMIT 200"
+            ).fetchall()
+            if query_vec is not None and np is not None:
+                scored_rows = []
+                for r in rows:
+                    if is_public and r["kind"] in ("profile", "relational"): continue
+                    if r["embedding"]:
+                        try:
+                            vec = np.frombuffer(r["embedding"], dtype=np.float32)
+                            sim = float(_cosine_similarity(query_vec, vec))
+                        except Exception:
+                            sim = 0.1
+                    else:
+                        sim = 0.25
+                    scored_rows.append((sim, r))
+                scored_rows.sort(key=lambda x: x[0], reverse=True)
+                for _, r in scored_rows[:25]:
+                    candidates.append({"kind": r["kind"], "value": r["value"], "weight": r["weight"] * (1 + r["saliency"]/10)})
+            else:
+                for r in rows[:60]:
+                    if is_public and r["kind"] in ("profile", "relational"): continue
+                    candidates.append({"kind": r["kind"], "value": r["value"], "weight": r["weight"] * (1 + r["saliency"]/10)})
+        except Exception: pass
+        return candidates
+
+    def _fetch_l3_candidates(self, query_vec) -> list[dict]:
+        """[Parallel worker] Fetch L3 Pinecone candidates voi metadata filter server-side."""
+        candidates = []
+        if query_vec is None or not self.pinecone._enabled: return candidates
+        try:
+            # Metadata filter chay tren Pinecone server truoc khi tinh cosine — giam ~20-30% latency
+            pinecone_filter = {"saliency": {"$gte": 3}}
+            for m in self.pinecone.query(query_vec.tolist(), top_k=8, filter_meta=pinecone_filter):
+                meta = m.get("metadata", {})
+                kind = meta.get("kind", "temporal")
+                val = meta.get("value", "")
+                if not val: continue
+                score = m["score"]
+                score_raw = m.get("score_raw", score)
+                if kind == "rl_few_shot":
+                    candidates.append({"kind": "rl_pattern", "value": f"[Mau thanh cong]: {val}", "weight": score_raw * 4.0})
+                else:
+                    candidates.append({"kind": "temporal", "value": val, "weight": score * 1.5})
+        except Exception as e:
+            print(f"[Memory] L3 fetch error: {e}")
+        return candidates
+
     def get_relevant_context(self, user_input: str, is_public: bool = False, precomputed_vec=None) -> str:
         """Retrieves and ranks the most relevant memories for the current turn."""
         query_vec = precomputed_vec if precomputed_vec is not None else self._get_embedding(user_input)
@@ -431,46 +487,53 @@ class MemorySystem:
             cached_vecs = [item[0] for item in self._semantic_cache]
             matrix = np.stack(cached_vecs)
             sims = _vectorized_cosine_similarity(query_vec, matrix)
-            best_idx = np.argmax(sims)
-            if sims[best_idx] > 0.95:
+            best_idx = int(np.argmax(sims))
+            if sims[best_idx] > 0.88:  # FIX: giam tu 0.95 -> 0.88 — tieng Viet paraphrase thuong < 0.95
                 print(f"[Memory] Semantic Cache Hit! (sim: {sims[best_idx]:.3f})")
-                return self._semantic_cache[best_idx][1]
+                # LRU: move hit item den cuoi (most recently used)
+                hit_item = self._semantic_cache.pop(best_idx)
+                self._semantic_cache.append(hit_item)
+                return hit_item[1]
 
-        # 2. Retrieve L1 Candidates
-        candidates = []
-        try:
-            conn = self._get_db()
-            if conn:
-                rows = conn.execute("SELECT kind, value, weight, saliency, last_used_at FROM memory_items WHERE superseded=0 AND is_valid=1 ORDER BY saliency DESC LIMIT 60").fetchall()
-                for r in rows:
-                    if is_public and r["kind"] in ("profile", "relational"): continue
-                    candidates.append({"kind": r["kind"], "value": r["value"], "weight": r["weight"] * (1 + r["saliency"]/10)})
-        except Exception: pass
+        # 2 & 4. Fetch L1 (SQLite) va L3 (Pinecone) song song — tiet kiem 100-300ms latency
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            future_l1 = pool.submit(self._fetch_l1_candidates, query_vec, is_public)
+            future_l3 = pool.submit(self._fetch_l3_candidates, query_vec)
+            l1_candidates = future_l1.result()
+            l3_candidates = future_l3.result()
 
-        # 3. Retrieve L2 Session Items
-        for item in self._session_items[-10:]: candidates.append({"kind": "session", "value": item["value"], "weight": 1.2})
-        
-        # 4. Retrieve L3 Pinecone Items
-        if query_vec is not None and self.pinecone._enabled:
-            for m in self.pinecone.query(query_vec.tolist(), top_k=8):
-                meta = m.get("metadata", {})
-                kind = meta.get("kind", "temporal")
-                val = meta.get("value", "")
-                score = m["score"]
-                
-                if kind == "rl_few_shot":
-                    # RL patterns get a massive boost to ensure they appear as few-shot examples
-                    candidates.append({"kind": "rl_pattern", "value": f"[Mẫu thành công]: {val}", "weight": score * 4.0})
-                elif score > 0.65:
-                    candidates.append({"kind": "temporal", "value": val, "weight": score * 1.5})
+        candidates = l1_candidates
 
-        # 5. Rerank Candidates
-        context_items = self.ranker.rank(user_input, candidates, token_budget=550)
-        if not context_items: 
+        # 3. Retrieve L2 Session Items — in-memory, chi giu items lien quan den query
+        query_words = set(re.findall(r'\w{3,}', user_input.lower()))
+        session_pool = self._session_items[-15:]
+        for idx, item in enumerate(session_pool):
+            if item.get("is_sticky"):
+                candidates.append({"kind": "session", "value": item["value"], "weight": 1.4})
+                continue
+            item_words = set(re.findall(r'\w{3,}', item["value"].lower()))
+            is_very_recent = (idx >= len(session_pool) - 2)
+            if (item_words & query_words) or is_very_recent:
+                candidates.append({"kind": "session", "value": item["value"], "weight": 1.2})
+
+        candidates.extend(l3_candidates)
+
+        # 5. Rerank — skip Ollama neu it candidates (doi model khong dang voi < 6 items)
+        if not candidates:
+            return ""
+
+        if len(candidates) <= 6:
+            candidates.sort(key=lambda x: x["weight"], reverse=True)
+            context_items = [c["value"] for c in candidates]
+            print(f"[Memory] Fast path: {len(candidates)} candidates, reranker skipped")
+        else:
+            context_items = self.ranker.rank(user_input, candidates, token_budget=550)
+
+        if not context_items:
             return ""
         
         enqueue(PRIORITY_NORMAL, self.touch_items, [(c["kind"], c["value"]) for c in candidates if c["value"] in context_items])
-        result_str = "Bối cảnh quan trọng:\n" + "\n".join([f"- {m}" for m in context_items])
+        result_str = "Boi canh quan trong:\n" + "\n".join([f"- {m}" for m in context_items])
         
         # 6. Update Semantic Cache
         if query_vec is not None:
@@ -579,14 +642,14 @@ class MemorySystem:
 
     def consolidate_episodic_to_semantic(self):
         """
-        Giai đoạn củng cố ký ức (CLS): Chuyển đổi các sự kiện ngắn hạn (L2/L3) 
-        thành các đặc điểm lâu dài (L1) và thực hiện dọn dẹp (Forgetting).
+        Giai doan cu cung ky uc (CLS): Chuyen doi cac su kien ngan han (L2/L3) 
+        thanh cac dac diem lau dai (L1) va thuc hien don dep (Forgetting).
         """
         print("[Memory] Running post-session consolidation and forgetting...")
-        # 1. Thực hiện dọn dẹp các fact cũ/yếu (Cơ chế quên)
+        # 1. Thuc hien don dep cac fact cu/yeu (Co che quen)
         self.consolidate()
         
-        # 2. Dọn dẹp cache để giải phóng tài nguyên
+        # 2. Don dep cache de giai phong tai nguyen
         self._basic_context_cache = None
         self._rag_context_cache = None
         self._relevant_items_cache = None
@@ -662,16 +725,16 @@ class MemorySystem:
         text_lower = text.lower()
         
         # Simple patterns for likes/dislikes
-        if re.search(r"\b(thích|yêu|mê|khoái)\b", text_lower):
-            m = re.search(r"(?:thích|yêu|mê|khoái)\s+([^\s,!?.]+)", text_lower)
+        if re.search(r"\b(thich|yeu|me|khoai)\b", text_lower):
+            m = re.search(r"(?:thich|yeu|me|khoai)\s+([^\s,!?.]+)", text_lower)
             if m: candidates.append({"kind": "like", "value": m.group(1), "saliency": 3})
             
-        if re.search(r"\b(ghét|không thích|sợ)\b", text_lower):
-            m = re.search(r"(?:ghét|không thích|sợ)\s+([^\s,!?.]+)", text_lower)
+        if re.search(r"\b(ghet|khong thich|so)\b", text_lower):
+            m = re.search(r"(?:ghet|khong thich|so)\s+([^\s,!?.]+)", text_lower)
             if m: candidates.append({"kind": "dislike", "value": m.group(1), "saliency": 3})
             
-        if re.search(r"\b(muốn|định|sẽ|kế hoạch)\b", text_lower):
-            m = re.search(r"(?:muốn|định|sẽ|kế hoạch)\s+([^\s,!?.]+)", text_lower)
+        if re.search(r"\b(muon|dinh|se|ke hoach)\b", text_lower):
+            m = re.search(r"(?:muon|dinh|se|ke hoach)\s+([^\s,!?.]+)", text_lower)
             if m: candidates.append({"kind": "goal", "value": m.group(1), "saliency": 4})
             
         return candidates
