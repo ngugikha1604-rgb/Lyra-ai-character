@@ -3,7 +3,7 @@ import re
 import requests
 from datetime import datetime
 
-class CLSConsolidator:
+class MemoryConsolidator:
     """
     Complementary Learning System (CLS) - The 'sleep phase' of Lyra's brain.
     Processes episodic memories to detect patterns and update long-term semantic traits.

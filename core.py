@@ -15,7 +15,7 @@ from background_worker import enqueue, PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORIT
 from time_utils import get_vietnam_time, get_time_period, calculate_time_gap, should_send_greeting
 from emotion import EmotionEngine
 from memory import MemorySystem
-from vbrain import parse_vbrain_response, validate_emotion, validate_action
+from lyra_brain import parse_vbrain_response, validate_emotion, validate_action
 from conversation_state import ConversationStateDetector
 from skill_synthesizer import SkillSynthesizer
 from prompts import REWARD_HINTS, IDEOLOGY_PROMPTS
