@@ -5,7 +5,7 @@ flask-session
 python-dotenv
 sentence-transformers
 numpy
-duckduckgo-search
+ddgs
 google-api-python-client
 google-auth-oauthlib
 google-auth-httplib2

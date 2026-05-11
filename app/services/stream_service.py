@@ -194,16 +194,15 @@ class StreamService:
     def _consumer_loop(self) -> None:
         while True:
             try:
-                if not self._yt_poller._is_running:
-                    time.sleep(1)
-                    continue
+                poller_running = bool(self._yt_poller and self._yt_poller._is_running)
 
                 # Drain yt_poller → priority queues
-                while True:
-                    raw = self._yt_poller.get_next_message(timeout=0.05)
-                    if raw is None:
-                        break
-                    self.enqueue_event(raw)
+                if poller_running:
+                    while True:
+                        raw = self._yt_poller.get_next_message(timeout=0.05)
+                        if raw is None:
+                            break
+                        self.enqueue_event(raw)
 
                 # Consensus exclamation → synthetic donor event
                 consensus_event = self._chat_analyzer.get_pending_consensus_exclamation()
@@ -323,6 +322,7 @@ class StreamService:
                 sender_id, sender_name, platform, channel_id, message
             )
             self._chat_analyzer.ingest(message, channel_id, platform, sender_id=sender_id)
+            self._lyra_ai.rl_loop.ingest_viewer_message(message, sender_name)
 
             stream_ctx = build_stream_context(
                 self._lyra_ai, self._viewer_tracker, self._chat_analyzer,

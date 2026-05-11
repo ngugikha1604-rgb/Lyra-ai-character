@@ -133,34 +133,37 @@ class MemoryHandlerMixin:
         if not conn: return
         c = conn.cursor()
 
-        with self.memory.db_lock:
-            res = c.execute("SELECT COUNT(*) FROM summaries WHERE is_mega=0").fetchone()
-            count = res[0] if res else 0
+        try:
+            with self.memory.db_lock:
+                res = c.execute("SELECT COUNT(*) FROM summaries WHERE is_mega=0").fetchone()
+                count = res[0] if res else 0
+                if count >= self.memory.max_summaries:
+                    old_summaries = c.execute("SELECT id, summary, timestamp FROM summaries WHERE is_mega=0 ORDER BY id ASC").fetchall()
+                    old_mega = c.execute("SELECT summary FROM summaries WHERE is_mega=1 ORDER BY id DESC LIMIT 1").fetchone()
+                else:
+                    old_summaries, old_mega = [], None
+
             if count >= self.memory.max_summaries:
-                old_summaries = c.execute("SELECT id, summary, timestamp FROM summaries WHERE is_mega=0 ORDER BY id ASC").fetchall()
-                old_mega = c.execute("SELECT summary FROM summaries WHERE is_mega=1 ORDER BY id DESC LIMIT 1").fetchone()
-            else:
-                old_summaries, old_mega = [], None
+                parts = ([f"[Previous long-term memory]: {old_mega[0]}"] if old_mega else []) + [f"[{row[2]}] {row[1]}" for row in old_summaries]
+                try:
+                    mega_text = self._call_light_model([
+                        {"role": "system", "content": MEMORY_COMPRESSION_PROMPT},
+                        {"role": "user", "content": f"Compress these summaries:\n\n" + "\n".join(parts)},
+                    ], temperature=0.3, max_tokens=200, provider="openrouter")
+                    if mega_text:
+                        with self.memory.db_lock:
+                            c.execute("DELETE FROM summaries WHERE is_mega=1")
+                            c.execute("DELETE FROM summaries WHERE is_mega=0")
+                            c.execute("INSERT INTO summaries (summary, timestamp, is_mega) VALUES (?,?,1)", (mega_text, datetime.now().strftime("%Y-%m-%d %H:%M")))
+                            conn.commit()
+                except Exception as e:
+                    print(f"[MemoryHandler] Mega summary failed: {e}")
 
-        if count >= self.memory.max_summaries:
-            parts = ([f"[Previous long-term memory]: {old_mega[0]}"] if old_mega else []) + [f"[{row[2]}] {row[1]}" for row in old_summaries]
-            try:
-                mega_text = self._call_light_model([
-                    {"role": "system", "content": MEMORY_COMPRESSION_PROMPT},
-                    {"role": "user", "content": f"Compress these summaries:\n\n" + "\n".join(parts)},
-                ], temperature=0.3, max_tokens=200, provider="openrouter")
-                if mega_text:
-                    with self.memory.db_lock:
-                        c.execute("DELETE FROM summaries WHERE is_mega=1")
-                        c.execute("DELETE FROM summaries WHERE is_mega=0")
-                        c.execute("INSERT INTO summaries (summary, timestamp, is_mega) VALUES (?,?,1)", (mega_text, datetime.now().strftime("%Y-%m-%d %H:%M")))
-                        conn.commit()
-            except Exception as e:
-                print(f"[MemoryHandler] Mega summary failed: {e}")
-
-        with self.memory.db_lock:
-            c.execute("INSERT INTO summaries (summary, timestamp, is_mega) VALUES (?,?,0)", (text, timestamp))
-            conn.commit()
+            with self.memory.db_lock:
+                c.execute("INSERT INTO summaries (summary, timestamp, is_mega) VALUES (?,?,0)", (text, timestamp))
+                conn.commit()
+        finally:
+            conn.close()
     def write_diary_entry(self):
         """Generates a secret diary entry for the session."""
         try:

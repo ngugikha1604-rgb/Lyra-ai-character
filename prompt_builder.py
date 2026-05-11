@@ -60,9 +60,11 @@ class PromptBuilderMixin:
 
         diary_hint = ""
         if not is_public:
-            recent_diaries = self.memory.get_diary_entries(limit=1)
-            if recent_diaries:
-                diary_hint = f"\nCẢM XÚC GẦN ĐÂY CỦA LYRA:\nSuy nghĩ bí mật cuối cùng của em: '{recent_diaries[0]['content'][:150]}...'"
+            # Cache diary hint trong session — diary chỉ thay đổi khi kết thúc phiên
+            if not hasattr(self, '_diary_hint_cache'):
+                recent_diaries = self.memory.get_diary_entries(limit=1)
+                self._diary_hint_cache = f"\nCẢM XÚC GẦN ĐÂY CỦA LYRA:\nSuy nghĩ bí mật cuối cùng của em: '{recent_diaries[0]['content'][:150]}...'" if recent_diaries else ""
+            diary_hint = self._diary_hint_cache
 
         full_memory_context = "\n\n".join(filter(None, [memory_context, search_context, diary_hint]))
         time_context = get_time_context(self.current_time, self.time_period)

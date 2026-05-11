@@ -104,10 +104,13 @@ def sanitize_input(text: str, max_length: int = 1000) -> str:
     Làm sạch input:
       - Loại control characters (chống prompt injection)
       - Loại ký tự HTML/script nguy hiểm
+      - Giữ lại dấu nháy đơn (apostrophe) vì tiếng Việt dùng bình thường
       - Cắt theo max_length
     """
     if not text or not isinstance(text, str):
         return ""
     text = "".join(ch for ch in text if ord(ch) >= 32)
-    text = re.sub(r'[<>\"\'%;)(&+]', "", text)
+    # Chỉ strip các ký tự thực sự nguy hiểm cho HTML/injection
+    # Bỏ dấu nháy đơn ' khỏi blacklist — tiếng Việt cần giữ lại
+    text = re.sub(r'[<>\"%;)(&+]', "", text)
     return text.strip()[:max_length]

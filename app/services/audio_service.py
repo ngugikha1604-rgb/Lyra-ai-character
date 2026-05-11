@@ -17,10 +17,17 @@ import queue
 import threading
 import time
 import os
+import sys
 
 import numpy as np
 import sounddevice as sd
 from pydub import AudioSegment
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="backslashreplace")
+    except Exception:
+        pass
 
 
 def _find_vb_cable_device() -> int:

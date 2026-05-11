@@ -45,20 +45,37 @@ def stream_start():
         chat_id    = data.get("chat_id",  os.environ.get("YOUTUBE_LIVE_CHAT_ID", ""))
         credentials = current_app.yt_credentials  # set bởi auth route
 
-        if not chat_id and video_id and credentials:
+        if not credentials:
+            return jsonify({"error": "YouTube OAuth credentials required. Visit /authorize first.", "authorize_url": "/authorize"}), 401
+
+        # Nếu không có chat_id lẫn video_id → tự tìm stream đang active trên kênh
+        if not chat_id and not video_id:
+            from youtube_chat import get_current_live_stream_info
+            video_id, chat_id = get_current_live_stream_info(credentials)
+
+        # Nếu có video_id nhưng chưa có chat_id → lấy từ video_id
+        if not chat_id and video_id:
             from youtube_chat import get_live_chat_id
-            chat_id = get_live_chat_id(video_id, credentials)
+            chat_id = get_live_chat_id(credentials, video_id)
 
         if not chat_id:
-            return jsonify({"error": "chat_id required (or provide video_id + OAuth)"}), 400
+            return jsonify({"error": "Không tìm thấy stream nào đang active. Hãy bắt đầu stream trên YouTube trước."}), 400
 
-        yt_poller.start(chat_id, credentials)
+        yt_poller.start(credentials, chat_id)
         lyra_ai.is_streaming = True
         stream_service.reset_greeted_set()
         set_stream_active(True)
 
-        print(f"[Stream] Started — chat_id={chat_id}")
-        return jsonify({"ok": True, "chat_id": chat_id})
+        # Ghi video_id vào live context để persist qua restart
+        if video_id:
+            try:
+                from live_context import update_stream_info
+                update_stream_info(video_id=video_id, chat_id=chat_id)
+            except Exception:
+                pass  # live_context không có hàm này thì bỏ qua
+
+        print(f"[Stream] Started — video_id={video_id} chat_id={chat_id}")
+        return jsonify({"ok": True, "chat_id": chat_id, "video_id": video_id})
 
     except Exception:
         traceback.print_exc()
@@ -71,11 +88,13 @@ def stream_start():
 
 @bp.route("/stream/stop", methods=["POST"])
 def stream_stop():
-    lyra_ai   = current_app.lyra_ai
-    yt_poller = current_app.yt_poller
+    lyra_ai        = current_app.lyra_ai
+    yt_poller      = current_app.yt_poller
+    stream_service = current_app.stream_service
 
     yt_poller.stop()
     lyra_ai.is_streaming = False
+    stream_service.reset_greeted_set()
     set_stream_active(False)
     print("[Stream] Stopped.")
     return jsonify({"ok": True})

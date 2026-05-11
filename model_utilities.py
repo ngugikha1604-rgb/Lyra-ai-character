@@ -18,10 +18,11 @@ class BaseLLMClient:
         raise NotImplementedError
 
 class OllamaClient(BaseLLMClient):
-    def __init__(self, model, base_url, session=None):
+    def __init__(self, model, base_url, session=None, timeout=60):
         super().__init__(session)
         self.model = model
         self.base_url = base_url
+        self.timeout = timeout
 
     def call(self, messages, temperature=0.8, max_tokens=250):
         if not self.model or not self.base_url: return None
@@ -33,7 +34,7 @@ class OllamaClient(BaseLLMClient):
                 "stream": False,
             }
             start = time.time()
-            response = self.session.post(self.base_url, headers={"Content-Type": "application/json"}, json=data, timeout=60, verify=False)
+            response = self.session.post(self.base_url, headers={"Content-Type": "application/json"}, json=data, timeout=self.timeout, verify=False)
             if response.status_code == 200:
                 content = response.json().get("message", {}).get("content", "").strip()
                 if content:
@@ -128,20 +129,54 @@ class Router9Client(BaseLLMClient):
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
-                "top_p": 0.9
+                "top_p": 0.9,
+                "stream": False
             }
             start = time.time()
             response = self.session.post(f"{ROUTER9_BASE_URL}/chat/completions", headers=headers, json=data, timeout=60, verify=False)
             if response.status_code == 200:
-                resp_json = response.json()
+                raw = response.text.strip()
+                if not raw:
+                    print(f"[Router9] Empty response body for model={model}")
+                    return None
+
+                # Xử lý SSE stream (response bắt đầu bằng 'data: ')
+                if raw.startswith("data:"):
+                    content_parts = []
+                    for line in raw.splitlines():
+                        line = line.strip()
+                        if not line.startswith("data:"):
+                            continue
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            chunk = __import__('json').loads(payload)
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            content_parts.append(delta.get("content", ""))
+                        except Exception:
+                            continue
+                    content = "".join(content_parts).strip()
+                    if content:
+                        print(f"[Router9 - {model}] Responded (stream) in {time.time() - start:.1f}s")
+                        return content
+                    print(f"[Router9] Empty stream content for model={model}")
+                    return None
+
+                # JSON thường
+                try:
+                    resp_json = __import__('json').loads(raw)
+                except Exception as parse_err:
+                    print(f"[Router9] JSON parse error for model={model}: {parse_err} | raw[:200]={raw[:200]}")
+                    return None
                 content = resp_json.get("choices", [{}])[0].get("message", {}).get("content", "")
                 if content:
                     print(f"[Router9 - {model}] Responded in {time.time() - start:.1f}s")
                     return content.strip()
                 else:
-                    print(f"[Router9] Empty content: {resp_json}")
+                    print(f"[Router9] Empty content for model={model}: {resp_json}")
             else:
-                print(f"[Router9] Failed: {response.status_code} - {response.text}")
+                print(f"[Router9] Failed: {response.status_code} - {response.text[:300]}")
         except Exception as e:
             print(f"[Router9] Error: {e}")
         return None
@@ -189,29 +224,38 @@ class ModelUtilityMixin:
         if not hasattr(self, '_llm_clients'):
             self._llm_clients = {
                 'router9': Router9Client(self._session),
-                'ollama_light': OllamaClient(LIGHT_MODEL, LIGHT_BASE_URL, self._session),
-                'ollama_chat': OllamaClient(CHAT_MODEL, CHAT_BASE_URL, self._session),
+                'ollama_light': OllamaClient(LIGHT_MODEL, LIGHT_BASE_URL, self._session, timeout=45),
+                'ollama_chat': OllamaClient(CHAT_MODEL, CHAT_BASE_URL, self._session, timeout=35),
                 'openrouter': OpenRouterClient(self._session),
                 'gemini': GeminiClient(self._session),
                 'groq': GroqClient(self._session)
             }
         return self._llm_clients
 
-    def _call_light_model(self, messages, temperature=0.3, max_tokens=200, provider="ollama"):
-        """Call internal model via 9router (supports ollama, openrouter, gemini, groq)."""
-        # Map provider sang model name cho LiteLLM/9router format
+    def _call_light_model(self, messages, temperature=0.3, max_tokens=200, provider="groq"):
+        """Call light model qua 9router. Default provider là groq — nhanh và không cần Ollama."""
+        # Nếu explicitly muốn Ollama local thì thử trước
+        if provider == "ollama":
+            res = self._clients['ollama_light'].call(messages, temperature=temperature, max_tokens=max_tokens)
+            if res:
+                return res
+            # Ollama fail — fallback xuống 9router groq ngay, không thử các ollama khác
+            return self._clients['router9'].call(messages, model=f"groq/{TRANSLATE_MODEL}", temperature=temperature, max_tokens=max_tokens)
+
+        # Map provider sang model name đúng format của 9router
         model_map = {
             "ollama": f"ollama-local/{LIGHT_MODEL}",
             "openrouter": f"openrouter/{OPENROUTER_MODEL}",
             "gemini": f"gemini/{GEMINI_MODELS[0]}",
             "groq": f"groq/{TRANSLATE_MODEL}"
         }
-        model = model_map.get(provider, f"ollama/{LIGHT_MODEL}")
+        model = model_map.get(provider, f"groq/{TRANSLATE_MODEL}")
         res = self._clients['router9'].call(messages, model=model, temperature=temperature, max_tokens=max_tokens)
         if res: return res
-        
-        # Fallback thử các provider khác
-        for fallback_model in [f"ollama/{LIGHT_MODEL}", f"gemini/{GEMINI_MODELS[0]}", f"openrouter/{OPENROUTER_MODEL}"]:
+
+        # Fallback thử các provider khác — chỉ dùng provider có trong 9router
+        for fallback_model in [f"groq/{TRANSLATE_MODEL}", f"gemini/{GEMINI_MODELS[0]}", f"openrouter/{OPENROUTER_MODEL}"]:
+            if fallback_model == model: continue  # bỏ qua model vừa fail
             res = self._clients['router9'].call(messages, model=fallback_model, temperature=temperature, max_tokens=max_tokens)
             if res: return res
         return None
@@ -220,12 +264,52 @@ class ModelUtilityMixin:
         """Call main chat model via 9router."""
         return self._call_chat_model(messages, temperature=temperature, max_tokens=max_tokens)
 
+    def _compact_chat_messages(self, messages):
+        user_msg = ""
+        for message in reversed(messages or []):
+            if message.get("role") == "user":
+                user_msg = message.get("content", "")
+                break
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "Bạn là Lyra, em gái VTuber người Việt. Bắt buộc xưng là 'em' và gọi người dùng là 'anh'. "
+                    "Không xưng 'tôi', 'mình', không gọi người dùng là 'bạn' hoặc 'cậu', không nói mình là trợ lý AI. "
+                    "Trả lời bằng tiếng Việt tự nhiên, ngắn gọn 1-2 câu. Ví dụ: 'Dạ, em đây anh.'"
+                ),
+            },
+            {"role": "user", "content": user_msg},
+        ]
+
     def _call_chat_model(self, messages, temperature=0.8, max_tokens=250):
-        """Call main chat model via 9router (Groq primary)."""
-        return self._clients['router9'].call(messages, model=f"groq/{TRANSLATE_MODEL}", temperature=temperature, max_tokens=max_tokens)
+        """Call main chat model qua Ollama local, fallback về 9router nếu Ollama không chạy."""
+        compact_messages = self._compact_chat_messages(messages)
+
+        if getattr(self, "brain", None) is None:
+            res = self._clients['ollama_chat'].call(compact_messages, temperature=temperature, max_tokens=min(max_tokens, 180))
+            if res:
+                return res
+            res = self._clients['ollama_light'].call(compact_messages, temperature=temperature, max_tokens=min(max_tokens, 120))
+            if res:
+                return res
+
+        res = self._clients['ollama_chat'].call(messages, temperature=temperature, max_tokens=max_tokens)
+        if res:
+            return res
+        res = self._clients['ollama_chat'].call(compact_messages, temperature=temperature, max_tokens=min(max_tokens, 180))
+        if res:
+            return res
+        res = self._clients['ollama_light'].call(compact_messages, temperature=temperature, max_tokens=min(max_tokens, 120))
+        if res:
+            return res
+
+        # Fallback về 9router với Groq (không dùng ollama/ prefix ở đây)
+        print("[Chat] Ollama không available, fallback 9router groq")
+        return self._clients['router9'].call(compact_messages, model=f"groq/{TRANSLATE_MODEL}", temperature=temperature, max_tokens=max_tokens)
 
     def _call_groq_model(self, messages, temperature=0.4, max_tokens=400):
-        """Call Groq model via 9router."""
+        """Call Groq model qua 9router."""
         return self._clients['router9'].call(messages, model=f"groq/{TRANSLATE_MODEL}", temperature=temperature, max_tokens=max_tokens)
 
     def _translate_response(self, text):
@@ -244,7 +328,7 @@ class ModelUtilityMixin:
     def _search_web(self, query, max_results=3):
         """Performs web search using DuckDuckGo."""
         try:
-            from duckduckgo_search import DDGS
+            from ddgs import DDGS
             with DDGS() as ddgs:
                 results = list(ddgs.text(query, max_results=max_results))
             if not results: return None
@@ -259,4 +343,11 @@ class ModelUtilityMixin:
         if not text: return ""
         text = re.sub(r'["\']', '', text)
         text = re.sub(r'(?i)lyra:', '', text).strip()
+        text = re.sub(r'\b[Tt]ôi\b', 'em', text)
+        text = re.sub(r'\b[Tt]ớ\b', 'em', text)
+        text = re.sub(r'\b[Tt]ao\b', 'em', text)
+        text = re.sub(r'\b[Mm]ình\b', 'em', text)
+        text = re.sub(r'\b[Bb]ạn\b', 'anh', text)
+        text = re.sub(r'\b[Cc]ậu\b', 'anh', text)
+        text = re.sub(r'\b[Mm]ày\b', 'anh', text)
         return text

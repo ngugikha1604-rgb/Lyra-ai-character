@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 from datetime import timedelta
 
@@ -20,6 +21,12 @@ from flask_limiter.util import get_remote_address
 from flask_session import Session
 
 load_dotenv()
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="backslashreplace")
+    except Exception:
+        pass
 
 
 def create_app() -> Flask:
@@ -118,6 +125,7 @@ def _init_dependencies(app: Flask) -> None:
     app.audio_service  = audio_service
     app.sse_service    = sse_service
     app.stream_service = stream_service
+    app.proactive_service = proactive_service
     app.yt_credentials = try_load_saved_credentials()
 
 

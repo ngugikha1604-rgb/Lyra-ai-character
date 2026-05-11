@@ -554,37 +554,7 @@ class MemorySystem:
             conn.commit()
 
     def _llm_importance_score(self, items: list[dict]) -> list[int]:
-        """Batch-score items (1-10) using light model."""
-        if not items: return []
-        from config import LIGHT_MODEL, LIGHT_BASE_URL
-        
-        prompt = (
-            "Rank how important each memory item is for an AI Streamer's long-term memory (1-10, 10 is critical).\n"
-            "Return ONLY a comma-separated list of numbers.\n"
-            "Items:\n"
-        )
-        for i, item in enumerate(items):
-            prompt += f"{i+1}. [{item.get('kind', 'fact')}]: {item.get('value', '')[:120]}\n"
-
-        try:
-            resp = requests.post(
-                LIGHT_BASE_URL,
-                json={
-                    "model": LIGHT_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "options": {"temperature": 0.1, "num_predict": 30},
-                    "stream": False
-                },
-                timeout=10
-            )
-            if resp.status_code == 200:
-                content = resp.json().get("message", {}).get("content", "").strip()
-                scores = [int(s.strip()) for s in re.findall(r"\b\d+\b", content)]
-                if len(scores) < len(items):
-                    scores.extend([self.estimate_saliency(it.get('kind'), it.get('value')) for it in items[len(scores):]])
-                return [max(1, min(10, s)) for s in scores[:len(items)]]
-        except Exception:
-            pass
+        """Batch-score items using heuristic (fast, no LLM call needed for short lists)."""
         return [self.estimate_saliency(it.get('kind'), it.get('value')) for it in items]
 
     def estimate_saliency(self, kind, value):

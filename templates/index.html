@@ -476,10 +476,17 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: text })
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.error || `HTTP ${res.status}`);
+        }
         handleAIResponse(data);
+        if (!data.reply) {
+          appendMessage("assistant", "Em nhận được tin nhắn nhưng backend chưa tạo được câu trả lời. Anh kiểm tra terminal Flask nhé.");
+        }
       } catch (err) {
         console.error("Chat error:", err);
+        appendMessage("assistant", `Chat API lỗi: ${err.message}`);
       } finally {
         dotThinking.classList.remove("active");
       }
@@ -511,25 +518,26 @@
 
     btnStart.onclick = async () => {
       try {
-        // Bạn có thể tùy biến payload live_chat_id ở đây
         const res = await fetch("/stream/start", {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ platform: "youtube", channel_id: "default" })
+          body: JSON.stringify({})
         });
+        const data = await res.json().catch(() => ({}));
         if (res.status === 401) {
-          const data = await res.json().catch(() => ({}));
           window.location.href = data.authorize_url || "/authorize";
           return;
         }
-        if (res.ok) {
-          isStreaming = true;
-          btnStart.style.display = "none";
-          btnStop.style.display = "block";
-          dotStream.classList.add("active", "streaming");
-          document.getElementById("streamDetails").innerText = "Stream đang diễn ra...";
+        if (!res.ok) {
+          alert("Lỗi start stream: " + (data.error || res.status));
+          return;
         }
+        isStreaming = true;
+        btnStart.style.display = "none";
+        btnStop.style.display = "block";
+        dotStream.classList.add("active", "streaming");
+        document.getElementById("streamDetails").innerText = "Stream đang diễn ra...";
       } catch (err) { console.error("Start error:", err); }
     };
 
@@ -538,8 +546,7 @@
         const res = await fetch("/stream/stop", {
           method: "POST",
           credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ platform: "youtube", channel_id: "default" })
+          headers: { "Content-Type": "application/json" }
         });
         if (res.ok) {
           isStreaming = false;

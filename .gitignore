@@ -71,3 +71,17 @@ test_ollama_conn.py
 
 #Check Devices
 check_devices.py
+
+# Compiled DSPy brain (chứa demo/trace từ training, không cần track)
+lyra_compiled.json
+
+# Security & audit logs
+security_audit.log
+*.log
+
+# Ruff cache
+.ruff_cache/
+
+# WAL files (SQLite runtime)
+*.db-shm
+*.db-wal

@@ -5,6 +5,8 @@ import random
 import threading
 import concurrent.futures
 import time
+import socket
+from urllib.parse import urlparse
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
@@ -104,10 +106,15 @@ class MiniAI(
             # LiteLLM dùng "openai/" prefix để biết dùng OpenAI-compatible protocol
             # Phần sau "openai/" là model string gửi tới 9router: "groq/llama-..."
             # 9router đọc "groq/" để biết route tới Groq provider
+            if not self._router9_is_available():
+                raise RuntimeError(f"9router is not reachable at {ROUTER9_BASE_URL}")
+
             self.dspy_lm = dspy.LM(
                 f"openai/groq/{TRANSLATE_MODEL}",
                 api_base=ROUTER9_BASE_URL,
-                api_key=ROUTER9_API_KEY or "router9-local"
+                api_key=ROUTER9_API_KEY or "router9-local",
+                max_tokens=600,
+                temperature=0.8,
             )
             print(f"[Core] DSPy using 9router → model: groq/{TRANSLATE_MODEL}")
             
@@ -125,6 +132,18 @@ class MiniAI(
             self.brain = None
 
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+    def _router9_is_available(self) -> bool:
+        parsed = urlparse(ROUTER9_BASE_URL)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not host:
+            return False
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return True
+        except OSError:
+            return False
 
     @property
     def turn_counter(self):
@@ -362,7 +381,18 @@ class MiniAI(
                 )
                 parsed = parse_vbrain_response(content) if content else {"monologue": "", "emotion": "neutral", "action": "NONE", "reply": "..."}
 
+        reply_text = str(parsed.get("reply", "") or "").strip()
+        if reply_text in {"", ".", "...", "NONE", "None", "null"}:
+            content = self._call_model(
+                api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens
+            )
+            if content:
+                parsed = parse_vbrain_response(content)
+
         skill_name = parsed.get("skill_needed")
+        # Normalize: DSPy trả về string "null"/"NONE"/"None" thay vì Python None
+        if not skill_name or str(skill_name).strip().lower() in ("null", "none", "", "no"):
+            skill_name = None
         
         # 1. Skill Loop (Master-Subordinate)
         if skill_name and self._skill_loop_count < 2:
