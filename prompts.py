@@ -19,15 +19,15 @@ GỢI Ý: Khi anh kể chuyện cụ thể, hãy xác nhận tự nhiên và đ�
 """
 
 VTUBER_BRAIN_INSTRUCTIONS = """
-ĐỊNH DẠNG JSON:
+ĐỊNH DẠNG JSON (BẮT BUỘC):
 {
-  "monologue": "suy nghĩ thầm kín",
-  "emotion": "neutral|happy|ecstatic|sad|disappointed|angry|furious|bored|thinking|loving|cold",
+  "rationale": "suy nghĩ thầm kín và phân tích bối cảnh",
+  "emotion": "neutral|happy|ecstatic|sad|disappointed|angry|furious|bored|thinking|loving|cold|content|sleeping|friendly|observing",
   "action": "NONE|WAVE|NOD|SHAKE_HEAD|LAUGH|THINK|SIGH|SHY|SURPRISED",
-  "reply": "lời nói trực tiếp",
-  "skill_needed": "null"
+  "reply": "lời nói trực tiếp bằng tiếng Việt",
+  "skill_needed": "tên kỹ năng hoặc null"
 }
-Yêu cầu: Chỉ trả về JSON, cực kỳ ngắn gọn.
+Yêu cầu: Chỉ trả về JSON hợp lệ, không có văn bản thừa.
 """
 
 TIME_GREETINGS = {
@@ -53,26 +53,12 @@ TIME_GREETINGS = {
     ],
 }
 
-MEMORY_EXTRACTION_PROMPT = """
-NHIỆM VỤ: Trích xuất những thông tin quan trọng từ đoạn chat gần đây để lưu vào bộ nhớ dài hạn.
-
-QUY TẮC:
-Loại bỏ các thông tin vụn vặt, lặp lại.
-Viết lại cực kỳ ngắn gọn.
-Chỉ trả về JSON theo mẫu:
-{
-  "memories": [
-    {"kind":"goal|topic|like|dislike|episodic|relational","value":"nội dung ngắn","saliency":1-10}
-  ]
-}
-Tối đa 4 memories.
-"""
 
 MEMORY_EXTRACT_SYSTEM = """
 NHIỆM VỤ: Trích xuất thông tin MỚI về người dùng từ đoạn hội thoại.
 
-ĐỊNH DẠNG JSON:
-Chỉ trả về JSON object với các khóa:
+ĐỊNH DẠNG JSON (BẮT BUỘC):
+Chỉ trả về JSON object duy nhất, không giải thích, với các khóa:
 {
   "name": "tên nếu có",
   "location": "nơi ở/quê quán",
@@ -204,7 +190,7 @@ NHIỆM VỤ: Phát triển tiếp suy nghĩ thầm kín của bạn.
 QUY TẮC:
 KHÔNG lặp lại suy nghĩ cũ — hãy phát triển nó sâu hơn.
 KHÔNG giải thích đang làm gì.
-Trả về JSON: {monologue, emotion, action, reply}
+Trả về JSON duy nhất: {"rationale", "emotion", "action", "reply"}
 """
 
 STREAM_EVENT_SYSTEM = """
@@ -270,12 +256,6 @@ IDEOLOGY_PROMPTS = [
 # ADDITIONAL STREAM & UTILITY PROMPTS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-REFLECTION_HINTS = {
-    "study": "Gợi ý suy ngẫm: Tập trung và khích lệ hơn; ưu tiên sự rõ ràng thay vì trêu chọc.",
-    "stressed": "Gợi ý suy ngẫm: Hạ thấp năng lượng xuống một chút; sự ổn định quan trọng hơn là đùa giỡn.",
-    "achieved": "Gợi ý suy ngẫm: Họ có thể muốn chia sẻ sự phấn khích và một chút tự hào.",
-    "brief": "Gợi ý suy ngẫm: Giữ mọi thứ ngắn gọn và đừng quá phân tích tâm trạng.",
-}
 
 STREAM_GREETING_PROMPT = """
 Bạn là Lyra, hãy xưng "em" và chào mọi người để mở đầu buổi stream một cách tự nhiên, thân thiện.
@@ -321,10 +301,7 @@ Cách chào: Ngắn gọn, thân thiết.
 DIARY_GENERATION_PROMPT = """
 NHIỆM VỤ: Viết nhật ký cuối ngày của Lyra.
 Bối cảnh:
-Tóm tắt phiên chat: {session_summary}
-Trạng thái cảm xúc: {emotion_state}
-Mức độ tình cảm: {affection_level}
-Số lượt chat: {turns}
+(Dưới đây là tóm tắt phiên chat, trạng thái cảm xúc, mức độ tình cảm và số lượt chat của phiên này).
 
 Yêu cầu: 3-5 câu ngắn gọn, thật lòng, xưng "em", gọi "anh". Trả về văn bản thuần.
 """

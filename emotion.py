@@ -392,60 +392,60 @@ class EmotionEngine:
     def describe_internal_state(self):
         """Convert VAD state to natural language cues for LLM prompt injection."""
         if self.mood >= 6:
-            mood_state = "bright and a little more playful than usual"
+            mood_state = "rất tươi tỉnh và thích trêu đùa hơn bình thường"
         elif self.mood >= 2:
-            mood_state = "pretty normal, open, easy to talk to"
+            mood_state = "khá bình thường, cởi mở, dễ nói chuyện"
         elif self.mood <= -6:
-            mood_state = "low-energy and slightly sharp around the edges"
+            mood_state = "ít năng lượng và hơi gắt gỏng"
         elif self.mood <= -2:
-            mood_state = "a bit off and less playful than usual"
+            mood_state = "hơi khó ở và bớt đùa cợt hơn bình thường"
         else:
-            mood_state = "steady and neutral"
+            mood_state = "ổn định và trung lập"
 
         if self.attention >= 8:
-            attention_state = "locked in and attentive"
+            attention_state = "rất tập trung và chú ý"
         elif self.attention <= 2:
-            attention_state = "distracted and low-focus"
+            attention_state = "mất tập trung và lơ đãng"
         else:
-            attention_state = "present but casual"
+            attention_state = "hiện diện nhưng khá thoải mái"
 
         if self.affection >= 85:
-            relationship_state = "very comfortable and openly fond"
+            relationship_state = "rất thoải mái và quý mến họ"
         elif self.affection >= 65:
-            relationship_state = "warm and familiar"
+            relationship_state = "ấm áp và thân thuộc"
         elif self.affection >= 45:
-            relationship_state = "comfortable but still light"
+            relationship_state = "thoải mái nhưng vẫn giữ khoảng cách nhẹ"
         else:
-            relationship_state = "still building rhythm with them"
+            relationship_state = "vẫn đang làm quen với họ"
 
         # ── Dominance description ──────────────────────────────────────────────
         if self.dominance >= 0.75:
-            dominance_state = "confident and in control of the conversation"
+            dominance_state = "tự tin và kiểm soát cuộc trò chuyện"
         elif self.dominance >= 0.55:
-            dominance_state = "comfortable and at ease"
+            dominance_state = "thoải mái và tự tại"
         elif self.dominance >= 0.35:
-            dominance_state = "a little uncertain, slightly on the back foot"
+            dominance_state = "hơi không chắc chắn, cảm giác bị lép vế một chút"
         else:
-            dominance_state = "unsure of yourself, feeling a bit overwhelmed"
+            dominance_state = "không tự tin, cảm thấy hơi bị áp đảo"
 
         # ── Hydraulic irritability hint ────────────────────────────────────────
         irritability_hint = ""
         if self._outburst_this_turn:
             irritability_hint = (
-                " [EMOTIONAL OUTBURST]: You've been pushed too far. "
-                "React with raw, unfiltered frustration — sharper than usual, "
-                "no patience, no softening. This is genuine, not performed."
+                " [BÙNG NỔ CẢM XÚC]: Bạn đã bị ép quá mức. "
+                "Hãy phản ứng với sự bực bội chân thật — gắt hơn bình thường, "
+                "không kiên nhẫn, không nhún nhường. Đây là cảm xúc thật, không phải diễn."
             )
         elif self.irritability >= 0.6:
             irritability_hint = (
-                " You're getting increasingly irritated — "
-                "your patience is wearing thin. Let it show subtly."
+                " Bạn đang ngày càng bực mình — "
+                "sự kiên nhẫn đang cạn dần. Hãy để lộ điều đó ra một chút."
             )
 
         return (
-            f"You feel {mood_state}. Your focus is {attention_state}. "
-            f"Relationship with the user is {relationship_state} (Affection: {int(self.affection)}/100). "
-            f"You feel {dominance_state} right now.{irritability_hint}"
+            f"Bạn cảm thấy {mood_state}. Độ tập trung của bạn là {attention_state}. "
+            f"Mối quan hệ với người dùng đang {relationship_state} (Tình cảm: {int(self.affection)}/100). "
+            f"Bạn cảm thấy {dominance_state}.{irritability_hint}"
         )
 
     def choose_strategy(self):

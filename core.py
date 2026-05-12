@@ -82,6 +82,7 @@ class MiniAI(
         self.last_intent = None
         self._user_mood_today = None
         self._last_disclosure_turn = 0
+        self._msg_lock = threading.Lock()
         
         self.emotion.affection = self.memory.memory.get("relationship", {}).get("current_affection", 50)
         self.current_time = get_vietnam_time()
@@ -220,10 +221,20 @@ class MiniAI(
 
     def _collect_turn_context(self, user_input, source_type):
         self.conv_state.update(user_input, self.messages)
-        enqueue(PRIORITY_NORMAL, self.summarize_history)
-
+        
+        # Handle buffer trimming and summarization
+        if len(self.messages) >= SUMMARY_TRIGGER and self.turn_counter % 2 == 0:
+            if not self.is_streaming:
+                enqueue(PRIORITY_NORMAL, self.summarize_history)
+            else:
+                # During stream, silently trim buffer without creating episodic memories to avoid DB bloat
+                with self._msg_lock:
+                    keep_count = SUMMARY_TRIGGER - 5
+                    if len(self.messages) > keep_count:
+                        self.messages = self.messages[-keep_count:]
+        
         is_public = source_type != "owner"
-        memory_future = self._executor.submit(self.memory.get_relevant_context, user_input, is_public)
+        memory_future = self._executor.submit(self.memory.get_relevant_context, user_input, is_public, self.turn_counter)
         needs_search, search_query = self._should_search(user_input) if source_type == "owner" else (False, None)
         search_future = self._executor.submit(self._search_web, search_query) if needs_search else None
 
@@ -282,9 +293,11 @@ class MiniAI(
         history_window = MAX_HISTORY * 2 if source_type == "owner" else 8
         # Fallback: Convert dict prompt to string for standard LLM APIs
         system_str = self._dict_to_prompt_string(system_prompt)
+        with self._msg_lock:
+            history = list(self.messages[-history_window:])
         return [
             {"role": "system", "content": system_str},
-            *self.messages[-history_window:],
+            *history,
             {"role": "user", "content": composed_message},
         ]
 
@@ -302,6 +315,8 @@ class MiniAI(
         return persona, situation, memory
 
     def _call_brain(self, structured_prompt, history_str, user_msg):
+        if not isinstance(structured_prompt, dict) or "persona" not in structured_prompt:
+             raise ValueError(f"[Core] Invalid structured_prompt type: {type(structured_prompt)}. Expected dict with 'persona'.")
         persona, situation, memory = self._get_brain_inputs(structured_prompt)
         return self.brain(
             persona=persona,
@@ -313,10 +328,18 @@ class MiniAI(
 
     def _parse_brain_result(self, result):
         skill_needed = getattr(result, "skill_needed", "NONE")
-        if skill_needed and skill_needed.upper() == "NONE":
+        if skill_needed and str(skill_needed).upper() == "NONE":
             skill_needed = None
+        
+        # Check multiple possible reasoning fields from DSPy/LiteLLM
+        rationale = getattr(result, "rationale", "")
+        if not rationale:
+            rationale = getattr(result, "reasoning", "")
+        if not rationale:
+            rationale = getattr(result, "monologue", "")
+            
         return {
-            "monologue": getattr(result, "rationale", ""),
+            "monologue": rationale,
             "emotion": getattr(result, "emotion", "neutral"),
             "action": getattr(result, "action", "NONE"),
             "reply": getattr(result, "reply", "..."),
@@ -425,34 +448,14 @@ class MiniAI(
                     print(f"[Brain] Skill loop generation took {time.time() - start_skill:.2f}s")
                     parsed = self._parse_brain_result(result)
 
-        # 2. VTS Feedback Loop (Agent-Zero)
-        vts_error = self._execute_vts_tools(
+        # 2. VTS Execution (Async/Fire-and-forget for performance)
+        enqueue(
+            PRIORITY_HIGH,
+            self._execute_vts_tools,
             validate_emotion(parsed.get("emotion")),
             validate_action(parsed.get("action")),
-            vad=self.emotion.get_vad()
+            self.emotion.get_vad()
         )
-        if vts_error and self._vts_loop_count < 1: # Only allow one feedback turn per message
-            self._vts_loop_count += 1
-            print(f"[Orchestrator] VTS Error detected: {vts_error}")
-            feedback_msg = f"[FEEDBACK]: {vts_error}. Hãy phản hồi người dùng nhưng khéo léo nhắc về việc bạn bị 'đơ' hoặc lỗi váy/ mạng (Agent-Zero way)."
-            
-            if not self.brain:
-                api_messages.append({"role": "assistant", "content": parsed.get("reply", "")})
-                api_messages.append({"role": "system", "content": f"{feedback_msg} Trả về JSON."})
-                content = self._call_model(api_messages, temperature=dynamic_temp, max_tokens=dynamic_max_tokens)
-                if content:
-                    parsed = parse_vbrain_response(content)
-            else:
-                history_str = "\n".join([f"{m['role']}: {m['content']}" for m in api_messages[1:-1]])
-                history_str += f"\nassistant: {parsed.get('reply', '')}"
-                history_str += f"\nsystem: {feedback_msg}"
-                user_msg = api_messages[-1]["content"]
-
-                start_vts = time.time()
-                with dspy.context(lm=self.dspy_lm):
-                    result = self._call_brain(prompt_args["structured"], history_str, user_msg)
-                print(f"[Brain] VTS feedback generation took {time.time() - start_vts:.2f}s")
-                parsed = self._parse_brain_result(result)
 
         return parsed
 
@@ -462,25 +465,36 @@ class MiniAI(
             return
         enqueue(PRIORITY_CRITICAL, self.extract_memory, user_input, intent, source_type)
 
-    def _persist_owner_turn(self, user_input, original_reply):
+    def _persist_turn(self, user_input, original_reply, source_type="owner", viewer_data=None):
+        prefix = ""
+        is_owner = source_type == "owner"
+        if not is_owner and viewer_data and viewer_data.get("viewer_name"):
+            prefix = f"[{viewer_data.get('viewer_name')}]: "
+
         turn_rows = [
-            {"role": "user", "content": user_input},
+            {"role": "user", "content": f"{prefix}{user_input}"},
             {"role": "assistant", "content": original_reply},
         ]
-        self.messages.extend(turn_rows)
-        self.memory.memory.setdefault("conversation", {}).setdefault("conversation_thread", []).extend(turn_rows)
-        self.memory.queue_conversation_row("user", user_input)
-        self.memory.queue_conversation_row("assistant", original_reply)
-        self.turn_counter += 1  # assistant; user was counted at turn start
+        
+        # 1. Luôn lưu vào buffer ngắn hạn để Lyra có context trả lời (sẽ bị trim nếu quá dài)
+        with self._msg_lock:
+            self.messages.extend(turn_rows)
+        
+        # 2. CHỈ lưu vĩnh viễn (JSON/SQLite của owner) nếu là tin nhắn của owner
+        if is_owner:
+            self.memory.memory.setdefault("conversation", {}).setdefault("conversation_thread", []).extend(turn_rows)
+            self.memory.queue_conversation_row("user", f"{prefix}{user_input}")
+            self.memory.queue_conversation_row("assistant", original_reply)
+            
+            # Stat tracking
+            self.recent_responses.append(original_reply.lower()[:30])
+            if len(self.recent_responses) > 10:
+                self.recent_responses.pop(0)
 
-        self.recent_responses.append(original_reply.lower()[:30])
-        if len(self.recent_responses) > 10:
-            self.recent_responses.pop(0)
-
-        self.last_message_time = self.current_time.isoformat()
-        self.memory.memory.setdefault("relationship", {})["current_affection"] = int(round(self.emotion.affection))
-        self.memory.memory["time_tracking"]["last_message_time"] = self.last_message_time
-        enqueue(PRIORITY_NORMAL, self.memory.save)
+            self.last_message_time = self.current_time.isoformat()
+            self.memory.memory.setdefault("relationship", {})["current_affection"] = int(round(self.emotion.affection))
+            self.memory.memory["time_tracking"]["last_message_time"] = self.last_message_time
+            enqueue(PRIORITY_NORMAL, self.memory.save)
 
     def _build_chat_result(self, reply, original_reply, intent, illocution):
         return {
@@ -521,9 +535,10 @@ class MiniAI(
         self._track_stream_turn(user_input, source_type, viewer_data, stream_context)
 
         if self.turn_counter % REFLECTION_INTERVAL == 0:
-            # Chỉ enqueue nếu không phải stream hoặc là chủ kênh (để tránh quá tải khi stream đông viewer)
+            # Chỉ enqueue nếu không phải stream hoặc là chủ kênh
             if not self.is_streaming or source_type == "owner":
                 enqueue(PRIORITY_NORMAL, self._reflect_on_session)
+                self._user_mood_today = None # Reset stale mood state periodically
         
         original_emotion_state = self._apply_viewer_emotion_context(source_type, viewer_data)
         memory_context, search_context = self._collect_turn_context(user_input, source_type)
@@ -569,11 +584,11 @@ class MiniAI(
         self._restore_viewer_emotion_context(source_type, original_emotion_state)
         self._enqueue_memory_extraction(user_input, intent, source_type)
 
-        if source_type == "owner":
-            self._persist_owner_turn(user_input, original_reply)
+        # Persist turn for all sources (Owner & Viewers) to allow history learning
+        self._persist_turn(user_input, original_reply, source_type, viewer_data)
 
         result_dict = self._build_chat_result(reply, original_reply, intent, illocution)
-        if source_type != "owner":
+        if source_type != "owner" and self.is_streaming:
             self.rl_loop.register_action(user_input, reply, intent, self.emotion.get_state())
 
         return result_dict
@@ -587,7 +602,8 @@ class MiniAI(
         try:
             print("[Core] Running reflection loop...")
             # 1. Gather context
-            recent_convo = "\n".join([f"{'User' if m['role'] == 'user' else 'Lyra'}: {m['content']}" for m in self.messages[-20:]])
+            with self._msg_lock:
+                recent_convo = "\n".join([f"{'User' if m['role'] == 'user' else 'Lyra'}: {m['content']}" for m in self.messages[-20:]])
             session_items = "\n".join([f"- {i['value']}" for i in self.memory._session_items[-10:]])
             emotion_state = self.emotion.describe_internal_state()
             
@@ -625,36 +641,8 @@ class MiniAI(
         pass
 
     def _generate_stream_plan(self):
-        """Generates dynamic goals for the session (Plandex/Letta-style)."""
-        from config import STREAM_TITLE, STREAM_GOALS, STREAM_NOTES
-        from live_context import update_plan
-        
-        print("[Core] Generating dynamic stream plan...")
-        prompt = (
-            f"Bạn là Lyra, Vtuber đang chuẩn bị stream.\n"
-            f"Tiêu đề: {STREAM_TITLE}\n"
-            f"Mục tiêu định sẵn: {', '.join(STREAM_GOALS)}\n"
-            f"Ghi chú: {STREAM_NOTES}\n\n"
-            f"Nhiệm vụ: Dựa trên thông tin trên, hãy liệt kê 3-4 mục tiêu cụ thể, vui vẻ cho buổi stream hôm nay. "
-            f"Trả về JSON: {{\"plan\": [{{\"goal\": \"tên mục tiêu\", \"status\": \"pending\"}}]}}"
-        )
-        
-        try:
-            raw = self._call_light_model([
-                {"role": "system", "content": "Chỉ trả về JSON."},
-                {"role": "user", "content": prompt}
-            ], temperature=0.7, provider="openrouter")
-            
-            if raw:
-                match = re.search(r'\{.*\}', raw, re.DOTALL)
-                if match:
-                    data = json.loads(match.group())
-                    plan = data.get("plan", [])
-                    if plan:
-                        update_plan(plan)
-                        print(f"✓ Dynamic plan generated: {len(plan)} items")
-        except Exception as e:
-            print(f"[Core] Planning error: {e}")
+        """(Disabled) Generates dynamic goals for the session."""
+        return
 
     def get_proactive_message(self):
         """Generates a proactive message based on time and situation."""
@@ -666,6 +654,6 @@ class MiniAI(
             {"role": "system", "content": "Bạn là Lyra, em gái 16 tuổi. Bạn luôn xưng 'em' và gọi 'anh'. Hãy nói lại câu sau một cách tự nhiên, đáng yêu nhất. Trả về văn bản thuần."},
             {"role": "user", "content": template}
         ]
-        return self._call_light_model(messages, temperature=0.8, provider="openrouter")
+        return self._call_light_model(messages, temperature=0.8, provider="groq")
 
     # [END OF MINIAI]

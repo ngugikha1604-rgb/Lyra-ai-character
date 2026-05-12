@@ -81,7 +81,9 @@ class ProactiveService:
             return
 
         last_time = getattr(self._lyra_ai, "_last_viewer_message_time", None)
+        # Nếu chưa có viewer nào chat (None) thì cũng coi là im lặng kể từ lúc stream bắt đầu
         if last_time is None:
+            self._lyra_ai._last_viewer_message_time = get_now_vn()
             return
 
         gap = (get_now_vn() - last_time).total_seconds()
@@ -101,7 +103,12 @@ class ProactiveService:
                 messages=[
                     {
                         "role": "system",
-                        "content": "Bạn là Lyra, 16 tuổi, hỏi thăm ngắn gọn, tự nhiên, tò mò.",
+                        "content": (
+                            "⚠️ XƯNG HÔ BẮT BUỘC: LUÔN xưng 'em', gọi 'mọi người' hoặc 'anh/chị'. "
+                            "TUYỆT ĐỐI KHÔNG dùng 'tôi', 'mình', 'bạn'. "
+                            "Bạn là Lyra, VTuber 16 tuổi, đang livestream. "
+                            "Hỏi thăm ngắn gọn, tự nhiên, tò mò."
+                        ),
                     },
                     {"role": "user", "content": prompt},
                 ],

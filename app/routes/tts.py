@@ -65,25 +65,37 @@ def speak():
         if not audio_url:
             return jsonify({"error": "No audio URL returned", "detail": result}), 500
 
-        # Polling: FPT xử lý async — thử tối đa 10 lần, mỗi lần 1.5s
-        audio_res = None
-        for attempt in range(10):
-            time.sleep(1.5)
+        # Polling: FPT xử lý async.
+        # Chiến lược: kiểm tra nhanh 3 lần đầu (1s/lần), sau đó giãn ra 2s.
+        # Tổng timeout ~40s — đủ cho cả câu dài và FPT bận.
+        FAST_ATTEMPTS = 3      # poll nhanh: 1s interval
+        SLOW_ATTEMPTS = 17     # poll chậm: 2s interval  (tổng: 3s + 34s = 37s)
+        FAST_INTERVAL = 1.0
+        SLOW_INTERVAL = 2.0
+
+        audio_res   = None
+        total_tries = FAST_ATTEMPTS + SLOW_ATTEMPTS
+
+        for attempt in range(total_tries):
+            interval = FAST_INTERVAL if attempt < FAST_ATTEMPTS else SLOW_INTERVAL
+            time.sleep(interval)
             try:
-                temp_res = requests.get(audio_url, timeout=5)
+                temp_res = requests.get(audio_url, timeout=6)
                 if temp_res.status_code == 200 and temp_res.headers.get(
                     "Content-Type", ""
                 ).startswith("audio/"):
                     audio_res = temp_res
+                    print(f"[TTS] Audio ready sau {attempt + 1} lần poll.")
                     break
-                if temp_res.status_code != 404:
-                    print(f"[TTS] Polling status: {temp_res.status_code}")
-                if attempt == 9:
-                    print("[TTS] Timeout: không lấy được audio sau 10 lần thử.")
+                if temp_res.status_code not in (200, 404):
+                    print(f"[TTS] Polling status lạ: {temp_res.status_code}")
+            except requests.exceptions.Timeout:
+                print(f"[TTS] Polling request timeout (lần {attempt + 1})")
             except Exception as e:
                 print(f"[TTS] Polling error: {e}")
 
         if not audio_res:
+            print(f"[TTS] Timeout: không lấy được audio sau {total_tries} lần (~{FAST_ATTEMPTS*FAST_INTERVAL + SLOW_ATTEMPTS*SLOW_INTERVAL:.0f}s).")
             return jsonify({"error": "Audio fetch failed after timeout"}), 500
 
         # Pitch shift + phát ra VB Cable

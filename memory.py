@@ -478,7 +478,7 @@ class MemorySystem:
             print(f"[Memory] L3 fetch error: {e}")
         return candidates
 
-    def get_relevant_context(self, user_input: str, is_public: bool = False, precomputed_vec=None) -> str:
+    def get_relevant_context(self, user_input: str, is_public: bool = False, turn_counter: int = 0, precomputed_vec=None) -> str:
         """Retrieves and ranks the most relevant memories for the current turn."""
         query_vec = precomputed_vec if precomputed_vec is not None else self._get_embedding(user_input)
         
@@ -495,12 +495,21 @@ class MemorySystem:
                 self._semantic_cache.append(hit_item)
                 return hit_item[1]
 
-        # 2 & 4. Fetch L1 (SQLite) va L3 (Pinecone) song song — tiet kiem 100-300ms latency
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            future_l1 = pool.submit(self._fetch_l1_candidates, query_vec, is_public)
-            future_l3 = pool.submit(self._fetch_l3_candidates, query_vec)
-            l1_candidates = future_l1.result()
-            l3_candidates = future_l3.result()
+        # 2. Fetch L1 (SQLite) first to check context density
+        l1_candidates = self._fetch_l1_candidates(query_vec, is_public)
+        
+        # 3. Conditional L3 (Pinecone) Fetch — avoid unnecessary RAG calls
+        l3_candidates = []
+        # Guard: turn_counter < 3 means fresh conversation, unlikely to need deep RAG
+        should_query_l3 = (turn_counter >= 3) and (
+            len(l1_candidates) < 5 or 
+            any(w in user_input.lower() for w in ["nhớ", "kỷ niệm", "lần trước", "trước đây", "hồi đó", "còn nhớ", "ngày xưa"]) or
+            ("?" in user_input and len(user_input.split()) > 5)
+        )
+        
+        if should_query_l3:
+            l3_candidates = self._fetch_l3_candidates(query_vec)
+            print(f"[Memory] L3 Query triggered (reason: {'Low context' if len(l1_candidates) < 5 else 'Keyword/Question detected'})")
 
         candidates = l1_candidates
 
@@ -625,6 +634,23 @@ class MemorySystem:
         self._relevant_items_cache = None
         
         print("[Memory] Consolidation and cleaning successful.")
+
+    def bootstrap_stream_context(self):
+        """Fetches 'mood' and key memories from previous session via Pinecone."""
+        if not self.pinecone._enabled: return ""
+        print("[Memory] Bootstrapping stream context from L3...")
+        try:
+            # Query with a generic "mood and state" vector to get recent vibe
+            query_vec = self._get_embedding("tâm trạng và diễn biến chính buổi stream trước")
+            if query_vec is not None:
+                matches = self.pinecone.query(query_vec.tolist(), top_k=3)
+                if matches:
+                    context = "\n".join([f"- {m['metadata'].get('value', '')}" for m in matches])
+                    self.add_session_item(f"Kỷ niệm từ buổi trước: {context}", kind="bootstrap", is_sticky=True)
+                    return context
+        except Exception as e:
+            print(f"[Memory] Bootstrap error: {e}")
+        return ""
 
     def _get_in_memory_fallback(self):
         class Fallback:

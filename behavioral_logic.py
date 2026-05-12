@@ -27,12 +27,15 @@ class BehavioralMixin:
     def clean_reply(self, text: str) -> str:
         """Cleans AI response from meta-talk, quotes, and artifacts."""
         if not text: return ""
-        # Remove quotes
+        # 1. Remove quotes and metadata
         text = text.strip().strip('"').strip("'")
-        # Remove common meta-prefixes
         text = re.sub(r"^(Lyra:|Assistant:|AI:)", "", text, flags=re.I).strip()
-        # Remove potential markdown
         text = re.sub(r"```.*?```", "", text, flags=re.S).strip()
+        
+        # 2. Fix pronouns and remaining markers (from ModelUtilityMixin)
+        if hasattr(self, "_clean_pronouns"):
+            text = self._clean_pronouns(text)
+            
         return text
 
     # ── Compiled Patterns ──────────────────────────────────────────────────────

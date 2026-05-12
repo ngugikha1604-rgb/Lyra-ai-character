@@ -30,6 +30,116 @@ bp = Blueprint("stream", __name__)
 
 
 # ------------------------------------------------------------------ #
+# Stream greeting helper (background thread)                           #
+# ------------------------------------------------------------------ #
+
+def _broadcast_stream_greeting(lyra_ai, sse, ai_lock) -> None:
+    """
+    Gọi Gemini Flash để tạo lời chào mở màn, broadcast qua SSE.
+    Chạy trong daemon thread — không block HTTP response.
+    Fallback: Groq → hard-coded string.
+    """
+    import requests
+    from config import (
+        GEMINI_API_KEY, GEMINI_BASE_URL,
+        GROQ_API_KEY, TRANSLATE_BASE_URL, TRANSLATE_MODEL,
+        STREAM_TITLE,
+    )
+    from prompts import STREAM_GREETING_PROMPT
+
+    # Dùng STREAM_GREETING_PROMPT có sẵn — đã có rule xưng hô 'em'/'mọi người'
+    try:
+        from config import STREAM_GAME, STREAM_GOALS, STREAM_NOTES
+    except ImportError:
+        STREAM_GAME = STREAM_GOALS = STREAM_NOTES = None
+
+    user_prompt = STREAM_GREETING_PROMPT.format(
+        title=STREAM_TITLE or "tâm sự tự do",
+        game=STREAM_GAME   or "không có",
+        goals=", ".join(STREAM_GOALS) if STREAM_GOALS else "không có",
+        notes=STREAM_NOTES or "không có",
+    )
+
+    system_prompt = (
+        "⚠️ XƯNG HÔ BẮT BUỘC: LUÔN xưng 'em', gọi 'anh/chị' hoặc 'mọi người'. "
+        "TUYỆT ĐỐI KHÔNG dùng 'tôi', 'mình', 'bạn'. "
+        "Bạn là Lyra, VTuber nữ 16 tuổi, giọng điệu ngây ngô dễ thương. "
+        "Viết bằng tiếng Việt, không dùng emoji, trả về văn bản thuần."
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_prompt},
+    ]
+    payload_body = {
+        "messages":    messages,
+        "temperature": 0.7,
+        "max_tokens":  60,
+    }
+
+    greeting_text = None
+
+    # ── Thử Gemini Flash trước (nhanh nhất) ─────────────────────────────
+    if GEMINI_API_KEY:
+        try:
+            resp = requests.post(
+                GEMINI_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {GEMINI_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json={"model": "gemini-2.0-flash", **payload_body},
+                timeout=8,
+            )
+            if resp.ok:
+                greeting_text = resp.json()["choices"][0]["message"]["content"].strip()
+                print(f"[StreamGreeting] Gemini OK: {greeting_text[:60]}")
+        except Exception as e:
+            print(f"[StreamGreeting] Gemini failed: {e}")
+
+    # ── Fallback: Groq ────────────────────────────────────────────
+    if not greeting_text and GROQ_API_KEY:
+        try:
+            resp = requests.post(
+                TRANSLATE_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json={"model": TRANSLATE_MODEL, **payload_body},
+                timeout=8,
+            )
+            if resp.ok:
+                greeting_text = resp.json()["choices"][0]["message"]["content"].strip()
+                print(f"[StreamGreeting] Groq OK: {greeting_text[:60]}")
+        except Exception as e:
+            print(f"[StreamGreeting] Groq failed: {e}")
+
+    # ── Fallback cuối: hard-coded ──────────────────────────────────
+    if not greeting_text:
+        greeting_text = "Stream bắt đầu rồi nha mọi người, nhắn tin cho Lyra đi!"
+        print("[StreamGreeting] Using hard-coded fallback")
+
+    # Broadcast qua SSE
+    try:
+        with ai_lock:
+            emotion = lyra_ai.emotion_from_state() if hasattr(lyra_ai, "emotion_from_state") else "happy"
+        sse.broadcast({
+            "reply":       greeting_text,
+            "monologue":   "",
+            "emotion":     emotion,
+            "action":      "GREET",
+            "source_type": "system",
+            "sender_name": "Lyra",
+            "affection":   int(round(lyra_ai.affection)),
+            "mood":        int(round(lyra_ai.mood)),
+        })
+        print("[StreamGreeting] Broadcast OK")
+    except Exception as e:
+        print(f"[StreamGreeting] Broadcast error: {e}")
+
+
+# ------------------------------------------------------------------ #
 # POST /stream/start                                                   #
 # ------------------------------------------------------------------ #
 
@@ -47,6 +157,20 @@ def stream_start():
 
         if not credentials:
             return jsonify({"error": "YouTube OAuth credentials required. Visit /authorize first.", "authorize_url": "/authorize"}), 401
+
+        # Thử refresh token nếu hết hạn trước khi dùng
+        from app.routes.auth import _refresh_credentials, _creds_dict_to_object
+        import google.oauth2.credentials
+        creds_obj = _creds_dict_to_object(credentials)
+        if creds_obj.expired or not creds_obj.valid:
+            print("[Stream] Token hết hạn, đang refresh...")
+            refreshed = _refresh_credentials(credentials)
+            if not refreshed:
+                # Xóa credentials cũ, yêu cầu re-authorize
+                current_app.yt_credentials = None
+                return jsonify({"error": "Token hết hạn và không thể refresh. Vui lòng re-authorize.", "authorize_url": "/authorize"}), 401
+            credentials = refreshed
+            current_app.yt_credentials = credentials
 
         # Nếu không có chat_id lẫn video_id → tự tìm stream đang active trên kênh
         if not chat_id and not video_id:
@@ -66,13 +190,41 @@ def stream_start():
         stream_service.reset_greeted_set()
         set_stream_active(True)
 
+        # Lấy platform/channel_id để khởi động promote timer
+        try:
+            from config import YOUTUBE_CHANNEL_ID
+            _platform   = "youtube"
+            _channel_id = YOUTUBE_CHANNEL_ID or "default"
+        except Exception:
+            _platform   = "youtube"
+            _channel_id = "default"
+        stream_service.start_promote_timer(_platform, _channel_id)
+        # Bootstrap L3 context from Pinecone (background to avoid blocking HTTP)
+        from background_worker import enqueue, PRIORITY_HIGH
+        enqueue(PRIORITY_HIGH, lyra_ai.memory.bootstrap_stream_context)
+
         # Ghi video_id vào live context để persist qua restart
         if video_id:
             try:
                 from live_context import update_stream_info
                 update_stream_info(video_id=video_id, chat_id=chat_id)
             except Exception:
-                pass  # live_context không có hàm này thì bỏ qua
+                pass
+
+        # Set timer → proactive sẽ kích hoạt sau 2 phút im lặng
+        from memory_utils import get_now_vn
+        lyra_ai._last_viewer_message_time = get_now_vn()
+
+        # Greeting chạy background — trả 200 ngay, broadcast SSE sau ~1-2s
+        import threading
+        sse     = current_app.sse_service
+        ai_lock = current_app.ai_chat_lock
+        threading.Thread(
+            target=_broadcast_stream_greeting,
+            args=(lyra_ai, sse, ai_lock),
+            daemon=True,
+            name="StreamGreeting",
+        ).start()
 
         print(f"[Stream] Started — video_id={video_id} chat_id={chat_id}")
         return jsonify({"ok": True, "chat_id": chat_id, "video_id": video_id})
@@ -86,17 +238,59 @@ def stream_start():
 # POST /stream/stop                                                    #
 # ------------------------------------------------------------------ #
 
+from background_worker import enqueue, PRIORITY_NORMAL, PRIORITY_HIGH
+
+
+def _stream_stop_cleanup(viewer_tracker, platform: str, channel_id: str, lyra_ai) -> None:
+    """
+    Chạy trong background worker sau khi stream stop.
+    Thứ tự: promote → clear stats → diary.
+    Tất cả trong 1 task để đảm bảo sequential, không race.
+    """
+    try:
+        promoted = viewer_tracker.promote_regular_viewers(platform, channel_id)
+        print(f"[StreamCleanup] Promoted {len(promoted)} viewer(s) to regular.")
+    except Exception as e:
+        print(f"[StreamCleanup] promote error: {e}")
+
+    try:
+        viewer_tracker.clear_session_stats(platform, channel_id)
+        print("[StreamCleanup] Session stats cleared.")
+    except Exception as e:
+        print(f"[StreamCleanup] clear_session_stats error: {e}")
+
+    try:
+        lyra_ai.write_diary_entry()
+    except Exception as e:
+        print(f"[StreamCleanup] diary error: {e}")
+
+
 @bp.route("/stream/stop", methods=["POST"])
 def stream_stop():
     lyra_ai        = current_app.lyra_ai
     yt_poller      = current_app.yt_poller
     stream_service = current_app.stream_service
+    viewer_tracker = current_app.viewer_tracker
 
     yt_poller.stop()
+    stream_service.stop_promote_timer()   # dừng 30-min timer
     lyra_ai.is_streaming = False
     stream_service.reset_greeted_set()
     set_stream_active(False)
-    print("[Stream] Stopped.")
+
+    # Lấy platform/channel_id từ config
+    try:
+        from config import YOUTUBE_CHANNEL_ID
+        platform   = "youtube"
+        channel_id = YOUTUBE_CHANNEL_ID or "default"
+    except Exception:
+        platform   = "youtube"
+        channel_id = "default"
+
+    # Enqueue cleanup: promote → clear → diary (sequential, 1 task)
+    enqueue(PRIORITY_NORMAL, _stream_stop_cleanup, viewer_tracker, platform, channel_id, lyra_ai)
+
+    print("[Stream] Stopped — cleanup enqueued.")
     return jsonify({"ok": True})
 
 

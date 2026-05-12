@@ -99,21 +99,25 @@ class MemoryHandlerMixin:
 
     def summarize_history(self):
         """Summarizes history when threshold reached."""
-        if len(self.messages) < SUMMARY_TRIGGER or self.turn_counter % 2 != 0:
-            return
+        with self._msg_lock:
+            if len(self.messages) < SUMMARY_TRIGGER or self.turn_counter % 2 != 0:
+                return
 
-        to_summarize = self.messages[:SUMMARY_TRIGGER]
+            to_summarize = list(self.messages[:SUMMARY_TRIGGER])
+            trim_index = SUMMARY_TRIGGER
+        
         convo_text = "\n".join([f"{'User' if m['role'] == 'user' else 'Lyra'}: {m['content']}" for m in to_summarize if isinstance(m, dict)])
 
         if not convo_text.strip():
-            self.messages = self.messages[SUMMARY_TRIGGER:]
+            with self._msg_lock:
+                self.messages = self.messages[SUMMARY_TRIGGER:]
             return
 
         try:
             summary = self._call_light_model([
                 {"role": "system", "content": SUMMARIZE_PROMPT},
                 {"role": "user", "content": f"Summarize this conversation:\n\n{convo_text}"},
-            ], temperature=0.4, max_tokens=120, provider="openrouter")
+            ], temperature=0.4, max_tokens=120, provider="gemini")
 
             if summary := summary.strip():
                 ts = self.current_time.strftime("%Y-%m-%d %H:%M")
@@ -122,8 +126,9 @@ class MemoryHandlerMixin:
                 self.memory.memory["conversation"]["chat_history_summary"].append({"timestamp": ts, "summary": summary, "is_mega": False})
                 if len(self.memory.memory["conversation"]["chat_history_summary"]) > MAX_SUMMARIES + 1:
                     self.memory.memory["conversation"]["chat_history_summary"].pop(1)
-                self.messages = self.messages[SUMMARY_TRIGGER:]
-                self.memory.save()
+                with self._msg_lock:
+                    self.messages = self.messages[trim_index:]
+                print(f"✓ History summarized: {ts}")
         except Exception as e:
             print(f"[MemoryHandler] Summarization failed: {e}")
 
@@ -149,7 +154,7 @@ class MemoryHandlerMixin:
                     mega_text = self._call_light_model([
                         {"role": "system", "content": MEMORY_COMPRESSION_PROMPT},
                         {"role": "user", "content": f"Compress these summaries:\n\n" + "\n".join(parts)},
-                    ], temperature=0.3, max_tokens=200, provider="openrouter")
+                    ], temperature=0.3, max_tokens=200, provider="gemini")
                     if mega_text:
                         with self.memory.db_lock:
                             c.execute("DELETE FROM summaries WHERE is_mega=1")
@@ -183,12 +188,13 @@ class MemoryHandlerMixin:
             raw = self._call_light_model([
                 {"role": "system", "content": "Bạn là tiềm thức của Lyra. Viết nhật ký bí mật bằng tiếng Việt."},
                 {"role": "user", "content": prompt}
-            ], temperature=0.7, max_tokens=350, provider="gemini")
+            ], temperature=0.7, max_tokens=350, provider="openrouter")
             
             if raw:
                 # Clean markdown tags
                 raw = re.sub(r"```.*?```", "", raw, flags=re.DOTALL).strip()
                 self.memory.add_diary_entry(raw, mood=self.emotion.mood, affection=self.emotion.affection)
+                self._diary_hint_cache = None # Invalidate cache for prompt builder
                 print(f"✓ Diary entry saved ({len(raw)} chars)")
         except Exception as e:
             print(f"[MemoryHandler] Diary error: {e}")

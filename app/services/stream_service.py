@@ -86,6 +86,11 @@ class StreamService:
         # Consumer thread — khởi động sau khi init()
         self._consumer_thread: threading.Thread | None = None
 
+        # Promote timer — chạy mỗi 30 phút khi stream đang active
+        self._promote_timer_thread: threading.Thread | None = None
+        self._promote_stop_event = threading.Event()
+        self._promote_interval_s: float = 30 * 60  # 30 phút
+
     # ------------------------------------------------------------------ #
     # Setup                                                                #
     # ------------------------------------------------------------------ #
@@ -117,12 +122,42 @@ class StreamService:
         self._consumer_thread.start()
         print("[StreamService] Consumer thread started.")
 
+    def start_promote_timer(self, platform: str, channel_id: str) -> None:
+        """Bắt đầu promote timer — gọi khi stream start."""
+        self._promote_stop_event.clear()
+        self._promote_timer_thread = threading.Thread(
+            target=self._promote_loop,
+            args=(platform, channel_id),
+            daemon=True,
+            name="PromoteTimer",
+        )
+        self._promote_timer_thread.start()
+        print(f"[StreamService] Promote timer started (every {self._promote_interval_s/60:.0f} min).")
+
+    def stop_promote_timer(self) -> None:
+        """Dừng promote timer — gọi khi stream stop."""
+        self._promote_stop_event.set()
+        print("[StreamService] Promote timer stopped.")
+
+    def _promote_loop(self, platform: str, channel_id: str) -> None:
+        """Chạy ngầm, promote viewer mỗi 30 phút."""
+        while not self._promote_stop_event.wait(timeout=self._promote_interval_s):
+            try:
+                promoted = self._viewer_tracker.promote_regular_viewers(platform, channel_id)
+                if promoted:
+                    print(f"[PromoteTimer] Promoted {len(promoted)} viewer(s): "
+                          f"{[v['viewer_name'] for v in promoted]}")
+                else:
+                    print("[PromoteTimer] No new viewers to promote.")
+            except Exception as e:
+                print(f"[PromoteTimer] error: {e}")
+
     # ------------------------------------------------------------------ #
     # Public helpers (dùng trong routes)                                   #
     # ------------------------------------------------------------------ #
 
     def reset_greeted_set(self) -> None:
-        """Gọi khi stream stop để tránh greeting stale session."""
+        """Gọi khi stream stop/start để tránh greeting stale session."""
         with self._greeted_lock:
             self._greeted_this_session.clear()
 
@@ -400,6 +435,9 @@ class StreamService:
 
         from prompts import REGULAR_VIEWER_ARRIVAL_HINT
         regular_data = chat_event.get("_regular_data") or {}
+        platform     = chat_event.get("platform", "youtube")
+        channel_id   = chat_event.get("channel_id", "default")
+
         arrival_hint = REGULAR_VIEWER_ARRIVAL_HINT.format(
             viewer_name=sender_name,
             total_streams=regular_data.get("total_streams", 1),
@@ -410,6 +448,20 @@ class StreamService:
             total_streams=regular_data.get("total_streams", 1),
             affection=regular_data.get("affection", 35),
         )
+
+        # Background: extract profile từ recent messages nếu chưa có profile
+        if not self._viewer_tracker.get_viewer_profile(sender_id, platform):
+            recent_msgs = self._viewer_tracker.get_viewer_recent_messages(
+                sender_id, platform, channel_id, limit=10
+            )
+            if recent_msgs:
+                enqueue(
+                    PRIORITY_HIGH,
+                    self._viewer_tracker.extract_and_save_profile,
+                    sender_id, platform, sender_name,
+                    recent_msgs, self._lyra_ai._call_light_model,
+                )
+
         return f"{stream_ctx}\n{arrival_hint}" if stream_ctx else arrival_hint
 
     def _resolve_viewer_data(
@@ -478,6 +530,7 @@ class StreamService:
                     ],
                     temperature=0.3,
                     max_tokens=80,
+                    provider="gemini"
                 )
             if summary:
                 summary = summary.strip()

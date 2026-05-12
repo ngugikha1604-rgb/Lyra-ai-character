@@ -489,6 +489,18 @@ class ViewerTracker:
                         notes           TEXT DEFAULT '',
                         UNIQUE(viewer_id, platform)
                     );
+
+                    CREATE TABLE IF NOT EXISTS viewer_profile (
+                        viewer_id       TEXT NOT NULL,
+                        platform        TEXT NOT NULL DEFAULT 'youtube',
+                        nickname        TEXT DEFAULT '',
+                        age             TEXT DEFAULT '',
+                        gender          TEXT DEFAULT 'unknown',
+                        pronoun         TEXT DEFAULT 'anh',
+                        notes           TEXT DEFAULT '',
+                        updated_at      TEXT NOT NULL,
+                        PRIMARY KEY (viewer_id, platform)
+                    );
                 """)
                 conn.commit()
             conn.close()
@@ -800,6 +812,122 @@ class ViewerTracker:
             print(f"[ViewerTracker] get_viewer_recent_messages error: {e}")
             return []
 
+    # ------------------------------------------------------------------ #
+    # viewer_profile — thông tin cá nhân viewer quen                    #
+    # ------------------------------------------------------------------ #
+
+    def upsert_viewer_profile(
+        self,
+        viewer_id: str,
+        platform: str,
+        nickname: str = "",
+        age: str = "",
+        gender: str = "unknown",
+        pronoun: str = "anh",
+        notes: str = "",
+    ) -> None:
+        """
+        Tạo hoặc cập nhật viewer_profile.
+        Chỉ ghi đè các trư1ờ́ng có giá trị (bỏ qua chuỗi rỗng để không xóa dữ liệu cũ).
+        """
+        now = datetime.now().isoformat()
+        try:
+            conn = self._get_conn()
+            with self.db_lock:
+                existing = conn.execute(
+                    "SELECT * FROM viewer_profile WHERE viewer_id=? AND platform=?",
+                    (viewer_id, platform)
+                ).fetchone()
+
+                if existing:
+                    updates, params = [], []
+                    for field, val in [("nickname", nickname), ("age", age),
+                                       ("gender", gender), ("pronoun", pronoun),
+                                       ("notes", notes)]:
+                        if val:  # chỉ ghi đè khi có giá trị mới
+                            updates.append(f"{field}=?")
+                            params.append(val)
+                    if updates:
+                        params += [now, viewer_id, platform]
+                        conn.execute(
+                            f"UPDATE viewer_profile SET {', '.join(updates)}, updated_at=? "
+                            "WHERE viewer_id=? AND platform=?",
+                            params
+                        )
+                else:
+                    conn.execute(
+                        "INSERT INTO viewer_profile "
+                        "(viewer_id, platform, nickname, age, gender, pronoun, notes, updated_at) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (viewer_id, platform,
+                         nickname or "", age or "",
+                         gender or "unknown", pronoun or "anh",
+                         notes or "", now)
+                    )
+                conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[ViewerTracker] upsert_viewer_profile error: {e}")
+
+    def get_viewer_profile(self, viewer_id: str, platform: str) -> dict | None:
+        """Lấy viewer_profile. Trả về dict hoặc None nếu chưa có."""
+        try:
+            conn = self._get_conn()
+            row = conn.execute(
+                "SELECT * FROM viewer_profile WHERE viewer_id=? AND platform=?",
+                (viewer_id, platform)
+            ).fetchone()
+            conn.close()
+            return dict(row) if row else None
+        except Exception as e:
+            print(f"[ViewerTracker] get_viewer_profile error: {e}")
+            return None
+
+    def extract_and_save_profile(
+        self, viewer_id: str, platform: str, viewer_name: str,
+        recent_messages: list, call_light_model
+    ) -> None:
+        """
+        Dùng LLM nhẹ để trích xuất name/age/gender từ messages của viewer.
+        Gọi background khi viewer quen lần đầu xuất hiện sau khi được promote.
+        """
+        if not recent_messages:
+            return
+        convo = "\n".join(f"{viewer_name}: {m['message']}" for m in recent_messages)
+        prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "NHIỆM VỤ: Trích xuất thông tin cá nhân từ đoạn chat."
+                    "TRẢ VỀ JSON thuần, không giải thích:\n"
+                    '{"nickname": "tên hay được gọi | rỗng nếu không biết", '
+                    '"age": "tuổi hoặc tầm tuổi | rỗng", '
+                    '"gender": "male|female|other|unknown", '
+                    '"pronoun": "anh|chị|bạn", '
+                    '"notes": "gì đó quan trọng Lyra nên nhớ | rỗng"}'
+                ),
+            },
+            {"role": "user", "content": f"Chat:\n{convo}"},
+        ]
+        try:
+            import json, re
+            raw = call_light_model(prompt, temperature=0.1, max_tokens=80, provider="gemini") or ""
+            raw = re.sub(r"```json|```", "", raw).strip()
+            if not raw or raw == "{}":
+                return
+            data = json.loads(raw)
+            self.upsert_viewer_profile(
+                viewer_id=viewer_id, platform=platform,
+                nickname=data.get("nickname", ""),
+                age=data.get("age", ""),
+                gender=data.get("gender", "unknown"),
+                pronoun=data.get("pronoun", "anh"),
+                notes=data.get("notes", ""),
+            )
+            print(f"[ViewerTracker] Profile extracted for {viewer_name}: {data}")
+        except Exception as e:
+            print(f"[ViewerTracker] extract_and_save_profile error: {e}")
+
     def get_stream_context(self, sender_id: str, sender_name: str, platform: str, channel_id: str, viewer_info: dict) -> str:
         """
         Build context string để inject vào prompt của Lyra.
@@ -823,6 +951,21 @@ class ViewerTracker:
                     parts.append("Đây là người xem quen mặt, hãy thân thiện tự nhiên.")
                 else:
                     parts.append("Đây là người mới được nhận diện là khách quen, hãy thân thiện nhẹ nhàng.")
+
+                # --- Inject viewer_profile nếu có ---
+                profile = self.get_viewer_profile(sender_id, platform)
+                if profile:
+                    p_parts = []
+                    if profile.get("nickname"):
+                        p_parts.append(f"tên gọi: {profile['nickname']}")
+                    if profile.get("age"):
+                        p_parts.append(f"tuổi: {profile['age']}")
+                    if profile.get("pronoun") and profile["pronoun"] != "anh":
+                        p_parts.append(f"xưng hô: {profile['pronoun']}")
+                    if profile.get("notes"):
+                        p_parts.append(f"ghi chú: {profile['notes']}")
+                    if p_parts:
+                        parts.append(f"Thông tin cá nhân: {' | '.join(p_parts)}")
             else:
                 count = viewer_info.get("message_count", 1)
                 affinity = viewer_info.get("affinity_score", 1.0)

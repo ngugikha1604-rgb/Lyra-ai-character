@@ -17,8 +17,8 @@ class PromptBuilderMixin:
     """
 
     def _estimate_tokens(self, text: str) -> int:
-        """Ước tính token count bằng chars/4 — đủ chính xác cho mục đích budget."""
-        return len(text.encode('utf-8')) // 4
+        """Ước tính token count. Tiếng Việt char/3 là tỷ lệ an toàn cho subword tokenizers."""
+        return len(text) // 3
 
 
 
@@ -44,8 +44,8 @@ class PromptBuilderMixin:
         """
 
         # ── Pre-compute all candidate sections ─────────────────────────────────
-
-        base_personality = CORE_SYSTEM_PROMPT if source_type == "owner" else STREAM_VIEWER_PERSONALITY
+        # Always use CORE_SYSTEM_PROMPT to ensure full persona depth and learning
+        base_personality = CORE_SYSTEM_PROMPT
 
         relationship_hint = (
             RELATIONSHIP_HINTS["very_close"] if self.emotion.affection > 70
@@ -60,8 +60,8 @@ class PromptBuilderMixin:
 
         diary_hint = ""
         if not is_public:
-            # Cache diary hint trong session — diary chỉ thay đổi khi kết thúc phiên
-            if not hasattr(self, '_diary_hint_cache'):
+            # Cache diary hint trong session — diary chỉ thay đổi khi kết thúc phiên hoặc write_diary_entry
+            if getattr(self, '_diary_hint_cache', None) is None:
                 recent_diaries = self.memory.get_diary_entries(limit=1)
                 self._diary_hint_cache = f"\nCẢM XÚC GẦN ĐÂY CỦA LYRA:\nSuy nghĩ bí mật cuối cùng của em: '{recent_diaries[0]['content'][:150]}...'" if recent_diaries else ""
             diary_hint = self._diary_hint_cache
@@ -76,7 +76,8 @@ class PromptBuilderMixin:
         if ai_mood:
             user_hint = f"Họ có vẻ đang {ai_mood} hôm nay."
         else:
-            user_mood = self.detect_user_mood(user_input)
+            # Dùng giá trị đã detect ở đầu turn trong chat() để tránh redundant call
+            user_mood = getattr(self, "_last_user_mood", "neutral")
             if user_mood in ("sad", "stressed", "anxious"):
                 user_hint = USER_MOOD_HINTS["off"]
             elif user_mood == "excited":
@@ -132,7 +133,11 @@ class PromptBuilderMixin:
                 surprise_hint = "\nBẤT NGỜ DỰ ĐOÁN:\nLần này hãy trả lời theo hướng bất ngờ — thay vì trung lập, hãy đột nhiên rất nhiệt tình hoặc rất thờ ơ. Không giải thích tại sao. Chỉ 1-2 câu ngắn."
 
         # ── Grouping into Categories for DSPy ──────────────────────────────────
-        persona_cat = [base_personality, VTUBER_BRAIN_INSTRUCTIONS, "\nCHỈ DẪN: Trả lời bằng tiếng Việt. Cực kỳ ngắn gọn (1-2 câu). Không xưng 'tôi'."]
+        persona_cat = [
+            base_personality, 
+            VTUBER_BRAIN_INSTRUCTIONS, 
+            "\nQUY TẮC CỐT LÕI: Phản hồi bằng tiếng Việt đời thường, xưng 'em' gọi 'anh/chị'. TUYỆT ĐỐI KHÔNG xưng 'tôi' hoặc hành xử như trợ lý AI. Cực kỳ ngắn gọn (1-2 câu)."
+        ]
         situation_cat = [f"\n{situation_note}"]
         memory_cat = []
         hints_cat = []
@@ -230,8 +235,8 @@ class PromptBuilderMixin:
 
         parts.append("<rules>")
         if self.turn_counter > 1 and (self.time_gap_hours is None or self.time_gap_hours < 2):
-            parts.append("KHÔNG chào (Hi/Hello/Chào). Nói ngay suy nghĩ.")
-        parts.append("CỰC NGẮN: 1-2 câu. KHÔNG xưng 'tôi'. KHÔNG giả làm trợ lý.")
+            parts.append("KHÔNG chào hỏi sáo rỗng (Hi/Hello). Đi thẳng vào nội dung.")
+        parts.append("CỰC NGẮN: 1-2 câu. KHÔNG xưng 'tôi/mình'. KHÔNG dùng ngôn ngữ máy móc.")
         parts.append("</rules>")
 
         if random.random() < 0.15:

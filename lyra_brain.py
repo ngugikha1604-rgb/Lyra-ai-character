@@ -7,7 +7,7 @@ import re
 def parse_vbrain_response(content):
     """
     Parses the JSON response from the LLM.
-    Expected format: {monologue, emotion, action, reply}
+    Expected format: {rationale/monologue/reasoning, emotion, action, reply, skill_needed}
     """
     default_res = {
         "monologue": "",
@@ -22,24 +22,28 @@ def parse_vbrain_response(content):
     if not clean_content:
         return default_res
 
+    parsed = None
     try:
         parsed = json.loads(clean_content)
+    except Exception:
+        try:
+            match = re.search(r"\{.*\}", clean_content, re.DOTALL)
+            if match:
+                parsed = json.loads(match.group())
+        except Exception:
+            pass
+
+    if parsed and isinstance(parsed, dict):
+        # Normalize reasoning field
+        for key in ["rationale", "reasoning", "monologue", "thought"]:
+            if key in parsed:
+                parsed["monologue"] = parsed.pop(key)
+                break
+        
         if "reply" in parsed:
             return {**default_res, **parsed}
-    except Exception:
-        pass
-
-    try:
-        match = re.search(r"\{.*\}", clean_content, re.DOTALL)
-        if match:
-            parsed = json.loads(match.group())
-            if "reply" in parsed:
-                return {**default_res, **parsed}
-    except Exception:
-        pass
 
     # Final fallback: text extraction if JSON fails completely
-    # Try to find skill_needed via regex first
     skill_match = re.search(r'"skill_needed":\s*"(.*?)"', clean_content)
     if skill_match:
         default_res["skill_needed"] = skill_match.group(1)
@@ -48,17 +52,13 @@ def parse_vbrain_response(content):
     cleaned_lines = []
     for line in lines:
         lower_line = line.lower()
-        if '"monologue"' in lower_line or lower_line.startswith("monologue:"):
-            continue
-        if '"emotion"' in lower_line or lower_line.startswith("emotion:"):
-            continue
-        if '"action"' in lower_line or lower_line.startswith("action:"):
+        # Skip metadata lines
+        if any(f'"{k}"' in lower_line or lower_line.startswith(f"{k}:") for k in ["rationale", "reasoning", "monologue", "thought", "emotion", "action", "skill_needed"]):
             continue
         if lower_line.strip() in ['{', '}', '```', '```json']:
             continue
         cleaned_lines.append(line)
     
-    # Process each line to remove 'reply' tags
     final_lines = []
     for line in cleaned_lines:
         line_clean = re.sub(r'(?i)^"?reply"?\s*:\s*"?', '', line.strip())
@@ -67,9 +67,7 @@ def parse_vbrain_response(content):
             final_lines.append(line_clean)
 
     fallback_text = ' '.join(final_lines).strip()
-    
     default_res["reply"] = fallback_text or content
-
     return default_res
 
 

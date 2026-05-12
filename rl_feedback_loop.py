@@ -48,16 +48,15 @@ class RLFeedbackLoop:
         with self.lock:
             self.active_observations.append(obs)
         
-        # Schedule evaluation after window closes using background_worker
-        # (Avoids threading.Timer overhead for each action)
-        enqueue(PRIORITY_NORMAL, self._delayed_evaluation, obs, delay=self.reward_window + 0.5)
+        # Use threading.Timer for the evaluation window to avoid blocking background_worker threads
+        threading.Timer(self.reward_window + 0.5, self._trigger_evaluation, args=(obs,)).start()
     
-    def _delayed_evaluation(self, obs, delay=0):
-        """Wrapper to add delay before evaluation."""
-        import time
-        if delay > 0:
-            time.sleep(delay)
-        self._trigger_evaluation(obs)
+    def _trigger_evaluation(self, obs):
+        """Moves observation to background worker for AI scoring."""
+        if len(obs["reaction_buffer"]) < 2:
+            # Not enough data for a meaningful reward (ignore silence in slow streams)
+            return
+        enqueue(PRIORITY_NORMAL, self._evaluate_observation, obs)
 
     def ingest_viewer_message(self, message, sender_name):
         """Called for every incoming viewer message to build the reaction context."""

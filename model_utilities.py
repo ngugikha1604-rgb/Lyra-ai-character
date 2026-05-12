@@ -284,28 +284,24 @@ class ModelUtilityMixin:
 
     def _call_chat_model(self, messages, temperature=0.8, max_tokens=250):
         """Call main chat model qua Ollama local, fallback về 9router nếu Ollama không chạy."""
-        compact_messages = self._compact_chat_messages(messages)
-
-        if getattr(self, "brain", None) is None:
-            res = self._clients['ollama_chat'].call(compact_messages, temperature=temperature, max_tokens=min(max_tokens, 180))
-            if res:
-                return res
-            res = self._clients['ollama_light'].call(compact_messages, temperature=temperature, max_tokens=min(max_tokens, 120))
-            if res:
-                return res
-
+        # 1. Thử gọi với full messages trước để giữ context tối đa
         res = self._clients['ollama_chat'].call(messages, temperature=temperature, max_tokens=max_tokens)
         if res:
             return res
+
+        # 2. Nếu fail (có thể do quá dài), thử compact context
+        compact_messages = self._compact_chat_messages(messages)
         res = self._clients['ollama_chat'].call(compact_messages, temperature=temperature, max_tokens=min(max_tokens, 180))
         if res:
             return res
+
+        # 3. Fallback xuống light model (Ollama) nếu chat model chết
         res = self._clients['ollama_light'].call(compact_messages, temperature=temperature, max_tokens=min(max_tokens, 120))
         if res:
             return res
 
-        # Fallback về 9router với Groq (không dùng ollama/ prefix ở đây)
-        print("[Chat] Ollama không available, fallback 9router groq")
+        # 4. Fallback cuối cùng về 9router với Groq
+        print("[Chat] Ollama hoàn toàn không available, fallback 9router groq")
         return self._clients['router9'].call(compact_messages, model=f"groq/{TRANSLATE_MODEL}", temperature=temperature, max_tokens=max_tokens)
 
     def _call_groq_model(self, messages, temperature=0.4, max_tokens=400):
@@ -338,8 +334,8 @@ class ModelUtilityMixin:
             print(f"[Search] Error: {e}")
             return None
 
-    def clean_reply(self, text):
-        """Cleans AI response from markers and quotes."""
+    def _clean_pronouns(self, text):
+        """Cleans AI response from markers and quotes, and fixes pronouns."""
         if not text: return ""
         text = re.sub(r'["\']', '', text)
         text = re.sub(r'(?i)lyra:', '', text).strip()
