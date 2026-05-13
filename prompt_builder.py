@@ -36,6 +36,8 @@ class PromptBuilderMixin:
         perlocution_hint: str = "",
         self_disclosure_hint: str = "",
         precomputed_memory_context: str = None,
+        kg_hint: str = None,
+        kg_context: str = None,
     ):
         """Constructs the system prompt based on state and memory.
         Uses a 4-tier greedy token budget system to keep prompts within
@@ -184,10 +186,14 @@ class PromptBuilderMixin:
         # Budgeting TIER 3
         _try_add_to_cat(get_live_context_block(), memory_cat)
         if identity_note: _try_add_to_cat(f"\nDANH TÍNH:\n{identity_note}", memory_cat)
+        # Knowledge Graph context (TIER 3 — inject vào memory_cat)
+        if kg_context: _try_add_to_cat(kg_context, memory_cat)
         if source_type == "owner":
             _try_add_to_cat("KỸ NĂNG: " + (self.skills_index or "Không có"), hints_cat)
         if loaded_skill_content:
             _try_add_to_cat("\nNỘI DUNG KỸ NĂNG ĐÃ TẢI:\n" + loaded_skill_content, hints_cat)
+        # KG hint (gợi ý confirm/notify — vào hints, ưu tiên cao)
+        if kg_hint: _try_add_to_cat(kg_hint, hints_cat)
 
         return {
             "persona": "\n".join(filter(None, persona_cat)),

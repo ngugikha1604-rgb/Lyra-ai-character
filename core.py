@@ -34,6 +34,7 @@ from prompt_builder import PromptBuilderMixin
 from stream_handler import StreamHandlerMixin
 from memory_handler import MemoryHandlerMixin
 from model_utilities import ModelUtilityMixin
+from knowledge_graph import knowledge_graph as kg
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -133,6 +134,14 @@ class MiniAI(
             self.brain = None
 
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+        # Knowledge Graph — inject LLM sau khi executor sẵn sàng
+        kg.set_llm(self._call_light_model)
+        print("[Core] Knowledge graph ready."
+              f" {kg.get_stats()}")
+
+        # Pending KG confirmation state
+        self._kg_pending: dict | None = None  # {pending_id, raw_text, sender}
 
     def _router9_is_available(self) -> bool:
         parsed = urlparse(ROUTER9_BASE_URL)
@@ -433,6 +442,8 @@ class MiniAI(
                     perlocution_hint=prompt_args["perlocution_hint"],
                     self_disclosure_hint=prompt_args["self_disclosure_hint"],
                     precomputed_memory_context=prompt_args["memory_context"],
+                    kg_hint=prompt_args.get("kg_hint"),
+                    kg_context=prompt_args.get("kg_context"),
                 )
                 
                 if not self.brain:
@@ -552,11 +563,18 @@ class MiniAI(
             disclosure_hint = ""
 
         prompt_base = (intent, user_input, search_context, source_type, viewer_data, stream_context)
+
+        # Knowledge Graph: detect/confirm + semantic retrieve
+        sender_name = (viewer_data or {}).get("viewer_name", "owner")
+        kg_hint     = self._handle_kg_flow(user_input, source_type, sender_name)
+        kg_context  = kg.get_context(user_input, top_k=4)
+
         system_prompt = self.build_prompt(
             *prompt_base,
             reward_hint=reward_hint, active_inference_mode=active_inference_mode,
             perlocution_hint=perlocution_hint, self_disclosure_hint=disclosure_hint,
-            precomputed_memory_context=memory_context
+            precomputed_memory_context=memory_context,
+            kg_hint=kg_hint, kg_context=kg_context,
         )
         composed = self.compose_user_message(user_input, intent, bool(reward_hint), ideology_idx)
         api_messages = self._build_api_messages(system_prompt, composed, source_type)
@@ -572,6 +590,8 @@ class MiniAI(
             "perlocution_hint": perlocution_hint,
             "self_disclosure_hint": disclosure_hint,
             "memory_context": memory_context,
+            "kg_hint": kg_hint,
+            "kg_context": kg_context,
         }
         self.current_vbrain = self._call_and_parse_vbrain(
             api_messages, dynamic_temp, dynamic_max_tokens, prompt_args
@@ -596,6 +616,60 @@ class MiniAI(
     def emotion_from_state(self): return self.emotion.emotion_from_state()
 
 
+
+    # ------------------------------------------------------------------ #
+    # Knowledge Graph helpers                                              #
+    # ------------------------------------------------------------------ #
+
+    _KG_CONFIRM_PAT = re.compile(
+        r"(?:đúng rồi|chính xác|đúng vậy|xác nhận|nhớ đi|lưu lại|correct|yes|yeah|right)",
+        re.I,
+    )
+    _KG_DENY_PAT = re.compile(
+        r"(?:không đúng|sai rồi|không phải|đừng lưu|thôi|wrong|no|nah|forget it)",
+        re.I,
+    )
+
+    def _handle_kg_flow(
+        self, user_input: str, source_type: str, sender_name: str
+    ) -> str | None:
+        """
+        1. Nếu đang có pending — kiểm tra confirm/deny từ owner.
+        2. Nếu không — thử detect teaching intent và extract.
+        Trả về một gợi ý cho Lyra (để inject vào situation).
+        """
+        hint: str | None = None
+
+        # Bước 1: Xử lý pending confirmation
+        if self._kg_pending:
+            pending_id = self._kg_pending["pending_id"]
+
+            if source_type == "owner" or self._kg_pending.get("sender") == sender_name:
+                if self._KG_CONFIRM_PAT.search(user_input):
+                    ok = kg.confirm_pending(pending_id)
+                    self._kg_pending = None
+                    if ok:
+                        hint = "[KG] Lyra vừa lưu kiến thức mới vào bộ nhớ. Có thể nhắc nhẹ rằng em đã ghi nhớ rồi."
+                    return hint
+
+                elif self._KG_DENY_PAT.search(user_input):
+                    kg.deny_pending(pending_id)
+                    self._kg_pending = None
+                    hint = "[KG] Thông tin vừa rồi đã bị huỷ, không lưu."
+                    return hint
+
+        # Bước 2: Detect teaching intent trong tin nhắn mới
+        pending = kg.maybe_extract(user_input, sender_name, source_type)
+        if pending:
+            self._kg_pending = pending
+            # Gợi ý Lyra hỏi xác nhận
+            hint = (
+                f"[KG] '{pending['sender']}' có vẻ đang dạy Lyra kiến thức mới. "
+                f"Hãy hỏi xác nhận một cách tự nhiên, ví dụ: 'Ủa thật không? "
+                f"Nếu đúng thì em ghi nhớ nhé!'"
+            )
+
+        return hint
 
     def _reflect_on_session(self):
         """Mid-session reflection loop to generate high-level insights."""

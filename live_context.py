@@ -7,7 +7,7 @@ import json
 import os
 import threading
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LIVE_CONTEXT_PATH = os.path.join(BASE_DIR, "live_context.json")
@@ -80,6 +80,7 @@ def get_default_context() -> Dict[str, Any]:
         "current_insights": [],
         "stream_plan": [],
         "expires_after_minutes": DEFAULT_CONTEXT_TTL_MINUTES,
+        "donations_this_stream": [],   # ← danh sách donation trong session
     }
 
 
@@ -231,6 +232,11 @@ def get_live_context_block(max_lines: int = 6) -> str:
 # Convenience wrappers for common updates
 
 
+def get_donations_this_stream() -> List[Dict[str, str]]:
+    """Lấy danh sách donation của stream hiện tại (để truyền vào diary)."""
+    return load_live_context().get("donations_this_stream", [])
+
+
 def set_stream_active(active: bool, focus: str = "") -> None:
     """Called on stream start/stop."""
     update_multiple(
@@ -249,13 +255,22 @@ def set_stream_active(active: bool, focus: str = "") -> None:
 def record_donation(viewer_name: str, amount: str) -> None:
     """Call when a donor sends a message or Super Chat arrives."""
     update_field("latest_event", f"{viewer_name} donated {amount}", ttl_minutes=5)
-    # Add to priority mentions
     data = load_live_context()
+
+    # priority_mentions để inject vào prompt
     mentions = data.get("priority_mentions", [])
     mentions.append(f"Thank {viewer_name} for {amount} donation")
-    # Keep last 5
     update_field("priority_mentions", mentions[-5:], ttl_minutes=10)
     update_field("energy_label", "high", ttl_minutes=15)
+
+    # donations_this_stream — persist cho diary/tổng kết cuối stream
+    donations = data.get("donations_this_stream", [])
+    donations.append({
+        "viewer_name": viewer_name,
+        "amount":      amount,
+        "at":          _now_iso(),
+    })
+    update_field("donations_this_stream", donations)
 
 
 def record_regular_arrival(

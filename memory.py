@@ -330,9 +330,12 @@ class MemorySystem:
                 c.execute("INSERT INTO memory_items (kind,value,layer,weight,saliency,importance,source_turn,last_used_at,embedding) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(kind,value) DO UPDATE SET superseded=0, last_used_at=excluded.last_used_at, embedding=excluded.embedding", (kind, text, layer, weight, saliency, importance_val, self.turn_counter, now, emb_blob))
                 conn.commit()
                 
-                if layer == LAYER_TEMPORAL and self.pinecone._enabled:
+                # L1 (LAYER_USER) cũng được index lên Pinecone nếu saliency đủ cao
+                # Điều kiện: saliency >= 3 để tránh rác
+                if self.pinecone._enabled and saliency >= 3:
                     row = c.execute("SELECT id FROM memory_items WHERE kind=? AND value=?", (kind, text)).fetchone()
-                    if row: self._upsert_pinecone_async(row["id"], kind, text, saliency)
+                    if row:
+                        self._upsert_pinecone_async(row["id"], kind, text, saliency)
         except Exception as e: print(f"[Memory] add_item error: {e}")
 
     def _upsert_pinecone_async(self, item_id, kind, text, saliency):
@@ -715,24 +718,40 @@ class MemorySystem:
                 return True
             except Exception: return False
 
-    def extract_candidates_heuristic(self, text):
-        """Fast heuristic-based memory extraction."""
+    # ------------------------------------------------------------------ #
+    # Heuristic extraction — có dấu tiếng Việt đầy đủ                    #
+    # ------------------------------------------------------------------ #
+    _LIKE_PAT    = re.compile(r"(?:thích|yêu|mê|khoái|thik|ưa)\s+([^,!?.\n]{2,40})", re.I)
+    _DISLIKE_PAT = re.compile(r"(?:ghét|không thích|ngán|sợ|chán)\s+([^,!?.\n]{2,40})", re.I)
+    _GOAL_PAT    = re.compile(r"(?:muốn|định|sẽ|kế hoạch|dự định|ước)\s+([^,!?.\n]{2,40})", re.I)
+    _NAME_PAT    = re.compile(
+        r"(?:tên m[iì]nh|tên tao|gọi m[iì]nh là|tên tôi là|my name is|call me)\s+([\w]{2,20})",
+        re.I,
+    )
+
+    def extract_candidates_heuristic(self, text: str) -> list[dict]:
+        """Fast heuristic-based memory extraction — hỗ trợ tiếng Việt có dấu."""
         candidates = []
-        text_lower = text.lower()
-        
-        # Simple patterns for likes/dislikes
-        if re.search(r"\b(thich|yeu|me|khoai)\b", text_lower):
-            m = re.search(r"(?:thich|yeu|me|khoai)\s+([^\s,!?.]+)", text_lower)
-            if m: candidates.append({"kind": "like", "value": m.group(1), "saliency": 3})
-            
-        if re.search(r"\b(ghet|khong thich|so)\b", text_lower):
-            m = re.search(r"(?:ghet|khong thich|so)\s+([^\s,!?.]+)", text_lower)
-            if m: candidates.append({"kind": "dislike", "value": m.group(1), "saliency": 3})
-            
-        if re.search(r"\b(muon|dinh|se|ke hoach)\b", text_lower):
-            m = re.search(r"(?:muon|dinh|se|ke hoach)\s+([^\s,!?.]+)", text_lower)
-            if m: candidates.append({"kind": "goal", "value": m.group(1), "saliency": 4})
-            
+
+        for pat, kind, sal in [
+            (self._LIKE_PAT,    "like",    3),
+            (self._DISLIKE_PAT, "dislike", 3),
+            (self._GOAL_PAT,    "goal",    4),
+        ]:
+            m = pat.search(text)
+            if m:
+                val = m.group(1).strip().rstrip(".,!?")
+                if len(val) >= 2:
+                    candidates.append({"kind": kind, "value": val, "saliency": sal})
+
+        # Tên người dùng
+        m = self._NAME_PAT.search(text)
+        if m:
+            name = m.group(1).strip()
+            skip = {"lyra", "ai", "bot", "an", "the", "not"}
+            if name.lower() not in skip:
+                candidates.append({"kind": "profile_name", "value": name, "saliency": 5})
+
         return candidates
 
     def buffer_candidate(self, kind, value, saliency=None):
@@ -749,7 +768,9 @@ class MemorySystem:
 
     def should_flush(self, intent):
         """Decides if we should flush the buffer now."""
-        # Flush every few turns or on important intents
         if intent in ("introduction", "suggestion") or len(self.memory_buffer) >= 3:
+            return True
+        # Fallback: flush nếu buffer đã có ≥ 2 item dù intent là gì
+        if len(self.memory_buffer) >= 2:
             return True
         return False

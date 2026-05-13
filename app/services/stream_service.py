@@ -171,16 +171,66 @@ class StreamService:
             "new_viewer_interval_s": self.new_viewer_interval,
         }
 
+# ------------------------------------------------------------------ #
+    # Spam filter                                                          #
+    # ------------------------------------------------------------------ #
+
+    # Từ khoá xấu — tiếng Việt lẫn tiếng Anh, thêm tuỳ ý
+    _BAD_KEYWORDS: frozenset[str] = frozenset([
+        "dụ", "đm", "cc", "dm", "clm", "vcl", "vkl", "wtf", "fuck", "shit",
+        "kill", "chết đi", "stupid", "idiot", "trash", "spam", "sub4sub",
+        "t.me/", "discord.gg/", "bit.ly/", "tinyurl",
+    ])
+    _MIN_MSG_LEN:   int   = 2    # bỏ qua tin quá ngắn
+    _MAX_EMOJI_RATIO: float = 0.7  # bỏ qua tin toàn emoji
+
+    def _is_spam(self, message: str) -> bool:
+        """
+        Kiểm tra nhanh (rule-based, không dùng LLM).
+        Return True nếu tin nhắn nên bị bỏ qua.
+        """
+        if not message:
+            return True
+        text = message.strip()
+
+        # Quá ngắn
+        if len(text) < self._MIN_MSG_LEN:
+            return True
+
+        text_lower = text.lower()
+
+        # Từ khoá xấu
+        for kw in self._BAD_KEYWORDS:
+            if kw in text_lower:
+                return True
+
+        # Spam các ký tự lặp (vd: "aaaaaaaaaa", "!!!!!!!!")
+        if len(set(text_lower.replace(" ", ""))) <= 2 and len(text) > 6:
+            return True
+
+        # Tỉ lệ emoji quá cao — đếm ký tự không phải ASCII và không phải tiếng Việt
+        non_text = sum(1 for c in text if ord(c) > 0x2000)
+        if len(text) > 4 and non_text / len(text) >= self._MAX_EMOJI_RATIO:
+            return True
+
+        return False
+
     # ------------------------------------------------------------------ #
     # Enqueue                                                              #
     # ------------------------------------------------------------------ #
 
     def enqueue_event(self, chat_event: dict) -> None:
-        """Phân loại event và đẩy vào đúng tier queue."""
+        """Filter spam, phân loại event và đẩy vào đúng tier queue."""
+        message   = chat_event.get("message", "")
+        is_owner  = chat_event.get("is_owner", False)
+        is_donor  = chat_event.get("is_donor", False)
+
+        # Donor và owner luôn được xử lý, không filter spam
+        if not is_owner and not is_donor and self._is_spam(message):
+            return
+
         sender_id = chat_event.get("sender_id", "")
         platform  = chat_event.get("platform", "youtube")
-        is_donor  = chat_event.get("is_donor", False)
-        is_owner  = chat_event.get("is_owner", False)
 
         regular = self._viewer_tracker.is_regular_viewer(sender_id, platform)
 
@@ -194,7 +244,8 @@ class StreamService:
         else:
             tier = "new_viewer"
 
-        chat_event["_tier"] = tier
+        chat_event["_tier"]        = tier
+        chat_event["_enqueued_at"] = time.time()   # ← TTL timestamp
 
         if tier == "new_viewer":
             with self._pool_lock:
@@ -279,23 +330,68 @@ class StreamService:
                 print(f"[StreamService] consumer error: {e}")
                 time.sleep(1)
 
-    def _pick_next_event(self) -> dict | None:
-        # Tier 0: owner
-        for tier in ("owner", "donor", "regular_viewer"):
-            try:
-                return self._queues[tier].get_nowait()
-            except queue.Empty:
-                pass
+    # TTL cho tin non-donor chờ trong queue (giây)
+    _MSG_TTL_S: float = 120.0  # 2 phút
+    # Tỷ lệ chọn regular_viewer vs new_viewer (khi cả 2 có người)
+    _REGULAR_WEIGHT: float = 0.75
 
-        # Tier 3: random new_viewer theo interval
+    def _pick_next_event(self) -> dict | None:
+        """
+        Ưu tiên: donor → owner → weighted(regular 75%, new 25%) → None
+        Non-donor messages quá TTL bị skip.
+        """
         now = time.time()
-        if (now - self._last_new_viewer_pick) >= self.new_viewer_interval:
+
+        # Tier 1: donor — phải trả lời tất cả
+        try:
+            return self._queues["donor"].get_nowait()
+        except queue.Empty:
+            pass
+
+        # Tier 2: owner
+        try:
+            return self._queues["owner"].get_nowait()
+        except queue.Empty:
+            pass
+
+        # Tier 3: weighted random giữa regular_viewer và new_viewer
+        has_regular  = not self._queues["regular_viewer"].empty()
+        with self._pool_lock:
+            pool_ready = (
+                len(self._new_viewer_pool) > 0
+                and (now - self._last_new_viewer_pick) >= self.new_viewer_interval
+            )
+
+        if has_regular or pool_ready:
+            # Quyết định chọn tier
+            if has_regular and pool_ready:
+                pick_regular = random.random() < self._REGULAR_WEIGHT
+            else:
+                pick_regular = has_regular
+
+            if pick_regular:
+                # Drain regular queue, skip tin quá TTL
+                while True:
+                    try:
+                        event = self._queues["regular_viewer"].get_nowait()
+                        age = now - event.get("_enqueued_at", now)
+                        if age <= self._MSG_TTL_S:
+                            return event
+                        print(
+                            f"[StreamService] regular_viewer TTL expired ({age:.0f}s), "
+                            f"skip: {event.get('sender_name')}"
+                        )
+                    except queue.Empty:
+                        break
+                # Sau khi drain hết — fallback sang new_viewer nếu có
+                if not pool_ready:
+                    return None
+
+            # Pick new_viewer
             with self._pool_lock:
-                pool_copy = list(self._new_viewer_pool)
-                if pool_copy:
-                    event = random.choice(pool_copy)
-                    if event in self._new_viewer_pool:
-                        self._new_viewer_pool.remove(event)
+                if self._new_viewer_pool:
+                    event = random.choice(self._new_viewer_pool)
+                    self._new_viewer_pool.remove(event)
                     self._last_new_viewer_pick = now
                     return event
 

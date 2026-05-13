@@ -173,28 +173,48 @@ class MemoryHandlerMixin:
         """Generates a secret diary entry for the session."""
         try:
             print("[MemoryHandler] Writing diary entry...")
+
             # 1. Gather session highlights
-            recent_convo = "\n".join([f"{'User' if m['role'] == 'user' else 'Lyra'}: {m['content']}" for m in self.messages[-15:]])
+            recent_convo = "\n".join([
+                f"{'User' if m['role'] == 'user' else 'Lyra'}: {m['content']}"
+                for m in self.messages[-15:]
+            ])
             session_items = "\n".join([f"- {i['value']}" for i in self.memory._session_items])
             emotion_state = self.emotion.describe_internal_state()
-            
+
+            # 2. Donation summary cho stream session
+            try:
+                from live_context import get_donations_this_stream
+                donations = get_donations_this_stream()
+            except Exception:
+                donations = []
+
+            donation_block = ""
+            if donations:
+                lines = [f"  - {d['viewer_name']}: {d['amount']}" for d in donations]
+                donation_block = (
+                    f"\n\nDonate trong buổi stream hôm nay ({len(donations)} người):\n"
+                    + "\n".join(lines)
+                )
+
             prompt = (
                 f"{DIARY_GENERATION_PROMPT}\n\n"
                 f"Lịch sử chat gần đây:\n{recent_convo}\n\n"
-                f"Các sự kiện trong phiên chat:\n{session_items}\n\n"
+                f"Các sự kiện trong phiên chat:\n{session_items}"
+                f"{donation_block}\n\n"
                 f"Trạng thái nội tâm cuối cùng: {emotion_state}"
             )
-            
+
             raw = self._call_light_model([
                 {"role": "system", "content": "Bạn là tiềm thức của Lyra. Viết nhật ký bí mật bằng tiếng Việt."},
-                {"role": "user", "content": prompt}
+                {"role": "user",   "content": prompt}
             ], temperature=0.7, max_tokens=350, provider="openrouter")
-            
+
             if raw:
-                # Clean markdown tags
                 raw = re.sub(r"```.*?```", "", raw, flags=re.DOTALL).strip()
                 self.memory.add_diary_entry(raw, mood=self.emotion.mood, affection=self.emotion.affection)
-                self._diary_hint_cache = None # Invalidate cache for prompt builder
-                print(f"✓ Diary entry saved ({len(raw)} chars)")
+                self._diary_hint_cache = None  # Invalidate cache
+                print(f"✓ Diary entry saved ({len(raw)} chars)"
+                      + (f" | {len(donations)} donations recorded" if donations else ""))
         except Exception as e:
             print(f"[MemoryHandler] Diary error: {e}")
