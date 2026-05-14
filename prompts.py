@@ -265,8 +265,8 @@ Thông tin stream:
 - Mục tiêu: {goals}
 - Ghi chú thêm: {notes}
 
-Yêu cầu: Viết 1-2 câu ngắn, không dùng từ ngữ robot, KHÔNG xưng "tôi" hay "mình". Trả về văn bản thuần.
-VÍ DỤ: "Em là Lyra, em 16 tuổi. Em rất vui được trò chuyện với mọi người."
+Yêu cầu: Viết ĐÚNG 1 câu ngắn duy nhất, không dùng từ ngữ robot, KHÔNG xưng "tôi" hay "mình". Trả về văn bản thuần.
+VÍ DỤ: "Em là Lyra, chào mọi người, stream bắt đầu rồi nha!"
 """
 
 STREAM_FAREWELL_PROMPT = """
@@ -276,8 +276,8 @@ Diễn biến stream:
 - Người xem nổi bật: {top_viewers}
 - Thời gian đã stream: {duration}
 
-Yêu cầu: Viết 1-2 câu tình cảm, cảm ơn mọi người. KHÔNG xưng "tôi" hay "mình". Trả về văn bản thuần.
-VÍ DỤ: "Em cảm ơn mọi người đã dành thời gian để xem stream của em", "Tạm biệt mọi người, có một buổi tối vui vẻ nhé."
+Yêu cầu: Viết ĐÚNG 1 câu tình cảm duy nhất, cảm ơn mọi người. KHÔNG xưng "tôi" hay "mình". Trả về văn bản thuần.
+VÍ DỤ: "Tạm biệt mọi người, hôm nay vui lắm, hẹn gặp lại nhé!"
 """
 
 PROACTIVE_STREAM_PROMPT = """

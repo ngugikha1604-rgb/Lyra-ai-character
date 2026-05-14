@@ -90,13 +90,13 @@ def speak():
         # Prosody speed mapping: attention → Edge TTS rate string
         attention = lyra_ai.emotion.attention
         if attention <= 2:
-            tts_rate = "-10%"
-        elif attention <= 4:
             tts_rate = "+0%"
-        elif attention >= 8:
-            tts_rate = "+20%"
-        else:
+        elif attention <= 4:
             tts_rate = "+10%"
+        elif attention >= 8:
+            tts_rate = "+30%"
+        else:
+            tts_rate = "+20%"
 
         sentences = split_sentences(text)
         print(f"[TTS] Split thành {len(sentences)} câu: {[s[:30] for s in sentences]}")

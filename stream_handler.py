@@ -102,7 +102,7 @@ class StreamHandlerMixin:
                 # Lower temperature for greetings (0.2) and others (0.3) for stability
                 event_temp = 0.2 if event_type == "greeting" else 0.3
             
-            reply = self._call_light_model(messages, temperature=event_temp, max_tokens=60)
+            reply = self._call_light_model(messages, temperature=event_temp, max_tokens=40)
             return self.clean_reply(reply or "")
         except Exception as e:
             print(f"[Stream Event] generate error: {e}")

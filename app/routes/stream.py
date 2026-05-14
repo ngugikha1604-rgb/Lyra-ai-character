@@ -74,7 +74,7 @@ def _broadcast_stream_greeting(lyra_ai, sse, ai_lock) -> None:
     payload_body = {
         "messages":    messages,
         "temperature": 0.7,
-        "max_tokens":  60,
+        "max_tokens":  40,
     }
 
     greeting_text = None
