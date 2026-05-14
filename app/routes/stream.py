@@ -124,6 +124,8 @@ def _broadcast_stream_greeting(lyra_ai, sse, ai_lock) -> None:
     try:
         with ai_lock:
             emotion = lyra_ai.emotion_from_state() if hasattr(lyra_ai, "emotion_from_state") else "happy"
+            affection_val = int(round(lyra_ai.emotion.affection))
+            mood_val = int(round(lyra_ai.emotion.mood))
         sse.broadcast({
             "reply":       greeting_text,
             "monologue":   "",
@@ -131,8 +133,8 @@ def _broadcast_stream_greeting(lyra_ai, sse, ai_lock) -> None:
             "action":      "GREET",
             "source_type": "system",
             "sender_name": "Lyra",
-            "affection":   int(round(lyra_ai.affection)),
-            "mood":        int(round(lyra_ai.mood)),
+            "affection":   affection_val,
+            "mood":        mood_val,
         })
         print("[StreamGreeting] Broadcast OK")
     except Exception as e:

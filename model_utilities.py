@@ -283,26 +283,22 @@ class ModelUtilityMixin:
         ]
 
     def _call_chat_model(self, messages, temperature=0.8, max_tokens=250):
-        """Call main chat model qua Ollama local, fallback về 9router nếu Ollama không chạy."""
-        # 1. Thử gọi với full messages trước để giữ context tối đa
-        res = self._clients['ollama_chat'].call(messages, temperature=temperature, max_tokens=max_tokens)
+        """Call main chat model qua 9router (Groq primary), fallback về qwen0.5b local nếu cần."""
+        # 1. Primary: Groq qua 9router — nhanh, không tốn RAM local
+        res = self._clients['router9'].call(messages, model=f"groq/{TRANSLATE_MODEL}", temperature=temperature, max_tokens=max_tokens)
         if res:
             return res
 
-        # 2. Nếu fail (có thể do quá dài), thử compact context
+        # 2. Fallback: qwen0.5b local — nhẹ, chạy được khi stream VTS+OBS
+        print("[Chat] Groq không available, fallback qwen0.5b local")
         compact_messages = self._compact_chat_messages(messages)
-        res = self._clients['ollama_chat'].call(compact_messages, temperature=temperature, max_tokens=min(max_tokens, 180))
-        if res:
-            return res
-
-        # 3. Fallback xuống light model (Ollama) nếu chat model chết
         res = self._clients['ollama_light'].call(compact_messages, temperature=temperature, max_tokens=min(max_tokens, 120))
         if res:
             return res
 
-        # 4. Fallback cuối cùng về 9router với Groq
-        print("[Chat] Ollama hoàn toàn không available, fallback 9router groq")
-        return self._clients['router9'].call(compact_messages, model=f"groq/{TRANSLATE_MODEL}", temperature=temperature, max_tokens=max_tokens)
+        # 3. Last resort: Gemini
+        print("[Chat] qwen0.5b không available, thử Gemini")
+        return self._clients['router9'].call(compact_messages, model=f"gemini/{GEMINI_MODELS[0]}", temperature=temperature, max_tokens=max_tokens)
 
     def _call_groq_model(self, messages, temperature=0.4, max_tokens=400):
         """Call Groq model qua 9router."""

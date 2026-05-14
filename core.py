@@ -77,6 +77,7 @@ class MiniAI(
         self.is_streaming = False
         self.stream_turn_counter = 0
         self._last_viewer_message_time = None
+        self._skip_next_memory_extraction = False
         
         self.messages = self.memory.memory.get("conversation", {}).get("conversation_thread", [])
         self.recent_responses = []
@@ -158,6 +159,13 @@ class MiniAI(
     @property
     def turn_counter(self):
         return self.memory.memory["conversation"].get("total_messages", 0)
+
+    @property
+    def affection(self): return self.emotion.affection
+    @property
+    def mood(self): return self.emotion.mood
+    @property
+    def attention(self): return self.emotion.attention
 
     @turn_counter.setter
     def turn_counter(self, value):
@@ -471,8 +479,8 @@ class MiniAI(
         return parsed
 
     def _enqueue_memory_extraction(self, user_input, intent, source_type):
-        if getattr(self._thread_local, "skip_memory_extraction", False):
-            self._thread_local.skip_memory_extraction = False
+        if self._skip_next_memory_extraction:
+            self._skip_next_memory_extraction = False
             return
         enqueue(PRIORITY_CRITICAL, self.extract_memory, user_input, intent, source_type)
 

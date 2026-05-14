@@ -57,10 +57,10 @@ class StreamHandlerMixin:
 
         if event_type == "greeting":
             prompt_text = STREAM_GREETING_PROMPT.format(
-                title="stream hôm nay",
-                game="chuyện phiếm",
-                goals="tâm sự với viewer",
-                notes="",
+                title=STREAM_TITLE or "stream hôm nay",
+                game=STREAM_GAME or "chuyện phiếm",
+                goals=", ".join(STREAM_GOALS) if STREAM_GOALS else "tâm sự với viewer",
+                notes=STREAM_NOTES or "",
             )
             messages = [
                 {"role": "system", "content": STREAM_EVENT_SYSTEM},

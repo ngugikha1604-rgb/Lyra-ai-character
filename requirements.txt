@@ -14,3 +14,4 @@ flask-limiter
 pydub
 sounddevice
 dspy-ai
+edge-tts

@@ -100,7 +100,7 @@ def proactive():
         if not msg:
             return jsonify({"message": None, "should_show": False})
 
-        lyra_ai.memory["time_tracking"]["last_message_time"] = datetime.now(
+        lyra_ai.memory.memory["time_tracking"]["last_message_time"] = datetime.now(
             pytz.timezone("Asia/Ho_Chi_Minh")
         ).isoformat()
         lyra_ai.memory._is_dirty = True
