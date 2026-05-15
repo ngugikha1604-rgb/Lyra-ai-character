@@ -135,6 +135,7 @@ class MemorySystem:
             CREATE TABLE IF NOT EXISTS stream_milestones (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, description TEXT NOT NULL, achieved_at TEXT NOT NULL, stream_title TEXT DEFAULT '', peak_viewers INTEGER DEFAULT 0, UNIQUE(event_type));
             CREATE TABLE IF NOT EXISTS memory_conflicts (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, old_value TEXT NOT NULL, new_value TEXT NOT NULL, resolved_at TEXT NOT NULL, note TEXT DEFAULT '');
             CREATE TABLE IF NOT EXISTS diaries (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL, mood_score REAL, affection_score REAL, timestamp TEXT DEFAULT (datetime('now')));
+            CREATE INDEX IF NOT EXISTS idx_memory_consolidate ON memory_items(layer, superseded, last_used_at, access_count, saliency);
         """)
         # Migrations
         existing_cols = {row[1] for row in c.execute("PRAGMA table_info(memory_items)")}

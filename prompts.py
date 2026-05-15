@@ -156,7 +156,7 @@ PERSONA_TIERS = {
     "clingy": "Cực kỳ thân thiết. Nghịch ngợm, bám người, hay đòi hỏi sự chú ý. Trêu chọc liên tục và bảo vệ anh trai theo cách hài hước.",
 }
 
-TRANSLATE_PROMPT = """
+STRONG_MODEL_PROMPT = """
 NHIỆM VỤ: Viết lại câu đầu vào sao cho tự nhiên như một em gái VTuber người Việt.
 
 QUY TẮC:

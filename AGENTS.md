@@ -153,7 +153,7 @@ The system uses multiple LLM providers with distinct roles:
 |------|----------|-------|------------|
 | **Primary (Brain)** | Ollama local | `subsect/riko-qwen4b-q4:latest` | `CHAT_MODEL` |
 | **Light tasks** (memory extract, summarize) | Ollama local | `qwen2.5:0.5b` | `LIGHT_MODEL` |
-| **DSPy Brain / Translate / Polish** | Groq (via 9router) | `llama-3.3-70b-versatile` | `TRANSLATE_MODEL` |
+| **DSPy Brain / Strong Model** | Groq (via 9router) | `llama-3.3-70b-versatile` | `STRONG_MODEL` |
 | **Background / Async tasks** | OpenRouter | `nvidia/nemotron-3-nano-30b-a3b:free` | `OPENROUTER_MODEL` |
 | **Reflection / Planning** | Google Gemini | `gemini-2.5-flash` | `GEMINI_MODELS[0]` |
 | **Embeddings** | Ollama local | `nomic-embed-text` | `EMBEDDING_MODEL` |

@@ -4,7 +4,7 @@ import requests
 from config import (
     GROQ_API_KEY,
     LIGHT_MODEL, CHAT_MODEL, LIGHT_BASE_URL, CHAT_BASE_URL,
-    TRANSLATE_MODEL, TRANSLATE_BASE_URL, SEARCH_ENABLED,
+    STRONG_MODEL, LIGHT_GROQ_MODEL, STRONG_BASE_URL, SEARCH_ENABLED,
     OPENROUTER_API_KEY, OPENROUTER_MODEL, OPENROUTER_BASE_URL,
     GEMINI_API_KEY, GEMINI_MODELS, GEMINI_BASE_URL,
     ROUTER9_BASE_URL, ROUTER9_API_KEY
@@ -197,9 +197,9 @@ class GroqClient(BaseLLMClient):
         backoff = 2.0
         for attempt in range(3):
             try:
-                data = {"model": TRANSLATE_MODEL, "messages": messages, "temperature": temperature, "max_tokens": max_tokens, "top_p": 0.9}
+                data = {"model": STRONG_MODEL, "messages": messages, "temperature": temperature, "max_tokens": max_tokens, "top_p": 0.9}
                 start_time = time.time()
-                response = self.session.post(TRANSLATE_BASE_URL, headers=headers, json=data, timeout=60, verify=False)
+                response = self.session.post(STRONG_BASE_URL, headers=headers, json=data, timeout=60, verify=False)
                 duration = time.time() - start_time
                 if response.status_code == 429:
                     wait = max(float(response.headers.get("retry-after", backoff)), backoff)
@@ -238,7 +238,7 @@ class ModelUtilityMixin:
             }
         return self._llm_clients
 
-    def _call_light_model(self, messages, temperature=0.3, max_tokens=200, provider="gemini"):
+    def _call_light_model(self, messages, temperature=0.3, max_tokens=200, provider="groq"):
         """Call light model qua 9router. Default provider là groq — nhanh và không cần Ollama."""
         # Nếu explicitly muốn Ollama local thì thử trước
         if provider == "ollama":
@@ -246,21 +246,20 @@ class ModelUtilityMixin:
             if res:
                 return res
             # Ollama fail — fallback xuống 9router groq ngay, không thử các ollama khác
-            return self._clients['router9'].call(messages, model=f"groq/{TRANSLATE_MODEL}", temperature=temperature, max_tokens=max_tokens)
+            return self._clients['router9'].call(messages, model=f"groq/{LIGHT_GROQ_MODEL}", temperature=temperature, max_tokens=max_tokens)
 
         # Map provider sang model name đúng format của 9router
         model_map = {
-            "ollama": f"ollama-local/{LIGHT_MODEL}",
             "openrouter": f"openrouter/{OPENROUTER_MODEL}",
             "gemini": f"gemini/{GEMINI_MODELS[0]}",
-            "groq": f"groq/{TRANSLATE_MODEL}"
+            "groq": f"groq/{LIGHT_GROQ_MODEL}"
         }
-        model = model_map.get(provider, f"groq/{TRANSLATE_MODEL}")
+        model = model_map.get(provider, f"groq/{LIGHT_GROQ_MODEL}")
         res = self._clients['router9'].call(messages, model=model, temperature=temperature, max_tokens=max_tokens)
         if res: return res
 
         # Fallback thử các provider khác — chỉ dùng provider có trong 9router
-        for fallback_model in [f"groq/{TRANSLATE_MODEL}", f"gemini/{GEMINI_MODELS[0]}", f"openrouter/{OPENROUTER_MODEL}"]:
+        for fallback_model in [f"groq/{LIGHT_GROQ_MODEL}", f"gemini/{GEMINI_MODELS[0]}", f"openrouter/{OPENROUTER_MODEL}"]:
             if fallback_model == model: continue  # bỏ qua model vừa fail
             res = self._clients['router9'].call(messages, model=fallback_model, temperature=temperature, max_tokens=max_tokens)
             if res: return res
@@ -291,7 +290,7 @@ class ModelUtilityMixin:
     def _call_chat_model(self, messages, temperature=0.8, max_tokens=250):
         """Call main chat model qua 9router (Groq primary), fallback về qwen0.5b local nếu cần."""
         # 1. Primary: Groq qua 9router — nhanh, không tốn RAM local
-        res = self._clients['router9'].call(messages, model=f"groq/{TRANSLATE_MODEL}", temperature=temperature, max_tokens=max_tokens)
+        res = self._clients['router9'].call(messages, model=f"groq/{STRONG_MODEL}", temperature=temperature, max_tokens=max_tokens)
         if res:
             return res
 
@@ -308,10 +307,10 @@ class ModelUtilityMixin:
 
     def _call_groq_model(self, messages, temperature=0.4, max_tokens=400):
         """Call Groq model qua 9router."""
-        return self._clients['router9'].call(messages, model=f"groq/{TRANSLATE_MODEL}", temperature=temperature, max_tokens=max_tokens)
+        return self._clients['router9'].call(messages, model=f"groq/{STRONG_MODEL}", temperature=temperature, max_tokens=max_tokens)
 
-    def _translate_response(self, text):
-        """Standardizes translation if needed, currently no-op."""
+    def _polish_response(self, text):
+        """Standardizes polishing if needed, currently no-op."""
         return text
 
     def _should_search(self, user_input):

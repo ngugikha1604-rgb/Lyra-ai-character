@@ -48,7 +48,7 @@ def _get_ollama_embedding(text: str) -> "np.ndarray | None":
     if np is None: return None
     try:
         from config import EMBEDDING_MODEL, EMBEDDING_URL
-        resp = requests.post(EMBEDDING_URL, json={"model": EMBEDDING_MODEL, "prompt": text}, timeout=5, verify=False)
+        resp = requests.post(EMBEDDING_URL, json={"model": EMBEDDING_MODEL, "prompt": text}, timeout=10, verify=False)
         if resp.status_code == 200:
             vec = resp.json().get("embedding")
             if vec: return np.array(vec, dtype=np.float32)

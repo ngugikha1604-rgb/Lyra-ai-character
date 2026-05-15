@@ -54,7 +54,7 @@ class MiniAI(
         self.model = CHAT_MODEL
         self.timeout = 45
         self.headers = {"Content-Type": "application/json"}
-        self._translate_headers = {
+        self._strong_headers = {
             "Authorization": f"Bearer {GROQ_API_KEY}",
             "Content-Type": "application/json",
         }
@@ -113,13 +113,13 @@ class MiniAI(
                 raise RuntimeError(f"9router is not reachable at {ROUTER9_BASE_URL}")
 
             self.dspy_lm = dspy.LM(
-                f"openai/groq/{TRANSLATE_MODEL}",
+                f"openai/groq/{STRONG_MODEL}",
                 api_base=ROUTER9_BASE_URL,
                 api_key=ROUTER9_API_KEY or "router9-local",
                 max_tokens=600,
                 temperature=0.8,
             )
-            print(f"[Core] DSPy using 9router → model: groq/{TRANSLATE_MODEL}")
+            print(f"[Core] DSPy using 9router → model: groq/{STRONG_MODEL}")
             
             dspy.configure(lm=self.dspy_lm)
             

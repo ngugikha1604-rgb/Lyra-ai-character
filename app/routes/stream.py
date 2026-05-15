@@ -42,7 +42,7 @@ def _broadcast_stream_greeting(lyra_ai, sse, ai_lock) -> None:
     import requests
     from config import (
         GEMINI_API_KEY, GEMINI_BASE_URL,
-        GROQ_API_KEY, TRANSLATE_BASE_URL, TRANSLATE_MODEL,
+        GROQ_API_KEY, STRONG_BASE_URL, STRONG_MODEL,
         STREAM_TITLE,
     )
     from prompts import STREAM_GREETING_PROMPT
@@ -101,12 +101,12 @@ def _broadcast_stream_greeting(lyra_ai, sse, ai_lock) -> None:
     if not greeting_text and GROQ_API_KEY:
         try:
             resp = requests.post(
-                TRANSLATE_BASE_URL,
+                STRONG_BASE_URL,
                 headers={
                     "Authorization": f"Bearer {GROQ_API_KEY}",
                     "Content-Type":  "application/json",
                 },
-                json={"model": TRANSLATE_MODEL, **payload_body},
+                json={"model": STRONG_MODEL, **payload_body},
                 timeout=8,
             )
             if resp.ok:

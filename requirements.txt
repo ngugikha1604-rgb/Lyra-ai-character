@@ -3,7 +3,6 @@ pytz
 flask
 flask-session
 python-dotenv
-sentence-transformers
 numpy
 ddgs
 google-api-python-client

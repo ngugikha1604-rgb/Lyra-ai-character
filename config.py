@@ -14,10 +14,11 @@ CHAT_FALLBACK_MODELS = []  # no fallback for local
 LIGHT_MODEL = "qwen2.5:0.5b"   # VD: qwen2.5:0.5b, tinyllama, phi3:mini
 LIGHT_BASE_URL = "http://localhost:11434/api/chat"  # Cùng Ollama endpoint
 
-# ── Translate / polish model (Groq) ───────────────────────────────────────────
+# ── Strong Model (Groq) — Primary brain for complex reasoning ──────────────────
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-TRANSLATE_MODEL = "llama-3.3-70b-versatile"
-TRANSLATE_BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
+STRONG_MODEL = "llama-3.3-70b-versatile"
+LIGHT_GROQ_MODEL = "llama-3.1-8b-instant"
+STRONG_BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # ── Async / Background Task Models (OpenRouter & Gemini) ──────────────────────
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -55,7 +56,7 @@ EDGE_TTS_PITCH = "+50Hz"   # giọng trẻ hơn một chút, thay cho pydub pitc
 DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
 FLASK_SECRET_KEY = os.environ.get("FLASK_SECRET_KEY", "lyra-default-secret")
 
-TRANSLATE_ENABLED = True
+STRONG_MODEL_ENABLED = True
 SEARCH_ENABLED = True
 
 # ── Stream Content ─────────────────────────────────────────────────────────────
