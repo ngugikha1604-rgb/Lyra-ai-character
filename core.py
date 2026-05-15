@@ -77,6 +77,7 @@ class MiniAI(
         self.is_streaming = False
         self.stream_turn_counter = 0
         self._last_viewer_message_time = None
+        self._skip_next_memory_extraction = False
         
         self.messages = self.memory.memory.get("conversation", {}).get("conversation_thread", [])
         self.recent_responses = []
@@ -123,6 +124,16 @@ class MiniAI(
             dspy.configure(lm=self.dspy_lm)
             
             self.brain = LyraBrain()
+            
+            # Additional LM for Stream Viewers (Lighter model to save Groq TPM)
+            self.dspy_lm_stream = dspy.LM(
+                "openai/groq/llama-3.1-8b-instant",
+                api_base=ROUTER9_BASE_URL,
+                api_key=ROUTER9_API_KEY or "router9-local",
+                max_tokens=250,
+                temperature=0.8,
+            )
+
             compiled_path = os.path.join(BASE_DIR, "lyra_compiled.json")
             if os.path.exists(compiled_path):
                 self.brain.load(compiled_path)
@@ -158,6 +169,13 @@ class MiniAI(
     @property
     def turn_counter(self):
         return self.memory.memory["conversation"].get("total_messages", 0)
+
+    @property
+    def affection(self): return self.emotion.affection
+    @property
+    def mood(self): return self.emotion.mood
+    @property
+    def attention(self): return self.emotion.attention
 
     @turn_counter.setter
     def turn_counter(self, value):
@@ -401,9 +419,15 @@ class MiniAI(
                 user_msg = api_messages[-1]["content"]
 
                 start_brain = time.time()
-                with dspy.context(lm=self.dspy_lm):
+                
+                # Determine which model to use (Viewer = 8B, Owner = 70B)
+                source_type = prompt_args.get("base", [None, None, None, "owner"])[3]
+                target_lm = self.dspy_lm_stream if source_type != "owner" else self.dspy_lm
+                
+                # Pass dynamic max_tokens override to save output tokens
+                with dspy.context(lm=target_lm.copy(max_tokens=dynamic_max_tokens)):
                     result = self._call_brain(prompt_args["structured"], history_str, user_msg)
-                print(f"[Brain] Main generation took {time.time() - start_brain:.2f}s")
+                print(f"[Brain] Main generation ({source_type}) took {time.time() - start_brain:.2f}s")
                 parsed = self._parse_brain_result(result)
 
             except Exception as e:
@@ -454,9 +478,13 @@ class MiniAI(
                     history_str = "\n".join([f"{m['role']}: {m['content']}" for m in api_messages[1:-1]])
                     user_msg = api_messages[-1]["content"]
                     start_skill = time.time()
-                    with dspy.context(lm=self.dspy_lm):
+                    
+                    source_type = prompt_args.get("base", [None, None, None, "owner"])[3]
+                    target_lm = self.dspy_lm_stream if source_type != "owner" else self.dspy_lm
+
+                    with dspy.context(lm=target_lm.copy(max_tokens=dynamic_max_tokens)):
                         result = self._call_brain(new_system_prompt, history_str, user_msg)
-                    print(f"[Brain] Skill loop generation took {time.time() - start_skill:.2f}s")
+                    print(f"[Brain] Skill loop generation ({source_type}) took {time.time() - start_skill:.2f}s")
                     parsed = self._parse_brain_result(result)
 
         # 2. VTS Execution (Async/Fire-and-forget for performance)
@@ -471,9 +499,20 @@ class MiniAI(
         return parsed
 
     def _enqueue_memory_extraction(self, user_input, intent, source_type):
-        if getattr(self._thread_local, "skip_memory_extraction", False):
-            self._thread_local.skip_memory_extraction = False
+        if self._skip_next_memory_extraction:
+            self._skip_next_memory_extraction = False
             return
+            
+        # Smart skip: ignore short, trivial interactions
+        word_count = len(user_input.strip().split())
+        trivial_intents = {"greeting", "farewell", "acknowledgement"}
+        if word_count < 4 and intent in trivial_intents:
+            return
+            
+        # During stream, only extract memories for owner
+        if source_type != "owner" and self.is_streaming:
+            return
+
         enqueue(PRIORITY_CRITICAL, self.extract_memory, user_input, intent, source_type)
 
     def _persist_turn(self, user_input, original_reply, source_type="owner", viewer_data=None):

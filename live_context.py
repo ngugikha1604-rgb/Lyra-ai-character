@@ -322,3 +322,12 @@ def update_insights(insights: list[str]) -> None:
 def update_plan(plan_items: list[dict]) -> None:
     """Update dynamic stream plan."""
     update_field("stream_plan", plan_items, ttl_minutes=60)
+def update_stream_info(video_id: str = "", chat_id: str = "") -> None:
+    """Persist stream identifiers so restart can reconnect."""
+    updates = {}
+    if video_id:
+        updates["video_id"] = video_id
+    if chat_id:
+        updates["chat_id"] = chat_id
+    if updates:
+        update_multiple(updates)

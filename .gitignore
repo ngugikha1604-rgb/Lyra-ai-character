@@ -1,6 +1,7 @@
 # Environments
 .env
 .env.*.local
+!.env.example
 
 # Database
 memory.db
@@ -18,17 +19,12 @@ __pycache__/
 .Python
 env/
 venv/
-pip-log.txt
-pip-delete-this-directory.txt
 .venv
-.env
 .tox
 .coverage
 .cache
-nosetests.xml
-coverage.xml
-*,cover
 .hypothesis/
+.ruff_cache/
 
 # Flask
 flask_sessions/
@@ -36,52 +32,44 @@ flask_sessions/
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Project specific
-config.py
-APIkey.txt
-*.bak
+# Project specific credentials (NEVER PUSH THESE)
 client_secret.json
 youtube_credentials.json
 vts_token.json
+APIkey.txt
+*.bak
+
+# Runtime/Ephemeral data
 live_context.json
-PLAN.md
-task.md
- implementation_plan.md
- walkthrough.md
-
-#Models
-models/
-*.safetensors
-
-source_art/
-static/
-
-#Tests
-test_vts.py
-test_stream.py
-test_ollama_conn.py
-
-!.env.example
-
-#Vibe coding
-/.vscode
-/.kilo
-/.kiro
-
-#Check Devices
-check_devices.py
-
-# Compiled DSPy brain (chứa demo/trace từ training, không cần track)
 lyra_compiled.json
-
-# Security & audit logs
 security_audit.log
 *.log
 
-# Ruff cache
-.ruff_cache/
+# Task management (Optional: comment out if you want to push these)
+PLAN.md
+task.md
+implementation_plan.md
+walkthrough.md
 
-# WAL files (SQLite runtime)
-*.db-shm
-*.db-wal
+# Models & Large Assets
+models/
+*.safetensors
+
+# IDE
+.vscode/
+.idea/
+.kilo/
+.kiro/
+
+# Tests & Debug scripts
+test_vts.py
+test_stream.py
+test_ollama_conn.py
+check_devices.py
+debug.py
+
+#Model
+static/
+Lyra_background.png

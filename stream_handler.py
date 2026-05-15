@@ -57,10 +57,10 @@ class StreamHandlerMixin:
 
         if event_type == "greeting":
             prompt_text = STREAM_GREETING_PROMPT.format(
-                title="stream hôm nay",
-                game="chuyện phiếm",
-                goals="tâm sự với viewer",
-                notes="",
+                title=STREAM_TITLE or "stream hôm nay",
+                game=STREAM_GAME or "chuyện phiếm",
+                goals=", ".join(STREAM_GOALS) if STREAM_GOALS else "tâm sự với viewer",
+                notes=STREAM_NOTES or "",
             )
             messages = [
                 {"role": "system", "content": STREAM_EVENT_SYSTEM},
@@ -102,7 +102,7 @@ class StreamHandlerMixin:
                 # Lower temperature for greetings (0.2) and others (0.3) for stability
                 event_temp = 0.2 if event_type == "greeting" else 0.3
             
-            reply = self._call_light_model(messages, temperature=event_temp, max_tokens=60)
+            reply = self._call_light_model(messages, temperature=event_temp, max_tokens=40)
             return self.clean_reply(reply or "")
         except Exception as e:
             print(f"[Stream Event] generate error: {e}")

@@ -21,6 +21,12 @@ def _worker_loop():
     while True:
         try:
             priority, _seq, job = _job_queue.get()
+            
+            # Jitter for non-critical tasks to avoid 429 pile-up
+            if priority >= PRIORITY_NORMAL:
+                import time, random
+                time.sleep(random.uniform(0.5, 2.0))
+
             func, args, kwargs = job
             try:
                 func(*args, **kwargs)

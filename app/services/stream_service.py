@@ -474,7 +474,7 @@ class StreamService:
                 )
 
             if not self._chat_analyzer.should_extract_memory(viewer_info):
-                self._lyra_ai._thread_local.skip_memory_extraction = True
+                self._lyra_ai._skip_next_memory_extraction = True
 
             source_type_val, viewer_data = self._resolve_viewer_data(
                 tier, chat_event, sender_name
