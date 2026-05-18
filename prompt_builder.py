@@ -7,7 +7,8 @@ from prompts import (
 from time_utils import get_time_context
 from live_context import get_live_context_block
 
-TOKEN_BUDGET_SAFE = 1200  # Max safe tokens for small models (~800-1200 effective window)
+TOKEN_BUDGET_SAFE = 1800  # Max safe tokens — bumped from 1200; small models have >=4096 ctx,
+                          # 1800 prompt + ~250 output + ~400 history << 4096
 
 
 class PromptBuilderMixin:
@@ -17,8 +18,12 @@ class PromptBuilderMixin:
     """
 
     def _estimate_tokens(self, text: str) -> int:
-        """Ước tính token count. Tiếng Việt char/3 là tỷ lệ an toàn cho subword tokenizers."""
-        return len(text) // 3
+        """Rough token estimate tuned for mixed Vietnamese/English prompts."""
+        if not text:
+            return 0
+        vi_chars = sum(1 for ch in text if ord(ch) > 127)
+        other_chars = len(text) - vi_chars
+        return max(1, int(vi_chars * 1.1 + other_chars / 4))
 
 
 
@@ -166,8 +171,19 @@ class PromptBuilderMixin:
         _try_add_to_cat(source_context, situation_cat)
         # _stream_ctx được ưu tiên cao — luôn inject trước memory để Lyra biết đang stream gì
         _try_add_to_cat(_stream_ctx, situation_cat)
-        # Cap memory context để không ăn hết budget của stream ctx và hints
-        _capped_memory = full_memory_context[:1200] if full_memory_context else ""
+        # Token-aware memory cap — tránh memory ăn hết budget của hints và stream ctx.
+        # Dùng _estimate_tokens() thay vì char[:1200] vì tiếng Việt có dấu ≈ 1.1 tok/char.
+        _MEM_TOKEN_CAP = 500
+        if full_memory_context:
+            _est = self._estimate_tokens(full_memory_context)
+            if _est > _MEM_TOKEN_CAP:
+                # Slice tỉ lệ để xấp xỉ đúng budget — O(1), không loop
+                _ratio = _MEM_TOKEN_CAP / _est
+                _capped_memory = full_memory_context[:int(len(full_memory_context) * _ratio)].strip()
+            else:
+                _capped_memory = full_memory_context
+        else:
+            _capped_memory = ""
         _try_add_to_cat(_capped_memory, memory_cat)
         _try_add_to_cat(_session_ctx, memory_cat)
 
@@ -271,4 +287,3 @@ class PromptBuilderMixin:
 
         parts.append("</ctx>")
         return f"{user_input}\n\n" + "\n".join(parts)
-

@@ -34,7 +34,7 @@ class OllamaClient(BaseLLMClient):
                 "stream": False,
             }
             start = time.time()
-            response = self.session.post(self.base_url, headers={"Content-Type": "application/json"}, json=data, timeout=self.timeout, verify=False)
+            response = self.session.post(self.base_url, headers={"Content-Type": "application/json"}, json=data, timeout=self.timeout)
             if response.status_code == 200:
                 content = response.json().get("message", {}).get("content", "").strip()
                 if content:
@@ -133,7 +133,7 @@ class Router9Client(BaseLLMClient):
                 "stream": False
             }
             start = time.time()
-            response = self.session.post(f"{ROUTER9_BASE_URL}/chat/completions", headers=headers, json=data, timeout=60, verify=False)
+            response = self.session.post(f"{ROUTER9_BASE_URL}/chat/completions", headers=headers, json=data, timeout=60)
             if response.status_code == 200:
                 # Monitoring Groq Rate Limit Headers forwarded by 9router
                 remaining_req = response.headers.get("x-ratelimit-remaining-requests")
@@ -197,9 +197,9 @@ class GroqClient(BaseLLMClient):
         backoff = 2.0
         for attempt in range(3):
             try:
-                data = {"model": STRONG_MODEL, "messages": messages, "temperature": temperature, "max_tokens": max_tokens, "top_p": 0.9}
+                data = {"model": LIGHT_GROQ_MODEL, "messages": messages, "temperature": temperature, "max_tokens": max_tokens, "top_p": 0.9}
                 start_time = time.time()
-                response = self.session.post(STRONG_BASE_URL, headers=headers, json=data, timeout=60, verify=False)
+                response = self.session.post(STRONG_BASE_URL, headers=headers, json=data, timeout=60)
                 duration = time.time() - start_time
                 if response.status_code == 429:
                     wait = max(float(response.headers.get("retry-after", backoff)), backoff)
@@ -240,6 +240,16 @@ class ModelUtilityMixin:
 
     def _call_light_model(self, messages, temperature=0.3, max_tokens=200, provider="groq"):
         """Call light model qua 9router. Default provider là groq — nhanh và không cần Ollama."""
+        if provider == "background":
+            for model in [
+                f"gemini/{GEMINI_MODELS[0]}",
+                f"openrouter/{OPENROUTER_MODEL}",
+            ]:
+                res = self._clients['router9'].call(messages, model=model, temperature=temperature, max_tokens=max_tokens)
+                if res:
+                    return res
+            return self._clients['ollama_light'].call(messages, temperature=temperature, max_tokens=max_tokens)
+
         # Nếu explicitly muốn Ollama local thì thử trước
         if provider == "ollama":
             res = self._clients['ollama_light'].call(messages, temperature=temperature, max_tokens=max_tokens)

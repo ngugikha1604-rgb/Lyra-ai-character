@@ -73,3 +73,6 @@ debug.py
 #Model
 static/
 Lyra_background.png
+
+#Debug
+logs/

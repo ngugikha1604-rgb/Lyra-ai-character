@@ -8,6 +8,9 @@ try:
 except ImportError:
     np = None
 
+# Reuse TCP connections for frequent local embedding calls.
+_EMBED_SESSION = requests.Session()
+
 # Constants
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "memory.db")
@@ -48,13 +51,21 @@ def _get_ollama_embedding(text: str) -> "np.ndarray | None":
     if np is None: return None
     try:
         from config import EMBEDDING_MODEL, EMBEDDING_URL
-        resp = requests.post(EMBEDDING_URL, json={"model": EMBEDDING_MODEL, "prompt": text}, timeout=10, verify=False)
+        resp = _EMBED_SESSION.post(EMBEDDING_URL, json={"model": EMBEDDING_MODEL, "prompt": text}, timeout=10)
         if resp.status_code == 200:
             vec = resp.json().get("embedding")
             if vec: return np.array(vec, dtype=np.float32)
     except Exception:
         pass
     return None
+
+def configure_sqlite_connection(conn) -> None:
+    """Apply the repo's SQLite runtime settings to every memory.db connection."""
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA cache_size=-32000")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA temp_store=MEMORY")
 
 def _cosine_similarity(v1, v2) -> float:
     """Calculates cosine similarity between two vectors."""

@@ -134,14 +134,14 @@ def _init_dependencies(app: Flask) -> None:
 def _register_blueprints(app: Flask) -> None:
     from app.routes import (
         chat_bp, tts_bp, stream_bp,
-        stream_events_bp, auth_bp, admin_bp,
+        stream_events_bp, auth_bp, admin_bp, health_bp,
     )
 
     app.limiter.limit("30 per minute")(chat_bp)
     app.limiter.limit("20 per minute")(tts_bp)
     app.limiter.limit("60 per minute")(stream_bp)
 
-    for bp in (chat_bp, tts_bp, stream_bp, stream_events_bp, auth_bp, admin_bp):
+    for bp in (chat_bp, tts_bp, stream_bp, stream_events_bp, auth_bp, admin_bp, health_bp):
         app.register_blueprint(bp)
 
     from flask import render_template, session

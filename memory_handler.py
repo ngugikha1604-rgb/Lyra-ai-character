@@ -62,7 +62,7 @@ class MemoryHandlerMixin:
         ]
 
         try:
-            raw = self._call_light_model(extract_prompt, temperature=0.1, max_tokens=200, provider="gemini") or ""
+            raw = self._call_light_model(extract_prompt, temperature=0.1, max_tokens=200, provider="background") or ""
             raw = re.sub(r"```json|```", "", raw).strip()
             if not raw or raw == "{}": return
 
@@ -117,7 +117,7 @@ class MemoryHandlerMixin:
             summary = self._call_light_model([
                 {"role": "system", "content": SUMMARIZE_PROMPT},
                 {"role": "user", "content": f"Summarize this conversation:\n\n{convo_text}"},
-            ], temperature=0.4, max_tokens=120, provider="gemini")
+            ], temperature=0.4, max_tokens=120, provider="background")
 
             if summary := summary.strip():
                 ts = self.current_time.strftime("%Y-%m-%d %H:%M")
@@ -154,7 +154,7 @@ class MemoryHandlerMixin:
                     mega_text = self._call_light_model([
                         {"role": "system", "content": MEMORY_COMPRESSION_PROMPT},
                         {"role": "user", "content": f"Compress these summaries:\n\n" + "\n".join(parts)},
-                    ], temperature=0.3, max_tokens=200, provider="gemini")
+                    ], temperature=0.3, max_tokens=200, provider="background")
                     if mega_text:
                         with self.memory.db_lock:
                             c.execute("DELETE FROM summaries WHERE is_mega=1")
@@ -168,7 +168,9 @@ class MemoryHandlerMixin:
                 c.execute("INSERT INTO summaries (summary, timestamp, is_mega) VALUES (?,?,0)", (text, timestamp))
                 conn.commit()
         finally:
-            conn.close()
+            pass  # Không close connection — _get_db() trả về persistent conn được cache.
+                  # Việc close sẽ kill connection cho toàn bộ MemorySystem cho đến khi reconnect.
+                  # SQLite WAL mode tự handle concurrent access mà không cần close giữa chừng.
     def write_diary_entry(self):
         """Generates a secret diary entry for the session."""
         try:

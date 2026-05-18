@@ -56,6 +56,7 @@ class AudioService:
     def __init__(self):
         self.device_id: int = _find_vb_cable_device()
         self._queue: queue.Queue = queue.Queue()
+        self._playing = threading.Event()
         self._worker_thread = threading.Thread(
             target=self._worker_loop, daemon=True, name="AudioWorker"
         )
@@ -77,7 +78,7 @@ class AudioService:
             if audio.channels == 2:
                 samples = samples.reshape((-1, 2))
             samples = samples.astype(np.float32) / (2**15)
-            self._queue.put((samples.tolist(), audio.frame_rate, target_device))
+            self._queue.put((samples, audio.frame_rate, target_device))
         except Exception as e:
             print(f"[AudioService] play_to_cable error: {e}")
 
@@ -99,7 +100,7 @@ class AudioService:
 
     def is_busy(self) -> bool:
         """True nếu còn audio đang chờ trong queue."""
-        return not self._queue.empty()
+        return self._playing.is_set() or not self._queue.empty()
 
     @staticmethod
     def apply_pitch_shift(audio_bytes: bytes, octaves: float = 0.22) -> bytes:
@@ -128,10 +129,13 @@ class AudioService:
         while True:
             try:
                 audio_data, frame_rate, device_id = self._queue.get()
-                samples = np.array(audio_data)
-                sd.play(samples, samplerate=frame_rate, device=device_id)
-                sd.wait()
-                self._queue.task_done()
+                self._playing.set()
+                try:
+                    sd.play(audio_data, samplerate=frame_rate, device=device_id)
+                    sd.wait()
+                finally:
+                    self._playing.clear()
+                    self._queue.task_done()
             except Exception as e:
                 print(f"[AudioService] worker error: {e}")
                 time.sleep(0.1)

@@ -12,6 +12,7 @@ routes/chat.py — Các route liên quan đến chat với Lyra.
 from __future__ import annotations
 
 import os
+import time
 import traceback
 from datetime import datetime
 
@@ -20,6 +21,8 @@ from flask import Blueprint, jsonify, request, session, current_app
 
 from app.helpers import build_state_payload, sanitize_input
 from memory import DB_PATH, DB_LOCK
+from memory_utils import configure_sqlite_connection
+from turn_logger import log_turn
 import sqlite3
 
 bp = Blueprint("chat", __name__)
@@ -28,6 +31,7 @@ bp = Blueprint("chat", __name__)
 def _get_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=20.0)
     conn.row_factory = sqlite3.Row
+    configure_sqlite_connection(conn)
     return conn
 
 
@@ -58,16 +62,21 @@ def chat():
         audio.clear()
         vts_bridge.trigger_emotion("thinking")
 
+        t0 = time.perf_counter()
         with ai_chat_lock:
             result = lyra_ai.chat(user_input, source_type="owner")
+        latency_ms = (time.perf_counter() - t0) * 1000
+
+        log_turn(user_input, result, lyra_ai, latency_ms=latency_ms, source_type="owner")
 
         print(
-            "[CHAT] reply_len=%s monologue_len=%s emotion=%s action=%s"
+            "[CHAT] reply_len=%s monologue_len=%s emotion=%s action=%s latency=%.0fms"
             % (
                 len((result or {}).get("reply", "") or ""),
                 len((result or {}).get("monologue", "") or ""),
                 (result or {}).get("emotion", ""),
                 (result or {}).get("action", ""),
+                latency_ms,
             )
         )
         return jsonify(build_state_payload(lyra_ai, result))

@@ -13,6 +13,7 @@ class LyraChatSignature(dspy.Signature):
     user_message = dspy.InputField(desc="Tin nhắn mới nhất từ người dùng cần phản hồi")
     
     # Outputs
+    rationale = dspy.OutputField(desc="Suy nghĩ nội tâm ngắn của Lyra trước khi trả lời (1 câu, tiếng Việt). Ví dụ: 'Anh đang hỏi về code, mình cần trả lời ngắn gọn.'")
     emotion = dspy.OutputField(desc="Cảm xúc biểu hiện trên avatar (chọn 1): [neutral, content, happy, ecstatic, sad, disappointed, angry, furious, bored, sleeping, thinking, friendly, loving, cold, observing]")
     action = dspy.OutputField(desc="Hành động của avatar (chọn 1): [WAVE, NOD, SHAKE_HEAD, THINK, LAUGH, SIGH, SHY, SURPRISED, NONE]")
     skill_needed = dspy.OutputField(desc="Tên file kỹ năng cần dùng để xử lý yêu cầu (ví dụ: 'coding_skill'), hoặc 'NONE'")

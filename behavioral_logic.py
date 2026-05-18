@@ -107,7 +107,7 @@ class BehavioralMixin:
             return "suggestion"
 
         is_question = text.strip().endswith("?")
-        has_question_word = any(word in text_lower.split() for word in self._QUESTION_WORDS)
+        has_question_word = any(word in text_lower for word in self._QUESTION_WORDS)
         has_vn_confirm = self._VN_CONFIRM_PATTERN.search(text_lower)
 
         if is_question or has_question_word or has_vn_confirm:

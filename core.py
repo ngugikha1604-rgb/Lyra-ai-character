@@ -98,8 +98,8 @@ class MiniAI(
         self.time_gap_hours = calculate_time_gap(self.last_message_time, self.current_time)
         self.should_greet = should_send_greeting(self.time_gap_hours, self.last_message_time)
 
-        print("[Core] Pre-loading embedding model...")
-        self.memory._get_embedding("init")
+        print("[Core] Pre-loading embedding model (background)...")
+        enqueue(PRIORITY_NORMAL, self.memory._get_embedding, "init")
         
         # DSPy Setup - Use 9router for all LLM calls
         print("[Core] Initializing DSPy Brain via 9router...")
@@ -170,13 +170,6 @@ class MiniAI(
     def turn_counter(self):
         return self.memory.memory["conversation"].get("total_messages", 0)
 
-    @property
-    def affection(self): return self.emotion.affection
-    @property
-    def mood(self): return self.emotion.mood
-    @property
-    def attention(self): return self.emotion.attention
-
     @turn_counter.setter
     def turn_counter(self, value):
         self.memory.memory["conversation"]["total_messages"] = value
@@ -237,14 +230,17 @@ class MiniAI(
             enqueue(PRIORITY_HIGH, self.update_stream_summary)
 
     def _apply_viewer_emotion_context(self, source_type, viewer_data):
-        original_state = (self.emotion.affection, self.emotion.dominance)
+        # Chỉ lưu affection vì đó là thứ duy nhất bị override cho viewer.
+        # Dominance KHÔNG được lưu/restore — nó thay đổi hợp lệ trong emotion.update()
+        # và cần persist qua từng turn để reflect đúng trạng thái Lyra.
+        original_affection = self.emotion.affection
         if source_type != "owner":
             self.emotion.affection = float((viewer_data or {}).get("affection", 10))
-        return original_state
+        return original_affection
 
-    def _restore_viewer_emotion_context(self, source_type, original_state):
+    def _restore_viewer_emotion_context(self, source_type, original_affection):
         if source_type != "owner":
-            self.emotion.affection, self.emotion.dominance = original_state
+            self.emotion.affection = original_affection
 
     def _collect_turn_context(self, user_input, source_type):
         self.conv_state.update(user_input, self.messages)

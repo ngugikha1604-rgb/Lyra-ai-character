@@ -11,6 +11,7 @@ class MemoryConsolidator:
     def __init__(self, light_model="qwen2.5:0.5b", base_url="http://localhost:11434/api/chat"):
         self.model = light_model
         self.url = base_url
+        self._session = requests.Session()
 
     def distill_episodic_memories(self, episodes: list[str], current_facts: dict) -> list[dict]:
         """
@@ -32,7 +33,7 @@ class MemoryConsolidator:
         )
 
         try:
-            resp = requests.post(
+            resp = self._session.post(
                 self.url,
                 json={
                     "model": self.model,
@@ -79,7 +80,7 @@ class MemoryConsolidator:
         )
 
         try:
-            resp = requests.post(
+            resp = self._session.post(
                 self.url,
                 json={
                     "model": self.model,

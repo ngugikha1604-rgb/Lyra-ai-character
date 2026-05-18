@@ -20,7 +20,7 @@ from memory_utils import (
     BASE_DIR, DB_PATH, DB_LOCK, LAYER_USER, LAYER_SESSION, LAYER_TEMPORAL,
     _LAYER_MAP, _CONFLICTABLE_KINDS, KIND_IMPORTANCE,
     _get_ollama_embedding, _cosine_similarity, _vectorized_cosine_similarity,
-    get_now_vn
+    get_now_vn, configure_sqlite_connection
 )
 from pinecone_layer import PineconeLayer
 from memory_ranker import MemoryRanker
@@ -102,8 +102,7 @@ class MemorySystem:
         try:
             conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=60.0)
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=5000")
+            configure_sqlite_connection(conn)
             # Schema setup (omitted for brevity in this snippet, but kept in full file)
             self._init_db_schema(conn)
             with self.db_lock:

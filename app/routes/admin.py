@@ -15,6 +15,7 @@ from flask import Blueprint, jsonify, request, session, current_app
 
 from app.middleware import require_auth
 from memory import DB_PATH
+from memory_utils import configure_sqlite_connection
 
 bp = Blueprint("admin", __name__)
 
@@ -66,6 +67,7 @@ def secret_diary():
         with DB_LOCK:
             conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10)
             conn.row_factory = sqlite3.Row
+            configure_sqlite_connection(conn)
             rows = conn.execute(
                 "SELECT content, timestamp FROM diaries ORDER BY id DESC LIMIT 20"
             ).fetchall()

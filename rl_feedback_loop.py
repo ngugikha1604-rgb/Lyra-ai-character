@@ -39,6 +39,8 @@ class RLFeedbackLoop:
         now = time.time()
         obs = {
             "action_time": now,
+            "due_at": now + self.reward_window + 0.5,
+            "evaluation_enqueued": False,
             "user_input": user_input,
             "reply": reply,
             "intent": intent,
@@ -46,17 +48,19 @@ class RLFeedbackLoop:
             "reaction_buffer": []
         }
         with self.lock:
+            self._enqueue_due_observations_locked(now)
             self.active_observations.append(obs)
-        
-        # Use threading.Timer for the evaluation window to avoid blocking background_worker threads
-        threading.Timer(self.reward_window + 0.5, self._trigger_evaluation, args=(obs,)).start()
-    
-    def _trigger_evaluation(self, obs):
-        """Moves observation to background worker for AI scoring."""
-        if len(obs["reaction_buffer"]) < 2:
-            # Not enough data for a meaningful reward (ignore silence in slow streams)
-            return
-        enqueue(PRIORITY_NORMAL, self._evaluate_observation, obs)
+
+    def _enqueue_due_observations_locked(self, now: float):
+        """Enqueue expired reward observations without spawning one timer per reply."""
+        for obs in self.active_observations:
+            if obs.get("evaluation_enqueued"):
+                continue
+            if now < obs.get("due_at", obs["action_time"] + self.reward_window):
+                continue
+            obs["evaluation_enqueued"] = True
+            if len(obs["reaction_buffer"]) >= 2:
+                enqueue(PRIORITY_NORMAL, self._evaluate_observation, obs)
 
     def ingest_viewer_message(self, message, sender_name):
         """Called for every incoming viewer message to build the reaction context."""
@@ -69,13 +73,7 @@ class RLFeedbackLoop:
                 # If message arrived within 15s of Lyra speaking
                 if 0 <= (now - obs["action_time"]) <= self.reward_window:
                     obs["reaction_buffer"].append(f"{sender_name}: {message}")
-
-    def _trigger_evaluation(self, obs):
-        """Moves observation to background worker for AI scoring."""
-        if len(obs["reaction_buffer"]) < 2:
-            # Not enough data for a meaningful reward (ignore silence in slow streams)
-            return
-        enqueue(PRIORITY_NORMAL, self._evaluate_observation, obs)
+            self._enqueue_due_observations_locked(now)
 
     def _coerce_score(self, value):
         """Return a numeric reward score, clamped to the evaluator range."""

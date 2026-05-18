@@ -217,16 +217,10 @@ def stream_start():
         from memory_utils import get_now_vn
         lyra_ai._last_viewer_message_time = get_now_vn()
 
-        # Greeting chạy background — trả 200 ngay, broadcast SSE sau ~1-2s
-        import threading
+        # Greeting runs in the centralized background worker.
         sse     = current_app.sse_service
         ai_lock = current_app.ai_chat_lock
-        threading.Thread(
-            target=_broadcast_stream_greeting,
-            args=(lyra_ai, sse, ai_lock),
-            daemon=True,
-            name="StreamGreeting",
-        ).start()
+        enqueue(PRIORITY_HIGH, _broadcast_stream_greeting, lyra_ai, sse, ai_lock)
 
         print(f"[Stream] Started — video_id={video_id} chat_id={chat_id}")
         return jsonify({"ok": True, "chat_id": chat_id, "video_id": video_id})

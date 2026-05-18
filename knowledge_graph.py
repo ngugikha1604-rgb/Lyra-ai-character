@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 from memory_utils import (
     DB_PATH, DB_LOCK,
     _get_ollama_embedding, _cosine_similarity,
-    get_now_vn,
+    get_now_vn, configure_sqlite_connection,
 )
 from background_worker import enqueue, PRIORITY_NORMAL, PRIORITY_HIGH
 
@@ -87,8 +87,7 @@ class KnowledgeGraph:
     def _get_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=60.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        configure_sqlite_connection(conn)
         return conn
 
     def _init_schema(self) -> None:
@@ -204,7 +203,7 @@ class KnowledgeGraph:
 
         try:
             raw_resp = self._llm(
-                prompt, temperature=0.1, max_tokens=150, provider="gemini"
+                prompt, temperature=0.1, max_tokens=150, provider="background"
             ) or ""
             raw_resp = re.sub(r"```json|```", "", raw_resp).strip()
             triplets: list = json.loads(raw_resp) if raw_resp.startswith("[") else []

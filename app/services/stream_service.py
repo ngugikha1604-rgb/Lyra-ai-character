@@ -626,7 +626,7 @@ class StreamService:
                     ],
                     temperature=0.3,
                     max_tokens=80,
-                    provider="gemini"
+                    provider="background"
                 )
             if summary:
                 summary = summary.strip()

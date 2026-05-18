@@ -23,7 +23,7 @@ class MemoryRanker:
             resp = self._session.post(
                 self.url,
                 json={"model": self.model, "messages": [{"role": "user", "content": prompt}], "options": {"temperature": 0.1, "num_predict": 30}, "stream": False},
-                timeout=4, verify=False
+                timeout=4
             )
             if resp.status_code == 200:
                 content = resp.json().get("message", {}).get("content", "").strip()

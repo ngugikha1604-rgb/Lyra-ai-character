@@ -16,8 +16,10 @@ import asyncio
 import io
 import re
 import traceback
+import unicodedata
 
 import edge_tts
+from edge_tts.exceptions import NoAudioReceived
 from flask import Blueprint, jsonify, request, current_app
 
 from config import EDGE_TTS_VOICE, EDGE_TTS_PITCH
@@ -26,6 +28,37 @@ bp = Blueprint("tts", __name__)
 
 # Tối thiểu ký tự để một đoạn được tính là câu (tránh phát "..." hay "ừ" riêng lẻ)
 MIN_SENTENCE_LEN = 4
+
+# Regex bắt emoji và ký tự đặc biệt mà Edge TTS không xử lý được
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F300-\U0001F5FF"  # symbols & pictographs
+    "\U0001F680-\U0001F9FF"  # transport & misc
+    "\U00002600-\U000026FF"  # misc symbols
+    "\U00002700-\U000027BF"  # dingbats
+    "\U0001FA00-\U0001FFFF"  # supplemental
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def _clean_for_tts(text: str) -> str:
+    """
+    Làm sạch text trước khi đưa vào Edge TTS:
+    - Xoá emoji (nguyên nhân chính gây NoAudioReceived)
+    - Xoá markdown formatting (*bold*, _italic_, `code`)
+    - Xoá ký tự điều khiển (category C) nhưng giữ newline
+    - Collapse khoảng trắng thừa
+    """
+    text = _EMOJI_RE.sub("", text)
+    text = re.sub(r"[*_`~|]", "", text)
+    text = "".join(
+        ch for ch in text
+        if unicodedata.category(ch)[0] not in ("C",) or ch in "\n\t"
+    )
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def split_sentences(text: str) -> list[str]:
@@ -50,13 +83,26 @@ def split_sentences(text: str) -> list[str]:
 
 
 async def _synthesize_one(index: int, text: str, voice: str, rate: str, pitch: str) -> tuple[int, bytes]:
-    """Synthesize một câu, trả về (index, audio_bytes) để giữ thứ tự sau gather."""
-    communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
-    buf = io.BytesIO()
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            buf.write(chunk["data"])
-    return index, buf.getvalue()
+    """
+    Synthesize một câu, trả về (index, audio_bytes) để giữ thứ tự sau gather.
+    Catch NoAudioReceived per-sentence để một câu lỗi không kill cả request.
+    """
+    try:
+        communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+        buf = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                buf.write(chunk["data"])
+        audio = buf.getvalue()
+        if not audio:
+            print(f"[TTS] Câu #{index} synthesize rỗng: {text[:40]!r}")
+        return index, audio
+    except NoAudioReceived:
+        print(f"[TTS] NoAudioReceived cho câu #{index}: {text[:60]!r} — bỏ qua")
+        return index, b""
+    except Exception as e:
+        print(f"[TTS] Câu #{index} lỗi ({type(e).__name__}): {e}")
+        return index, b""
 
 
 async def _synthesize_all(sentences: list[str], voice: str, rate: str, pitch: str) -> list[bytes]:
@@ -84,6 +130,11 @@ def speak():
         text = data["text"].strip()
         if not text:
             return jsonify({"error": "Empty text"}), 400
+
+        # Làm sạch trước khi đưa vào TTS (xoá emoji, markdown...)
+        text = _clean_for_tts(text)
+        if not text:
+            return jsonify({"error": "Text rỗng sau khi clean"}), 400
 
         print(f"[TTS] Request text: {text[:120]!r}")
 

@@ -13,6 +13,7 @@ class PineconeLayer:
         self._host = None  # lazy-loaded
         self._enabled = bool(self.api_key)
         self.dimension = None
+        self._session = requests.Session()
         if self._enabled:
             self._detect_dimension()
 
@@ -31,7 +32,7 @@ class PineconeLayer:
         if self._host: return self._host
         if not self._enabled: return None
         try:
-            resp = requests.get(f"https://api.pinecone.io/indexes/{self.index_name}", headers={"Api-Key": self.api_key}, timeout=10)
+            resp = self._session.get(f"https://api.pinecone.io/indexes/{self.index_name}", headers={"Api-Key": self.api_key}, timeout=10)
             if resp.status_code == 200:
                 self._host = resp.json().get("host")
                 return self._host
@@ -45,7 +46,7 @@ class PineconeLayer:
     def _create_index(self):
         """Creates a serverless index if it doesn't exist."""
         try:
-            resp = requests.post(
+            resp = self._session.post(
                 "https://api.pinecone.io/indexes",
                 headers={"Api-Key": self.api_key, "Content-Type": "application/json"},
                 json={
@@ -72,7 +73,7 @@ class PineconeLayer:
             metadata["timestamp"] = datetime.now(timezone.utc).isoformat()
             
         try:
-            requests.post(
+            self._session.post(
                 f"https://{host}/vectors/upsert",
                 headers={"Api-Key": self.api_key, "Content-Type": "application/json"},
                 json={"vectors": [{"id": item_id, "values": vector, "metadata": metadata}]},
@@ -89,7 +90,7 @@ class PineconeLayer:
             fetch_k = top_k * 3
             body = {"vector": vector, "topK": fetch_k, "includeMetadata": True}
             if filter_meta: body["filter"] = filter_meta
-            resp = requests.post(
+            resp = self._session.post(
                 f"https://{host}/query",
                 headers={"Api-Key": self.api_key, "Content-Type": "application/json"},
                 json=body,
@@ -135,6 +136,6 @@ class PineconeLayer:
         host = self._get_host()
         if not host or not self._enabled: return
         try:
-            requests.post(f"https://{host}/vectors/delete", headers={"Api-Key": self.api_key, "Content-Type": "application/json"}, json={"ids": [item_id]}, timeout=10)
+            self._session.post(f"https://{host}/vectors/delete", headers={"Api-Key": self.api_key, "Content-Type": "application/json"}, json={"ids": [item_id]}, timeout=10)
         except Exception as e:
             print(f"[Pinecone] delete error: {e}")

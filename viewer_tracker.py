@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from collections import deque
 from datetime import datetime
 from memory import DB_PATH, DB_LOCK
+from memory_utils import configure_sqlite_connection
 
 # Chỉ lưu message của viewer đủ "quen" để tránh DB phình to
 SAVE_MESSAGE_MIN_COUNT = 3      # message_count >= 3 mới lưu message history
@@ -442,7 +443,7 @@ class ViewerTracker:
     def _get_conn(self):
         conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=5.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        configure_sqlite_connection(conn)
         return conn
 
     def _init_tables(self):
@@ -911,7 +912,7 @@ class ViewerTracker:
         ]
         try:
             import json, re
-            raw = call_light_model(prompt, temperature=0.1, max_tokens=80, provider="gemini") or ""
+            raw = call_light_model(prompt, temperature=0.1, max_tokens=80, provider="background") or ""
             raw = re.sub(r"```json|```", "", raw).strip()
             if not raw or raw == "{}":
                 return
@@ -1062,7 +1063,7 @@ class ChatPatternAnalyzer:
     def _get_conn(self):
         conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=5.0)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        configure_sqlite_connection(conn)
         return conn
 
     def _init_table(self):

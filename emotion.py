@@ -1,6 +1,8 @@
 # Emotion engine for Lyra
 
+import re
 import random
+import unicodedata
 from datetime import datetime
 
 
@@ -33,6 +35,26 @@ class EmotionEngine:
         "ghét", "tệ", "dở", "ngu", "bực", "chán", "mệt", "buồn", "tức",
         "khó chịu", "thất vọng", "chán nản", "bực bội", "tức giận", "đau", "khổ",
     }
+
+    # ── Vietnamese slang / teen speak (không dấu) ─────────────────────────────
+    # Các từ hay gặp trong chat tiếng Việt không có dấu
+    POSITIVE_NODIAC = {
+        "tuyet", "hay", "thich", "vui", "cam on", "yeu", "dep",
+        "gioi", "ngoan", "tot", "on", "suong", "phan khich", "hanh phuc",
+        "thu vi", "xuat sac", "tuyet voi", "ok", "oke", "okela",
+        "xuixiu", "cutee", "xiuu", "oke bae", "dep qua",
+    }
+    NEGATIVE_NODIAC = {
+        "ghet", "te", "do", "ngu", "buc", "chan", "met", "buon", "tuc",
+        "kho chiu", "that vong", "chan nan", "buc boi", "tuc gian", "dau",
+        "vcl", "vl", "dm", "kms",
+    }
+
+    @staticmethod
+    def _strip_diacritics(text: str) -> str:
+        """Bỏ dấu tiếng Việt để so sánh keyword không bị miss do encoding."""
+        nfd = unicodedata.normalize("NFD", text.lower())
+        return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
 
     def __init__(self):
         self.mood = 0           # Valence proxy: -10 → +10
@@ -101,9 +123,16 @@ class EmotionEngine:
         self.attention = max(0, self.attention - 0.3)
 
         text_lower = text.lower()
+        text_nodiac = self._strip_diacritics(text)
 
-        has_positive = any(w in text_lower for w in self.POSITIVE_WORDS)
-        has_negative = any(w in text_lower for w in self.NEGATIVE_WORDS)
+        has_positive = (
+            any(w in text_lower for w in self.POSITIVE_WORDS)
+            or any(w in text_nodiac for w in self.POSITIVE_NODIAC)
+        )
+        has_negative = (
+            any(w in text_lower for w in self.NEGATIVE_WORDS)
+            or any(w in text_nodiac for w in self.NEGATIVE_NODIAC)
+        )
 
         # ── Cognitive Appraisal (Lazarus, 1991) ───────────────────────────────
         # Đánh giá sự kiện theo 2 chiều trước khi apply delta:
