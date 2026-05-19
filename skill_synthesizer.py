@@ -7,7 +7,7 @@ from config import LIGHT_MODEL, LIGHT_BASE_URL
 import requests
 import time
 
-DB_LOCK = threading.Lock()
+_SKILL_LOCK = threading.Lock()  # Protects skill file I/O only — not SQLite (see memory.py for DB_LOCK)
 
 SKILL_SYNTHESIZE_PROMPT = """You are a meta-learning assistant for Lyra, an AI character.
 Analyze the following successful conversation snippets and identify a "Skill" or "Behavior Pattern" that Lyra demonstrated.

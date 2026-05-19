@@ -132,18 +132,24 @@ class BehavioralMixin:
     def detect_user_mood(self, text: str) -> str:
         """Simple keyword-based user mood detection"""
         text_lower = text.lower()
+        # Strip dấu để bắt tiếng Việt không dấu (phổ biến trong chat viewer)
+        import unicodedata
+        text_nodiac = "".join(
+            c for c in unicodedata.normalize("NFD", text_lower)
+            if unicodedata.category(c) != "Mn"
+        )
 
         # VN sarcasm/irritation
         if len(text.strip()) < 40 and self._SARCASM_PATTERN.search(text_lower):
             if any(w in text_lower for w in ["gì", "đâu", "sao", "không", "chẳng"]):
                 return "frustrated"
 
-        if any(w in text_lower for w in self._STRESS_WORDS): return "stressed"
-        if any(w in text_lower for w in self._SAD_WORDS): return "sad"
-        if any(w in text_lower for w in self._EXCITED_WORDS): return "excited"
-        if any(w in text_lower for w in self._BORED_WORDS): return "bored"
-        if any(w in text_lower for w in self._ANGRY_WORDS): return "frustrated"
-        if any(w in text_lower for w in self._ANXIOUS_WORDS): return "anxious"
+        if any(w in text_lower or w in text_nodiac for w in self._STRESS_WORDS): return "stressed"
+        if any(w in text_lower or w in text_nodiac for w in self._SAD_WORDS): return "sad"
+        if any(w in text_lower or w in text_nodiac for w in self._EXCITED_WORDS): return "excited"
+        if any(w in text_lower or w in text_nodiac for w in self._BORED_WORDS): return "bored"
+        if any(w in text_lower or w in text_nodiac for w in self._ANGRY_WORDS): return "frustrated"
+        if any(w in text_lower or w in text_nodiac for w in self._ANXIOUS_WORDS): return "anxious"
 
         if text_lower.strip().endswith("ạ"):
             return "polite"

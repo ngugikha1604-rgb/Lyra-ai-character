@@ -87,18 +87,28 @@ async def _synthesize_one(index: int, text: str, voice: str, rate: str, pitch: s
     Synthesize một câu, trả về (index, audio_bytes) để giữ thứ tự sau gather.
     Catch NoAudioReceived per-sentence để một câu lỗi không kill cả request.
     """
-    try:
-        communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+    async def _stream_audio(use_rate: str, use_pitch: str) -> bytes:
+        communicate = edge_tts.Communicate(text, voice, rate=use_rate, pitch=use_pitch)
         buf = io.BytesIO()
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
                 buf.write(chunk["data"])
-        audio = buf.getvalue()
+        return buf.getvalue()
+
+    try:
+        audio = await _stream_audio(rate, pitch)
         if not audio:
             print(f"[TTS] Câu #{index} synthesize rỗng: {text[:40]!r}")
+        if not audio and (rate != "+0%" or pitch != "+0Hz"):
+            audio = await _stream_audio("+0%", "+0Hz")
         return index, audio
     except NoAudioReceived:
-        print(f"[TTS] NoAudioReceived cho câu #{index}: {text[:60]!r} — bỏ qua")
+        print(f"[TTS] NoAudioReceived cho câu #{index}: {text[:60]!r} — thử lại neutral prosody")
+        if rate != "+0%" or pitch != "+0Hz":
+            try:
+                return index, await _stream_audio("+0%", "+0Hz")
+            except Exception as retry_error:
+                print(f"[TTS] Retry cau #{index} loi ({type(retry_error).__name__}): {retry_error}")
         return index, b""
     except Exception as e:
         print(f"[TTS] Câu #{index} lỗi ({type(e).__name__}): {e}")
@@ -107,11 +117,12 @@ async def _synthesize_one(index: int, text: str, voice: str, rate: str, pitch: s
 
 async def _synthesize_all(sentences: list[str], voice: str, rate: str, pitch: str) -> list[bytes]:
     """Synthesize tất cả câu song song, trả về list bytes theo đúng thứ tự."""
-    tasks = [
-        _synthesize_one(i, s, voice, rate, pitch)
-        for i, s in enumerate(sentences)
-    ]
-    results = await asyncio.gather(*tasks)
+    results = []
+    for i, s in enumerate(sentences):
+        _, audio = await _synthesize_one(i, s, voice, rate, pitch)
+        results.append((i, audio))
+        if i < len(sentences) - 1:
+            await asyncio.sleep(0.1)  # 100ms stagger giữa các câu
     # Sort theo index để đảm bảo thứ tự dù gather hoàn thành không theo thứ tự
     results.sort(key=lambda x: x[0])
     return [audio for _, audio in results]

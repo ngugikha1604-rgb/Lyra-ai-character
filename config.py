@@ -82,6 +82,7 @@ CONSENSUS_TOPIC_SHIFT_WINDOW    = 10    # giây để check topic shift trong co
 OWNER_YOUTUBE_ID = os.environ.get("OWNER_YOUTUBE_ID", "")
 YOUTUBE_VIDEO_ID = os.environ.get("YOUTUBE_VIDEO_ID", "")
 YOUTUBE_LIVE_CHAT_ID = os.environ.get("YOUTUBE_LIVE_CHAT_ID", "")
+YOUTUBE_CHANNEL_ID = os.environ.get("YOUTUBE_CHANNEL_ID", "")
 
 # ── Vector database Key ──────────────────────────────────────────────────────
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY", "")

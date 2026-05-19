@@ -86,11 +86,11 @@ class AudioService:
         """
         Xóa hàng đợi âm thanh và dừng bài đang phát ngay lập tức.
         Dùng khi owner gửi tin mới — ngắt giữa chừng (Action Interruption).
+        Note: không gọi task_done() vì queue không dùng join().
         """
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
-                self._queue.task_done()
             except queue.Empty:
                 break
         try:

@@ -98,23 +98,23 @@ class ProactiveService:
             "Chat đã im lặng 2 phút. Đặt một câu hỏi ngắn, tò mò để khơi gợi "
             "mọi người tâm sự và giữ người xem ở lại."
         )
-        with self._ai_lock:
-            question = self._lyra_ai._call_light_model(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "⚠️ XƯNG HÔ BẮT BUỘC: LUÔN xưng 'em', gọi 'mọi người' hoặc 'anh/chị'. "
-                            "TUYỆT ĐỐI KHÔNG dùng 'tôi', 'mình', 'bạn'. "
-                            "Bạn là Lyra, VTuber 16 tuổi, đang livestream. "
-                            "Hỏi thăm ngắn gọn, tự nhiên, tò mò."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.4,
-                max_tokens=60,
-            )
+        # Không cần ai_lock — _call_light_model chỉ là HTTP request, không đụng trạng thái lyra_ai
+        question = self._lyra_ai._call_light_model(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "⚠️ XƯNG HÔ BẮT BUỘC: LUÔN xưng 'em', gọi 'mọi người' hoặc 'anh/chị'. "
+                        "TUYỆT ĐỐI KHÔNG dùng 'tôi', 'mình', 'bạn'. "
+                        "Bạn là Lyra, VTuber 16 tuổi, đang livestream. "
+                        "Hỏi thăm ngắn gọn, tự nhiên, tò mò."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.4,
+            max_tokens=60,
+        )
 
         if not question:
             return

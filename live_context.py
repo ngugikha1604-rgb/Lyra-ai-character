@@ -28,6 +28,11 @@ TRANSIENT_FIELD_TTL = {
 # Lock for thread-safe file operations
 _context_lock = threading.Lock()
 
+# In-memory cache — tránh đọc disk mỗi turn (có thể 10-20 lần/phút trong stream)
+_cache_data: dict = {}
+_cache_ts: float = 0.0
+_CACHE_TTL: float = 2.0  # giây
+
 
 def _now_iso() -> str:
     """Current UTC time in ISO format with timezone"""
@@ -39,9 +44,18 @@ def load_live_context() -> Dict[str, Any]:
     Load live_context.json from disk. If file doesn't exist or is corrupted,
     return a fresh default context.
     """
+    global _cache_data, _cache_ts
+    import time as _time
+
+    # Trả cache nếu còn mới
+    if _cache_data and (_time.monotonic() - _cache_ts) < _CACHE_TTL:
+        return _cache_data
+
     with _context_lock:
         if not os.path.exists(LIVE_CONTEXT_PATH):
-            return get_default_context()
+            _cache_data = get_default_context()
+            _cache_ts = _time.monotonic()
+            return _cache_data
 
         try:
             with open(LIVE_CONTEXT_PATH, "r", encoding="utf-8") as f:
@@ -49,18 +63,27 @@ def load_live_context() -> Dict[str, Any]:
             # Ensure all required fields exist
             for k, v in get_default_context().items():
                 data.setdefault(k, v)
-            return data
+            _cache_data = data
+            _cache_ts = _time.monotonic()
+            return _cache_data
         except (json.JSONDecodeError, OSError) as e:
             print(f"[LiveContext] Load error: {e}. Using default.")
-            return get_default_context()
+            _cache_data = get_default_context()
+            _cache_ts = _time.monotonic()
+            return _cache_data
 
 
 def save_live_context(data: Dict[str, Any]) -> None:
     """Write live_context.json to disk."""
+    global _cache_data, _cache_ts
+    import time as _time
     with _context_lock:
         try:
             with open(LIVE_CONTEXT_PATH, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+            # Invalidate cache sau khi write
+            _cache_data = data
+            _cache_ts = _time.monotonic()
         except OSError as e:
             print(f"[LiveContext] Save error: {e}")
 

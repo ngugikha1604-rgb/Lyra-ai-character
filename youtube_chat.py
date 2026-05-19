@@ -338,6 +338,8 @@ def get_live_chat_id(credentials_dict: dict, video_id: str) -> str | None:
 
     except Exception as e:
         print(f"[YouTube] get_live_chat_id error: {e}")
+        if "invalid_grant" in str(e).lower() or "unauthorized" in str(e).lower():
+            raise e
         return None
 
 
@@ -381,4 +383,6 @@ def get_current_live_stream_info(credentials_dict: dict):
 
     except Exception as e:
         print(f"[YouTube] Lỗi khi lấy thông tin stream: {e}")
+        if "invalid_grant" in str(e).lower() or "unauthorized" in str(e).lower():
+            raise e
         return None, None

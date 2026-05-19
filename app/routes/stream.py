@@ -177,12 +177,24 @@ def stream_start():
         # Nếu không có chat_id lẫn video_id → tự tìm stream đang active trên kênh
         if not chat_id and not video_id:
             from youtube_chat import get_current_live_stream_info
-            video_id, chat_id = get_current_live_stream_info(credentials)
+            try:
+                video_id, chat_id = get_current_live_stream_info(credentials)
+            except Exception as e:
+                if "invalid_grant" in str(e).lower() or "unauthorized" in str(e).lower():
+                    current_app.yt_credentials = None
+                    return jsonify({"error": "Token YouTube hết hạn hoặc bị thu hồi. Vui lòng re-authorize.", "authorize_url": "/authorize"}), 401
+                chat_id = None
 
         # Nếu có video_id nhưng chưa có chat_id → lấy từ video_id
         if not chat_id and video_id:
             from youtube_chat import get_live_chat_id
-            chat_id = get_live_chat_id(credentials, video_id)
+            try:
+                chat_id = get_live_chat_id(credentials, video_id)
+            except Exception as e:
+                if "invalid_grant" in str(e).lower() or "unauthorized" in str(e).lower():
+                    current_app.yt_credentials = None
+                    return jsonify({"error": "Token YouTube hết hạn hoặc bị thu hồi. Vui lòng re-authorize.", "authorize_url": "/authorize"}), 401
+                chat_id = None
 
         if not chat_id:
             return jsonify({"error": "Không tìm thấy stream nào đang active. Hãy bắt đầu stream trên YouTube trước."}), 400

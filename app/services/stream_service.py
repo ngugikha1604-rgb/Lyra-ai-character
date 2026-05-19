@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from core import MiniAI
     from viewer_tracker import ViewerTracker, ChatPatternAnalyzer
     from youtube_chat import YouTubeChatPoller
-    from vts_api import VTSBridge
+    from vts_api import VTSController
     from app.services.sse_service import SSEService
     from app.services.audio_service import AudioService
 
@@ -78,7 +78,7 @@ class StreamService:
         self._viewer_tracker: "ViewerTracker | None" = None
         self._chat_analyzer: "ChatPatternAnalyzer | None" = None
         self._yt_poller: "YouTubeChatPoller | None" = None
-        self._vts_bridge: "VTSBridge | None" = None
+        self._vts_bridge: "VTSController | None" = None
         self._sse: "SSEService | None" = None
         self._audio: "AudioService | None" = None
         self._ai_lock: threading.Lock | None = None
@@ -101,7 +101,7 @@ class StreamService:
         viewer_tracker: "ViewerTracker",
         chat_analyzer: "ChatPatternAnalyzer",
         yt_poller: "YouTubeChatPoller",
-        vts_bridge: "VTSBridge",
+        vts_bridge: "VTSController",
         sse: "SSEService",
         audio: "AudioService",
         ai_chat_lock: threading.Lock,
@@ -441,7 +441,6 @@ class StreamService:
                     "source_type": "consensus",
                     "is_consensus": True,
                 })
-                self._sync_vts(result)
                 self._sse.broadcast(payload)
                 return
 
@@ -509,7 +508,6 @@ class StreamService:
                 "viewer_message_count": viewer_info.get("message_count", 1),
                 "viewer_affinity":      viewer_info.get("affinity_score", 1.0),
             })
-            self._sync_vts(result)
             self._sse.broadcast(payload)
 
         except Exception:
@@ -618,16 +616,16 @@ class StreamService:
                 prompt += f"- Summary trước: {prev_summary}\n"
             prompt += "\nTóm tắt ngắn (1-2 câu) chat đang nói về gì và vibe của kênh lúc này."
 
-            with self._ai_lock:
-                summary = self._lyra_ai._call_light_model(
-                    [
-                        {"role": "system", "content": "Bạn là assistant tóm tắt livestream chat. Trả lời bằng tiếng Việt, ngắn gọn."},
-                        {"role": "user",   "content": prompt},
-                    ],
-                    temperature=0.3,
-                    max_tokens=80,
-                    provider="background"
-                )
+            # Không cần ai_lock — _call_light_model không đụng trạng thái lyra_ai
+            summary = self._lyra_ai._call_light_model(
+                [
+                    {"role": "system", "content": "Bạn là assistant tóm tắt livestream chat. Trả lời bằng tiếng Việt, ngắn gọn."},
+                    {"role": "user",   "content": prompt},
+                ],
+                temperature=0.3,
+                max_tokens=80,
+                provider="background"
+            )
             if summary:
                 summary = summary.strip()
                 self._chat_analyzer.save_stream_summary(summary, channel_id, platform)
