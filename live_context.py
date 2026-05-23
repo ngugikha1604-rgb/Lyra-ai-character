@@ -256,7 +256,7 @@ def get_live_context_block(max_lines: int = 6) -> str:
 
 
 def get_donations_this_stream() -> List[Dict[str, str]]:
-    """Lấy danh sách donation của stream hiện tại (để truyền vào diary)."""
+    """Lấy danh sách donation của stream hiện tại."""
     return load_live_context().get("donations_this_stream", [])
 
 
@@ -286,7 +286,7 @@ def record_donation(viewer_name: str, amount: str) -> None:
     update_field("priority_mentions", mentions[-5:], ttl_minutes=10)
     update_field("energy_label", "high", ttl_minutes=15)
 
-    # donations_this_stream — persist cho diary/tổng kết cuối stream
+    # donations_this_stream — persist cho tổng kết/ngữ cảnh stream
     donations = data.get("donations_this_stream", [])
     donations.append({
         "viewer_name": viewer_name,

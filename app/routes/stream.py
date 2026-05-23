@@ -252,7 +252,7 @@ from background_worker import enqueue, PRIORITY_NORMAL, PRIORITY_HIGH
 def _stream_stop_cleanup(viewer_tracker, platform: str, channel_id: str, lyra_ai) -> None:
     """
     Chạy trong background worker sau khi stream stop.
-    Thứ tự: promote → clear stats → diary.
+    Thứ tự: promote → clear stats.
     Tất cả trong 1 task để đảm bảo sequential, không race.
     """
     try:
@@ -266,11 +266,6 @@ def _stream_stop_cleanup(viewer_tracker, platform: str, channel_id: str, lyra_ai
         print("[StreamCleanup] Session stats cleared.")
     except Exception as e:
         print(f"[StreamCleanup] clear_session_stats error: {e}")
-
-    try:
-        lyra_ai.write_diary_entry()
-    except Exception as e:
-        print(f"[StreamCleanup] diary error: {e}")
 
 
 @bp.route("/stream/stop", methods=["POST"])
@@ -295,7 +290,7 @@ def stream_stop():
         platform   = "youtube"
         channel_id = "default"
 
-    # Enqueue cleanup: promote → clear → diary (sequential, 1 task)
+    # Enqueue cleanup: promote → clear (sequential, 1 task)
     enqueue(PRIORITY_NORMAL, _stream_stop_cleanup, viewer_tracker, platform, channel_id, lyra_ai)
 
     print("[Stream] Stopped — cleanup enqueued.")

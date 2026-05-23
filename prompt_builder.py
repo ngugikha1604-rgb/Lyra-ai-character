@@ -65,15 +65,7 @@ class PromptBuilderMixin:
         is_public = source_type != "owner"
         memory_context = precomputed_memory_context if precomputed_memory_context is not None else self.memory.get_relevant_context(user_input, is_public=is_public)
 
-        diary_hint = ""
-        if not is_public:
-            # Cache diary hint trong session — diary chỉ thay đổi khi kết thúc phiên hoặc write_diary_entry
-            if getattr(self, '_diary_hint_cache', None) is None:
-                recent_diaries = self.memory.get_diary_entries(limit=1)
-                self._diary_hint_cache = f"\nCẢM XÚC GẦN ĐÂY CỦA LYRA:\nSuy nghĩ bí mật cuối cùng của em: '{recent_diaries[0]['content'][:150]}...'" if recent_diaries else ""
-            diary_hint = self._diary_hint_cache
-
-        full_memory_context = "\n\n".join(filter(None, [memory_context, search_context, diary_hint]))
+        full_memory_context = "\n\n".join(filter(None, [memory_context, search_context]))
         time_context = get_time_context(self.current_time, self.time_period)
 
         mood_hint = MOOD_HINTS["good"] if self.emotion.mood > 5 else MOOD_HINTS["bad"] if self.emotion.mood < -5 else ""

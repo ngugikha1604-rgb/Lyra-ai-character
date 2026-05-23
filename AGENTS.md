@@ -303,7 +303,7 @@ All non-critical I/O goes through a single **centralized priority queue** with 4
 |----------|----------|-----------|
 | 1 | `PRIORITY_CRITICAL` | Memory extraction (owner data) |
 | 2 | `PRIORITY_HIGH` | Stream summary, emotion refresh, session items |
-| 3 | `PRIORITY_NORMAL` | Diary, consolidation, history summarization, DB save |
+| 3 | `PRIORITY_NORMAL` | Consolidation, history summarization, DB save |
 
 ```python
 from background_worker import enqueue, PRIORITY_CRITICAL, PRIORITY_HIGH, PRIORITY_NORMAL

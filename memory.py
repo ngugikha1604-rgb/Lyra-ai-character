@@ -36,7 +36,7 @@ class MemorySystem:
     L3 (Episodic): Long-term temporal events and RAG context.
     """
     def __init__(self, max_summaries=8):
-        self._db_connection = None
+        self._local_conn = threading.local()
         self.db_lock = DB_LOCK
         self._basic_context_cache = None
         self._rag_context_cache = None
@@ -58,8 +58,9 @@ class MemorySystem:
         self._rolling_stream_summary = ""
         self._session_last_activity_at = None
 
-        self._sweeper_thread = threading.Thread(target=self._sweeper_loop, daemon=True)
-        self._sweeper_thread.start()
+        self._last_sweep_time = time.time()
+        # Enqueue initial sweep to clean up any expired memory TTL on startup
+        enqueue(PRIORITY_NORMAL, self._run_sweep)
 
     # dict-like access for backward compatibility
     def __getitem__(self, key): return self.memory[key]
@@ -72,45 +73,56 @@ class MemorySystem:
     def turn_counter(self):
         return self.memory.get("conversation", {}).get("total_messages", 0)
 
-    def _sweeper_loop(self):
-        """Background thread for memory TTL expiration."""
-        while True:
-            time.sleep(1800)
-            try:
-                conn = self._get_db()
-                if not conn: continue
-                now_iso = get_now_vn().isoformat()
-                with self.db_lock:
-                    conn.execute(
-                        "UPDATE memory_items SET is_valid=0 "
-                        "WHERE is_valid=1 AND ttl_minutes>0 "
-                        "AND datetime(last_used_at, '+' || ttl_minutes || ' minutes') < ?",
-                        (now_iso,)
-                    )
-                    conn.commit()
-            except Exception as e:
-                print(f"[Memory] Sweeper error: {e}")
+    def _run_sweep(self):
+        """Runs the memory TTL expiration sweep in a background worker."""
+        try:
+            conn = self._get_db()
+            if not conn: return
+            now_iso = get_now_vn().isoformat()
+            with self.db_lock:
+                conn.execute(
+                    "UPDATE memory_items SET is_valid=0 "
+                    "WHERE is_valid=1 AND ttl_minutes>0 "
+                    "AND datetime(last_used_at, '+' || ttl_minutes || ' minutes') < ?",
+                    (now_iso,)
+                )
+                conn.commit()
+        except sqlite3.Error as e:
+            print(f"[Memory] Sweeper database error: {e}")
+        except Exception as e:
+            print(f"[Memory] Sweeper unexpected error: {e}")
+
+    def _maybe_enqueue_sweep(self):
+        """Checks if 30 minutes have elapsed since the last sweep, and enqueues it if so."""
+        now = time.time()
+        if now - self._last_sweep_time >= 1800:
+            self._last_sweep_time = now
+            enqueue(PRIORITY_NORMAL, self._run_sweep)
 
     def _get_db(self):
-        """Standard SQLite connection with WAL mode and schema initialization."""
-        if self._db_connection:
+        """Thread-safe SQLite connection with WAL mode and schema initialization using Thread-local."""
+        conn = getattr(self._local_conn, "conn", None)
+        if conn:
             try:
-                self._db_connection.execute("SELECT 1")
-                return self._db_connection
+                conn.execute("SELECT 1")
+                return conn
             except sqlite3.Error:
-                self._db_connection = None
+                conn = None
+
         try:
             conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=60.0)
             conn.row_factory = sqlite3.Row
             configure_sqlite_connection(conn)
-            # Schema setup (omitted for brevity in this snippet, but kept in full file)
             self._init_db_schema(conn)
             with self.db_lock:
                 conn.commit()
-                self._db_connection = conn
+            self._local_conn.conn = conn
             return conn
+        except sqlite3.Error as e:
+            print(f"[Memory] DB sqlite3 error: {e}")
+            return self._get_in_memory_fallback()
         except Exception as e:
-            print(f"[Memory] DB error: {e}")
+            print(f"[Memory] DB unexpected error: {e}")
             return self._get_in_memory_fallback()
 
     def _init_db_schema(self, conn):
@@ -133,7 +145,6 @@ class MemorySystem:
             );
             CREATE TABLE IF NOT EXISTS stream_milestones (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, description TEXT NOT NULL, achieved_at TEXT NOT NULL, stream_title TEXT DEFAULT '', peak_viewers INTEGER DEFAULT 0, UNIQUE(event_type));
             CREATE TABLE IF NOT EXISTS memory_conflicts (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, old_value TEXT NOT NULL, new_value TEXT NOT NULL, resolved_at TEXT NOT NULL, note TEXT DEFAULT '');
-            CREATE TABLE IF NOT EXISTS diaries (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL, mood_score REAL, affection_score REAL, timestamp TEXT DEFAULT (datetime('now')));
             CREATE INDEX IF NOT EXISTS idx_memory_consolidate ON memory_items(layer, superseded, last_used_at, access_count, saliency);
         """)
         # Migrations
@@ -209,11 +220,12 @@ class MemorySystem:
         # Simplified implementation (full version kept in source)
         pass
 
-    def _detect_conflict(self, kind, new_value, c):
+    def _detect_conflict(self, kind, new_value, c, new_vec=None):
         """Detects if a new fact conflicts with an existing one using embeddings."""
         if kind not in _CONFLICTABLE_KINDS: return None
         rows = list(c.execute("SELECT id, value, embedding FROM memory_items WHERE kind=? AND superseded=0 AND value != ?", (kind, new_value)))
-        new_vec = _get_ollama_embedding(new_value)
+        if new_vec is None:
+            new_vec = _get_ollama_embedding(new_value)
         
         if new_vec is not None and np is not None:
             valid_rows = []
@@ -308,6 +320,7 @@ class MemorySystem:
 
     def add_item(self, kind, value, weight=1.0, limit=12, importance=None):
         """Adds a fact or episode to memory with conflict detection."""
+        self._maybe_enqueue_sweep()
         self._is_dirty = True
         text = str(value).strip()
         if not text: return
@@ -321,12 +334,17 @@ class MemorySystem:
             importance_val = KIND_IMPORTANCE.get(kind, 1.0)
             now = get_now_vn().isoformat()
 
+            # Precompute embedding outside the database lock to prevent Ollama HTTP calls from blocking SQLite
+            emb_blob = self._embed_to_blob(text)
+            new_vec = None
+            if emb_blob is not None and np is not None:
+                new_vec = np.frombuffer(emb_blob, dtype=np.float32)
+
             with self.db_lock:
                 if layer == LAYER_USER:
-                    conflict = self._detect_conflict(kind, text, c)
+                    conflict = self._detect_conflict(kind, text, c, new_vec=new_vec)
                     if conflict: self._resolve_conflict(kind, conflict, text, c)
                 
-                emb_blob = self._embed_to_blob(text)
                 c.execute("INSERT INTO memory_items (kind,value,layer,weight,saliency,importance,source_turn,last_used_at,embedding) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(kind,value) DO UPDATE SET superseded=0, last_used_at=excluded.last_used_at, embedding=excluded.embedding", (kind, text, layer, weight, saliency, importance_val, self.turn_counter, now, emb_blob))
                 conn.commit()
                 
@@ -483,6 +501,7 @@ class MemorySystem:
 
     def get_relevant_context(self, user_input: str, is_public: bool = False, turn_counter: int = 0, precomputed_vec=None) -> str:
         """Retrieves and ranks the most relevant memories for the current turn."""
+        self._maybe_enqueue_sweep()
         query_vec = precomputed_vec if precomputed_vec is not None else self._get_embedding(user_input)
         
         # 1. Check Semantic Cache
@@ -663,21 +682,6 @@ class MemorySystem:
             def fetchone(self): return None
             def fetchall(self): return []
         return Fallback()
-
-    def add_diary_entry(self, content, mood=0.0, affection=50.0):
-        conn = self._get_db()
-        if not conn: return
-        with self.db_lock:
-            conn.execute("INSERT INTO diaries (content, mood_score, affection_score) VALUES (?,?,?)", (content, mood, affection))
-            conn.commit()
-
-    def get_diary_entries(self, limit=5):
-        conn = self._get_db()
-        if not conn: return []
-        try:
-            rows = conn.execute("SELECT content, mood_score, affection_score, timestamp FROM diaries ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-            return [{"content": r[0], "mood": r[1], "affection": r[2], "timestamp": r[3]} for r in rows]
-        except Exception: return []
 
     def get_stream_milestones(self, limit=3):
         conn = self._get_db()

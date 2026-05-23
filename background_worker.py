@@ -12,7 +12,7 @@ import random
 # Priority levels (lower number = higher priority)
 PRIORITY_CRITICAL = 1  # Memory extraction (owner data, must be fast)
 PRIORITY_HIGH = 2  # Stream summary, important updates
-PRIORITY_NORMAL = 3  # Diary, consolidation, non-critical background tasks
+PRIORITY_NORMAL = 3  # Consolidation and non-critical background tasks
 
 _job_queue = queue.PriorityQueue()
 _job_counter = itertools.count()

@@ -298,14 +298,6 @@ Tình cảm: {affection}/100
 Cách chào: Ngắn gọn, thân thiết.
 """
 
-DIARY_GENERATION_PROMPT = """
-NHIỆM VỤ: Viết nhật ký cuối ngày của Lyra.
-Bối cảnh:
-(Dưới đây là tóm tắt phiên chat, trạng thái cảm xúc, mức độ tình cảm và số lượt chat của phiên này).
-
-Yêu cầu: 3-5 câu ngắn gọn, thật lòng, xưng "em", gọi "anh". Trả về văn bản thuần.
-"""
-
 STREAM_ROLLING_SUMMARY_PROMPT = """
 Hãy tóm tắt ngắn gọn các sự kiện vừa xảy ra trong stream dựa trên danh sách sau:
 Sự kiện: {events}

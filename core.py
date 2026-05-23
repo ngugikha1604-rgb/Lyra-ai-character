@@ -330,21 +330,26 @@ class MiniAI(
         return "\n".join([f"{k.upper()}:\n{v}" for k, v in prompt_dict.items() if v])
 
     def _get_brain_inputs(self, structured_prompt):
+        from prompts import VTUBER_BRAIN_INSTRUCTIONS
         persona = structured_prompt["persona"]
+        # Strip JSON format instruction — DSPy handles output structure via signature.
+        # VTUBER_BRAIN_INSTRUCTIONS xung đột với DSPy field format, chỉ giữ cho fallback path.
+        persona = persona.replace(VTUBER_BRAIN_INSTRUCTIONS.strip(), "").strip()
         situation = structured_prompt["situation"]
         memory = structured_prompt["memory"]
-        if structured_prompt.get("behavior_hints"):
-            situation += f"\nBEHAVIOR_HINTS:\n{structured_prompt['behavior_hints']}"
-        return persona, situation, memory
+        # behavior_hints giờ là field riêng trong DSPy signature thay vì nối vào situation.
+        behavior_hints = structured_prompt.get("behavior_hints", "") or ""
+        return persona, situation, memory, behavior_hints
 
     def _call_brain(self, structured_prompt, history_str, user_msg):
         if not isinstance(structured_prompt, dict) or "persona" not in structured_prompt:
              raise ValueError(f"[Core] Invalid structured_prompt type: {type(structured_prompt)}. Expected dict with 'persona'.")
-        persona, situation, memory = self._get_brain_inputs(structured_prompt)
+        persona, situation, memory, behavior_hints = self._get_brain_inputs(structured_prompt)
         return self.brain(
             persona=persona,
             situation=situation,
             memory=memory,
+            behavior_hints=behavior_hints,
             chat_history=history_str,
             user_message=user_msg,
         )
