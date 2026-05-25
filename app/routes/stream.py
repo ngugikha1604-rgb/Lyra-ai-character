@@ -22,6 +22,7 @@ from live_context import (
     set_stream_active,
     reset_live_context,
     load_live_context,
+    update_field,
     record_donation,
     record_regular_arrival,
 )
@@ -151,50 +152,46 @@ def stream_start():
     yt_poller      = current_app.yt_poller
     stream_service = current_app.stream_service
 
+    data       = request.get_json(silent=True) or {}
+    video_id   = data.get("video_id", os.environ.get("YOUTUBE_VIDEO_ID", ""))
+    chat_id    = data.get("chat_id", "")
+
     try:
-        data       = request.get_json() or {}
-        video_id   = data.get("video_id", os.environ.get("YOUTUBE_VIDEO_ID", ""))
-        chat_id    = data.get("chat_id",  os.environ.get("YOUTUBE_LIVE_CHAT_ID", ""))
-        credentials = current_app.yt_credentials  # set bởi auth route
+        from youtube_chat import get_live_chat_id, get_current_live_stream_info
+        from google.oauth2.credentials import Credentials
 
-        if not credentials:
-            return jsonify({"error": "YouTube OAuth credentials required. Visit /authorize first.", "authorize_url": "/authorize"}), 401
+        creds_path = os.path.join(os.path.dirname(__file__), "..", "..", "youtube_credentials.json")
+        creds_path = os.path.abspath(creds_path)
 
-        # Thử refresh token nếu hết hạn trước khi dùng
-        from app.routes.auth import _refresh_credentials, _creds_dict_to_object
-        import google.oauth2.credentials
-        creds_obj = _creds_dict_to_object(credentials)
-        if creds_obj.expired or not creds_obj.valid:
-            print("[Stream] Token hết hạn, đang refresh...")
-            refreshed = _refresh_credentials(credentials)
-            if not refreshed:
-                # Xóa credentials cũ, yêu cầu re-authorize
-                current_app.yt_credentials = None
-                return jsonify({"error": "Token hết hạn và không thể refresh. Vui lòng re-authorize.", "authorize_url": "/authorize"}), 401
-            credentials = refreshed
-            current_app.yt_credentials = credentials
+        if not os.path.exists(creds_path):
+            return jsonify({"error": "No YouTube credentials found. Please authenticate first."}), 401
+
+        import json as _json
+        with open(creds_path) as f:
+            creds_data = _json.load(f)
+
+        credentials = Credentials(
+            token         = creds_data.get("token"),
+            refresh_token = creds_data.get("refresh_token"),
+            token_uri     = creds_data.get("token_uri"),
+            client_id     = creds_data.get("client_id"),
+            client_secret = creds_data.get("client_secret"),
+            scopes        = creds_data.get("scopes"),
+        )
 
         # Nếu không có chat_id lẫn video_id → tự tìm stream đang active trên kênh
         if not chat_id and not video_id:
-            from youtube_chat import get_current_live_stream_info
             try:
                 video_id, chat_id = get_current_live_stream_info(credentials)
             except Exception as e:
-                if "invalid_grant" in str(e).lower() or "unauthorized" in str(e).lower():
-                    current_app.yt_credentials = None
-                    return jsonify({"error": "Token YouTube hết hạn hoặc bị thu hồi. Vui lòng re-authorize.", "authorize_url": "/authorize"}), 401
-                chat_id = None
+                print(f"[Stream] get_current_live_stream_info failed: {e}")
 
         # Nếu có video_id nhưng chưa có chat_id → lấy từ video_id
         if not chat_id and video_id:
-            from youtube_chat import get_live_chat_id
             try:
                 chat_id = get_live_chat_id(credentials, video_id)
             except Exception as e:
-                if "invalid_grant" in str(e).lower() or "unauthorized" in str(e).lower():
-                    current_app.yt_credentials = None
-                    return jsonify({"error": "Token YouTube hết hạn hoặc bị thu hồi. Vui lòng re-authorize.", "authorize_url": "/authorize"}), 401
-                chat_id = None
+                print(f"[Stream] get_live_chat_id failed: {e}")
 
         if not chat_id:
             return jsonify({"error": "Không tìm thấy stream nào đang active. Hãy bắt đầu stream trên YouTube trước."}), 400
@@ -203,6 +200,10 @@ def stream_start():
         lyra_ai.is_streaming = True
         stream_service.reset_greeted_set()
         set_stream_active(True)
+
+        # Lưu thời điểm bắt đầu stream để tính duration khi stop
+        from memory_utils import get_now_vn
+        update_field("stream_start_time", get_now_vn().isoformat())
 
         # Lấy platform/channel_id để khởi động promote timer
         try:
@@ -226,7 +227,6 @@ def stream_start():
                 pass
 
         # Set timer → proactive sẽ kích hoạt sau 2 phút im lặng
-        from memory_utils import get_now_vn
         lyra_ai._last_viewer_message_time = get_now_vn()
 
         # Greeting runs in the centralized background worker.
@@ -243,166 +243,134 @@ def stream_start():
 
 
 # ------------------------------------------------------------------ #
-# POST /stream/stop                                                    #
+# Stream farewell helper (background thread)                           #
 # ------------------------------------------------------------------ #
 
-from background_worker import enqueue, PRIORITY_NORMAL, PRIORITY_HIGH
-
-
-def _stream_stop_cleanup(viewer_tracker, platform: str, channel_id: str, lyra_ai) -> None:
+def _broadcast_stream_farewell(lyra_ai, sse, ai_lock, viewer_tracker, platform, channel_id) -> None:
     """
-    Chạy trong background worker sau khi stream stop.
-    Thứ tự: promote → clear stats.
-    Tất cả trong 1 task để đảm bảo sequential, không race.
+    Gọi LLM để tạo lời tạm biệt cuối stream, broadcast qua SSE.
+    Chạy trong background worker — không block HTTP response.
+    Fallback: Groq → hard-coded string.
     """
-    try:
-        promoted = viewer_tracker.promote_regular_viewers(platform, channel_id)
-        print(f"[StreamCleanup] Promoted {len(promoted)} viewer(s) to regular.")
-    except Exception as e:
-        print(f"[StreamCleanup] promote error: {e}")
-
-    try:
-        viewer_tracker.clear_session_stats(platform, channel_id)
-        print("[StreamCleanup] Session stats cleared.")
-    except Exception as e:
-        print(f"[StreamCleanup] clear_session_stats error: {e}")
-
-
-@bp.route("/stream/stop", methods=["POST"])
-def stream_stop():
-    lyra_ai        = current_app.lyra_ai
-    yt_poller      = current_app.yt_poller
-    stream_service = current_app.stream_service
-    viewer_tracker = current_app.viewer_tracker
-
-    yt_poller.stop()
-    stream_service.stop_promote_timer()   # dừng 30-min timer
-    lyra_ai.is_streaming = False
-    stream_service.reset_greeted_set()
-    set_stream_active(False)
-
-    # Lấy platform/channel_id từ config
-    try:
-        from config import YOUTUBE_CHANNEL_ID
-        platform   = "youtube"
-        channel_id = YOUTUBE_CHANNEL_ID or "default"
-    except Exception:
-        platform   = "youtube"
-        channel_id = "default"
-
-    # Enqueue cleanup: promote → clear (sequential, 1 task)
-    enqueue(PRIORITY_NORMAL, _stream_stop_cleanup, viewer_tracker, platform, channel_id, lyra_ai)
-
-    print("[Stream] Stopped — cleanup enqueued.")
-    return jsonify({"ok": True})
-
-
-# ------------------------------------------------------------------ #
-# GET /stream/status                                                   #
-# ------------------------------------------------------------------ #
-
-@bp.route("/stream/status")
-def stream_status():
-    lyra_ai   = current_app.lyra_ai
-    yt_poller = current_app.yt_poller
-    return jsonify({
-        "is_streaming": lyra_ai.is_streaming,
-        "poller_running": yt_poller._is_running,
-        "live_context":  load_live_context(),
-    })
-
-
-# ------------------------------------------------------------------ #
-# GET /stream/analytics                                               #
-# ------------------------------------------------------------------ #
-
-@bp.route("/stream/analytics")
-def stream_analytics():
-    viewer_tracker  = current_app.viewer_tracker
-    stream_service  = current_app.stream_service
-
-    top = viewer_tracker.get_top_viewers(limit=20)
-    return jsonify({
-        "top_viewers":    top,
-        "queue_snapshot": stream_service.get_queue_snapshot(),
-    })
-
-
-# ------------------------------------------------------------------ #
-# GET /stream/debug/queue  (admin)                                    #
-# ------------------------------------------------------------------ #
-
-@bp.route("/stream/debug/queue")
-def debug_queue():
-    from app.middleware import require_auth
-    @require_auth
-    def _inner():
-        return jsonify(current_app.stream_service.get_queue_snapshot())
-    return _inner()
-
-
-# ------------------------------------------------------------------ #
-# POST /stream-chat  (manual injection)                               #
-# ------------------------------------------------------------------ #
-
-@bp.route("/stream-chat", methods=["POST"])
-def stream_chat():
-    """
-    Nhận chat event thủ công (không qua YouTube poller).
-    Dùng cho: test, Discord bridge, custom platform webhook.
-    """
-    lyra_ai        = current_app.lyra_ai
-    viewer_tracker = current_app.viewer_tracker
-    chat_analyzer  = current_app.chat_analyzer
-    ai_chat_lock   = current_app.ai_chat_lock
-    vts_bridge     = current_app.vts_bridge
-    stream_service = current_app.stream_service
-
-    try:
-        data = request.get_json()
-        if not data or "message" not in data or "sender_id" not in data:
-            return jsonify({"error": "Missing required fields: message, sender_id"}), 400
-
-        message     = sanitize_input(data["message"], max_length=1000)
-        sender_id   = str(data["sender_id"]).strip()
-        sender_name = str(data.get("sender_name", "Viewer")).strip()
-        channel_id  = str(data.get("channel_id", "default")).strip()
-        platform    = str(data.get("platform", "unknown")).strip()
-        role        = str(data.get("role", "viewer")).strip()
-
-        if not message or not sender_id:
-            return jsonify({"error": "Empty message or sender_id"}), 400
-
-        # Đẩy vào priority queue — xử lý async bởi consumer loop
-        stream_service.enqueue_event({
-            "message":     message,
-            "sender_id":   sender_id,
-            "sender_name": sender_name,
-            "channel_id":  channel_id,
-            "platform":    platform,
-            "role":        role,
-            "is_donor":    data.get("is_donor", False),
-            "donate_amount": data.get("donate_amount", ""),
-            "gender":      data.get("gender", "male"),
-        })
-
-        return jsonify({"ok": True, "queued": True})
-
-    except Exception:
-        traceback.print_exc()
-        return jsonify({"error": "Internal server error"}), 500
-
-
-# ------------------------------------------------------------------ #
-# GET /viewers                                                         #
-# ------------------------------------------------------------------ #
-
-@bp.route("/viewers")
-def get_viewers():
-    platform   = request.args.get("platform")
-    channel_id = request.args.get("channel_id")
-    limit      = min(int(request.args.get("limit", 10)), 50)
-    top = current_app.viewer_tracker.get_top_viewers(
-        platform=platform, channel_id=channel_id, limit=limit
+    import requests
+    from datetime import datetime
+    from config import (
+        GEMINI_API_KEY, GEMINI_BASE_URL,
+        GROQ_API_KEY, STRONG_BASE_URL, STRONG_MODEL,
     )
-    return jsonify({"viewers": top, "count": len(top)})
+    from prompts import STREAM_FAREWELL_PROMPT
+    from live_context import load_live_context
+
+    # Tính duration stream
+    try:
+        ctx = load_live_context()
+        start_iso = ctx.get("stream_start_time", "")
+        if start_iso:
+            from memory_utils import get_now_vn
+            delta = get_now_vn() - datetime.fromisoformat(start_iso)
+            total_mins = int(delta.total_seconds() // 60)
+            hours, mins = divmod(total_mins, 60)
+            duration = f"{hours} tiếng {mins} phút" if hours else f"{mins} phút"
+        else:
+            duration = "một lúc"
+    except Exception:
+        duration = "một lúc"
+
+    # Top 3 viewers
+    try:
+        top = viewer_tracker.get_top_viewers(platform=platform, channel_id=channel_id, limit=3)
+        top_names = ", ".join([v["viewer_name"] for v in top if v.get("viewer_name")]) or "mọi người"
+    except Exception:
+        top_names = "mọi người"
+
+    # Rolling summary từ lyra_ai memory (nếu có)
+    try:
+        summary = lyra_ai.memory._rolling_stream_summary or "một buổi stream vui"
+    except Exception:
+        summary = "một buổi stream vui"
+
+    user_prompt = STREAM_FAREWELL_PROMPT.format(
+        summary=summary,
+        top_viewers=top_names,
+        duration=duration,
+    )
+
+    system_prompt = (
+        "⚠️ XƯNG HÔ BẮT BUỘC: LUÔN xưng 'em', gọi 'mọi người'. "
+        "TUYỆT ĐỐI KHÔNG dùng 'tôi', 'mình', 'bạn'. "
+        "Bạn là Lyra, VTuber nữ 16 tuổi, giọng điệu ấm áp, chân thành. "
+        "Viết bằng tiếng Việt, không dùng emoji, trả về văn bản thuần."
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_prompt},
+    ]
+    payload_body = {
+        "messages":    messages,
+        "temperature": 0.7,
+        "max_tokens":  50,
+    }
+
+    farewell_text = None
+
+    # ── Thử Gemini Flash trước ───────────────────────────────────────────
+    if GEMINI_API_KEY:
+        try:
+            resp = requests.post(
+                GEMINI_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {GEMINI_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json={"model": "gemini-2.0-flash", **payload_body},
+                timeout=8,
+            )
+            if resp.ok:
+                farewell_text = resp.json()["choices"][0]["message"]["content"].strip()
+                print(f"[StreamFarewell] Gemini OK: {farewell_text[:60]}")
+        except Exception as e:
+            print(f"[StreamFarewell] Gemini failed: {e}")
+
+    # ── Fallback: Groq ────────────────────────────────────────────────────
+    if not farewell_text and GROQ_API_KEY:
+        try:
+            resp = requests.post(
+                STRONG_BASE_URL,
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type":  "application/json",
+                },
+                json={"model": STRONG_MODEL, **payload_body},
+                timeout=8,
+            )
+            if resp.ok:
+                farewell_text = resp.json()["choices"][0]["message"]["content"].strip()
+                print(f"[StreamFarewell] Groq OK: {farewell_text[:60]}")
+        except Exception as e:
+            print(f"[StreamFarewell] Groq failed: {e}")
+
+    # ── Fallback cuối: hard-coded ─────────────────────────────────────────
+    if not farewell_text:
+        farewell_text = "Cảm ơn mọi người đã xem stream hôm nay, hẹn gặp lại nhé!"
+        print("[StreamFarewell] Using hard-coded fallback")
+
+    # Broadcast qua SSE
+    try:
+        with ai_lock:
+            emotion = lyra_ai.emotion_from_state() if hasattr(lyra_ai, "emotion_from_state") else "content"
+            affection_val = int(round(lyra_ai.emotion.affection))
+            mood_val = int(round(lyra_ai.emotion.mood))
+        sse.broadcast({
+            "reply":       farewell_text,
+            "monologue":   "",
+            "emotion":     emotion,
+            "action":      "WAVE",
+            "source_type": "system",
+            "sender_name": "Lyra",
+            "affection":   affection_val,
+            "mood":        mood_val,
+        })
+        print("[StreamFarewell] Broadcast OK")
+    except Exception as e:
+        print(f"[StreamFarewell] Broadcast error: {e}")

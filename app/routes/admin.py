@@ -8,10 +8,13 @@ routes/admin.py — Admin/debug routes, yêu cầu X-Admin-Key header.
 from __future__ import annotations
 
 import os
+import traceback
+
 from flask import Blueprint, jsonify, request, session, current_app
 
 from app.middleware import require_auth
 from memory import DB_PATH
+from memory_utils import configure_sqlite_connection
 
 bp = Blueprint("admin", __name__)
 
