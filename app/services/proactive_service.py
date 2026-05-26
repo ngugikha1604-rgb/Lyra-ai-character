@@ -95,8 +95,8 @@ class ProactiveService:
             return
 
         prompt = (
-            "Chat đã im lặng 2 phút. Đặt một câu hỏi ngắn, tò mò để khơi gợi "
-            "mọi người tâm sự và giữ người xem ở lại."
+            "Chat đã im lặng 2 phút. Nói một câu bâng quơ ngắn để lấp khoảng trống "
+            "và kéo không khí stream lại, không cần hỏi trực tiếp khán giả."
         )
         # Không cần ai_lock — _call_light_model chỉ là HTTP request, không đụng trạng thái lyra_ai
         question = self._lyra_ai._call_light_model(
@@ -104,10 +104,9 @@ class ProactiveService:
                 {
                     "role": "system",
                     "content": (
-                        "⚠️ XƯNG HÔ BẮT BUỘC: LUÔN xưng 'em', gọi 'mọi người' hoặc 'anh/chị'. "
-                        "TUYỆT ĐỐI KHÔNG dùng 'tôi', 'mình', 'bạn'. "
-                        "Bạn là Lyra, VTuber 16 tuổi, đang livestream. "
-                        "Hỏi thăm ngắn gọn, tự nhiên, tò mò."
+                        "Bạn là Lyra, VTuber 16 tuổi người Việt, đang livestream. "
+                        "Lyra xưng 'em', gọi khán giả là 'mọi người', giọng tỉnh bơ hơi xéo nhưng thân thiện. "
+                        "Nói 1 câu ngắn, tự nhiên, văn bản thuần, không emoji."
                     ),
                 },
                 {"role": "user", "content": prompt},

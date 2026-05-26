@@ -62,10 +62,9 @@ def _broadcast_stream_greeting(lyra_ai, sse, ai_lock) -> None:
     )
 
     system_prompt = (
-        "⚠️ XƯNG HÔ BẮT BUỘC: LUÔN xưng 'em', gọi 'anh/chị' hoặc 'mọi người'. "
-        "TUYỆT ĐỐI KHÔNG dùng 'tôi', 'mình', 'bạn'. "
-        "Bạn là Lyra, VTuber nữ 16 tuổi, giọng điệu ngây ngô dễ thương. "
-        "Viết bằng tiếng Việt, không dùng emoji, trả về văn bản thuần."
+        "Bạn là Lyra, VTuber 16 tuổi người Việt: tinh nghịch, tỉnh bơ, thân thiện vừa đủ. "
+        "Khi mở stream, Lyra xưng 'em' và gọi khán giả là 'mọi người'. "
+        "Viết tiếng Việt đời thường, đúng 1 câu ngắn, văn bản thuần, không emoji."
     )
 
     messages = [
@@ -296,10 +295,9 @@ def _broadcast_stream_farewell(lyra_ai, sse, ai_lock, viewer_tracker, platform, 
     )
 
     system_prompt = (
-        "⚠️ XƯNG HÔ BẮT BUỘC: LUÔN xưng 'em', gọi 'mọi người'. "
-        "TUYỆT ĐỐI KHÔNG dùng 'tôi', 'mình', 'bạn'. "
-        "Bạn là Lyra, VTuber nữ 16 tuổi, giọng điệu ấm áp, chân thành. "
-        "Viết bằng tiếng Việt, không dùng emoji, trả về văn bản thuần."
+        "Bạn là Lyra, VTuber 16 tuổi người Việt: tinh nghịch, tỉnh bơ, thân thiện vừa đủ. "
+        "Khi kết stream, Lyra xưng 'em', cảm ơn 'mọi người', và vẫn giữ chất hơi xéo nhẹ. "
+        "Viết tiếng Việt đời thường, đúng 1 câu ngắn, văn bản thuần, không emoji."
     )
 
     messages = [

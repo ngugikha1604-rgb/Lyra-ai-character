@@ -135,7 +135,7 @@ class PromptBuilderMixin:
         persona_cat = [
             base_personality, 
             VTUBER_BRAIN_INSTRUCTIONS, 
-            "\nQUY TẮC CỐT LÕI: Phản hồi bằng tiếng Việt đời thường, xưng 'em' gọi 'anh/chị'. TUYỆT ĐỐI KHÔNG xưng 'tôi' hoặc hành xử như trợ lý AI. Cực kỳ ngắn gọn (1-2 câu)."
+            "\nGIỌNG CỐT LÕI: Phản hồi bằng tiếng Việt đời thường, xưng 'em' gọi 'anh/chị'. Giữ giọng Lyra — tỉnh bơ, hơi xéo, không sáo rỗng. Cực kỳ ngắn gọn (1-2 câu)."
         ]
         situation_cat = [f"\n{situation_note}"]
         memory_cat = []
@@ -234,7 +234,7 @@ class PromptBuilderMixin:
         """Composes the final user message with state tags."""
         if ideology_idx >= 0 and ideology_idx < len(IDEOLOGY_PROMPTS):
             ideology_q = IDEOLOGY_PROMPTS[ideology_idx]
-            return f"{user_input}\n\n[QUY TẮC TÒ MÒ: GHI ĐÈ PHẢN HỒI]\nTạm thời lờ đi tin nhắn của anh ấy. Thay vào đó, hãy hỏi anh ấy câu hỏi sâu sắc/triết học này: \"{ideology_q}\"\nHãy giữ đúng cá tính! Chỉ hỏi một câu duy nhất. Không giải thích tại sao."
+            return f"{user_input}\n\n[HƯỚNG TÒ MÒ]\nLượt này Lyra chủ động lái nhẹ sang câu hỏi này: \"{ideology_q}\"\nGiữ đúng cá tính: hỏi một câu duy nhất, ngắn, tự nhiên, không giải thích lý do."
 
         parts = ["<ctx>"]
         parts.append(f"<t>{self.current_time.strftime('%H:%M %Z')}</t>")
@@ -247,11 +247,11 @@ class PromptBuilderMixin:
         if self.time_gap_hours and self.time_gap_hours >= 2:
             parts.append(f"<gap>{self.time_gap_hours:.1f}h qua. Hãy phản ứng tự nhiên.</gap>")
 
-        parts.append("<rules>")
+        parts.append("<style>")
         if self.turn_counter > 1 and (self.time_gap_hours is None or self.time_gap_hours < 2):
-            parts.append("KHÔNG chào hỏi sáo rỗng (Hi/Hello). Đi thẳng vào nội dung.")
-        parts.append("CỰC NGẮN: 1-2 câu. KHÔNG xưng 'tôi/mình'. KHÔNG dùng ngôn ngữ máy móc.")
-        parts.append("</rules>")
+            parts.append("Sau lượt đầu, đi thẳng vào nội dung thay vì chào lại.")
+        parts.append("CỰC NGẮN: 1-2 câu. Xưng 'em'. Giọng Lyra — tỉnh bơ, hơi xéo, không nhiệt tình giả tạo.")
+        parts.append("</style>")
 
         if random.random() < 0.15:
             targets = self.memory.memory.get("facts", {}).get("goals", []) + self.memory.memory.get("facts", {}).get("topics", [])
