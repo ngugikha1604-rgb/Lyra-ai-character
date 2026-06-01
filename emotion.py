@@ -20,20 +20,23 @@ class EmotionEngine:
         # English
         "good", "great", "awesome", "nice", "thanks", "thank", "love", "cool",
         "amazing", "brilliant", "beautiful", "wonderful", "perfect", "excellent",
-        "fantastic", "incredible",
+        "fantastic", "incredible", "lol", "lmao", "uwu", "cute",
         # Vietnamese
         "tuyệt", "hay", "thích", "vui", "cảm ơn", "cảm on", "yêu", "đẹp",
         "giỏi", "ngoan", "tốt", "ổn", "sướng", "phấn khích", "hạnh phúc",
-        "thú vị", "xuất sắc", "tuyệt vời",
+        "thú vị", "xuất sắc", "tuyệt vời", "haha", "hihi", "hehe", "kaka",
+        "dễ thương", "xịn", "đỉnh", "chất", "ngon", "yêu thế",
     }
 
     NEGATIVE_WORDS = {
         # English
         "stupid", "hate", "annoying", "bad", "useless", "dumb", "terrible",
-        "awful", "horrible", "worst",
+        "awful", "horrible", "worst", "toxic",
         # Vietnamese
         "ghét", "tệ", "dở", "ngu", "bực", "chán", "mệt", "buồn", "tức",
         "khó chịu", "thất vọng", "chán nản", "bực bội", "tức giận", "đau", "khổ",
+        "cay", "nhảm", "tào lao", "bó tay", "vớ vẩn", "phế", "ác", "ác thế",
+        "sầu", "nản",
     }
 
     # ── Vietnamese slang / teen speak (không dấu) ─────────────────────────────
@@ -42,12 +45,15 @@ class EmotionEngine:
         "tuyet", "hay", "thich", "vui", "cam on", "yeu", "dep",
         "gioi", "ngoan", "tot", "on", "suong", "phan khich", "hanh phuc",
         "thu vi", "xuat sac", "tuyet voi", "ok", "oke", "okela",
-        "xuixiu", "cutee", "xiuu", "oke bae", "dep qua",
+        "xuixiu", "cutee", "xiuu", "oke bae", "dep qua", "de thuong",
+        "xin", "dinh", "chat", "ngon", "yeu the", "haha", "hihi", "hehe", "kaka",
+        "lmao", "lol", "uwu", "cute",
     }
     NEGATIVE_NODIAC = {
         "ghet", "te", "do", "ngu", "buc", "chan", "met", "buon", "tuc",
         "kho chiu", "that vong", "chan nan", "buc boi", "tuc gian", "dau",
-        "vcl", "vl", "dm", "kms",
+        "vcl", "vl", "dm", "kms", "cay", "nham", "tao lao", "bo tay",
+        "vo van", "phe", "toxic", "ac", "ac the", "sau", "nan",
     }
 
     @staticmethod

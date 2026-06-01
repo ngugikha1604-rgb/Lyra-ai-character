@@ -1,50 +1,48 @@
 """
-ProactiveService — background monitor, tự động tạo câu hỏi khi chat im lặng.
+ProactiveService - background monitor that keeps stream silence from going stale.
 
-Trách nhiệm:
-  - Chạy mỗi 30 giây, kiểm tra thời gian im lặng của chat
-  - Nếu stream đang chạy + chat im > 2 phút → Lyra đặt câu hỏi khơi gợi
-  - Không trigger khi audio đang phát (tránh ngắt giữa câu)
-  - Broadcast kết quả qua SSEService
-
-Không phụ thuộc Flask.
+It favors cheap template lines and only calls an LLM occasionally.
 """
 
 from __future__ import annotations
 
+import random
 import threading
 import time
 from typing import TYPE_CHECKING
 
+from config import STREAM_GAME
 from memory_utils import get_now_vn
+from prompts import (
+    PROACTIVE_STREAM_PROMPT,
+    STREAM_BANGQUA_TEMPLATES,
+    STREAM_ENGAGEMENT_TEMPLATES,
+)
 
 if TYPE_CHECKING:
     from core import MiniAI
+    from viewer_tracker import ChatPatternAnalyzer
     from app.services.sse_service import SSEService
     from app.services.audio_service import AudioService
 
 
 class ProactiveService:
     """
-    Singleton chạy background thread theo dõi silence gap.
+    Singleton background monitor for silence gaps during streams.
 
-    Khởi tạo:
-        proactive_service.init(lyra_ai, sse_service, audio_service, ai_chat_lock)
+    init(lyra_ai, sse_service, audio_service, ai_chat_lock, chat_analyzer=None)
     """
 
-    SILENCE_THRESHOLD_S = 120   # 2 phút
-    CHECK_INTERVAL_S    = 30
+    SILENCE_THRESHOLD_S = 120
+    CHECK_INTERVAL_S = 30
 
     def __init__(self):
-        self._lyra_ai: "MiniAI | None"     = None
-        self._sse:     "SSEService | None" = None
-        self._audio:   "AudioService | None" = None
+        self._lyra_ai: "MiniAI | None" = None
+        self._sse: "SSEService | None" = None
+        self._audio: "AudioService | None" = None
         self._ai_lock: threading.Lock | None = None
-        self._thread:  threading.Thread | None = None
-
-    # ------------------------------------------------------------------ #
-    # Setup                                                                #
-    # ------------------------------------------------------------------ #
+        self._chat_analyzer: "ChatPatternAnalyzer | None" = None
+        self._thread: threading.Thread | None = None
 
     def init(
         self,
@@ -52,21 +50,19 @@ class ProactiveService:
         sse: "SSEService",
         audio: "AudioService",
         ai_chat_lock: threading.Lock,
+        chat_analyzer: "ChatPatternAnalyzer | None" = None,
     ) -> None:
         self._lyra_ai = lyra_ai
-        self._sse     = sse
-        self._audio   = audio
+        self._sse = sse
+        self._audio = audio
         self._ai_lock = ai_chat_lock
+        self._chat_analyzer = chat_analyzer
 
         self._thread = threading.Thread(
             target=self._monitor_loop, daemon=True, name="ProactiveMonitor"
         )
         self._thread.start()
         print("[ProactiveService] Monitor thread started.")
-
-    # ------------------------------------------------------------------ #
-    # Monitor loop                                                         #
-    # ------------------------------------------------------------------ #
 
     def _monitor_loop(self) -> None:
         while True:
@@ -81,7 +77,6 @@ class ProactiveService:
             return
 
         last_time = getattr(self._lyra_ai, "_last_viewer_message_time", None)
-        # Nếu chưa có viewer nào chat (None) thì cũng coi là im lặng kể từ lúc stream bắt đầu
         if last_time is None:
             self._lyra_ai._last_viewer_message_time = get_now_vn()
             return
@@ -90,16 +85,51 @@ class ProactiveService:
         if gap <= self.SILENCE_THRESHOLD_S:
             return
 
-        # Không ngắt khi đang phát audio
         if self._audio.is_busy():
             return
 
-        prompt = (
-            "Chat đã im lặng 2 phút. Nói một câu bâng quơ ngắn để lấp khoảng trống "
-            "và kéo không khí stream lại, không cần hỏi trực tiếp khán giả."
+        question = self._choose_silence_line()
+        if not question:
+            return
+
+        self._sse.broadcast({
+            "type": "proactive_question",
+            "reply": question.strip(),
+            "emotion": "thinking",
+            "action": "THINK",
+            "sender_name": "Lyra",
+            "source_type": "system",
+        })
+
+        self._lyra_ai._last_viewer_message_time = get_now_vn()
+        print(f"[ProactiveService] Question sent: {question.strip()[:60]}")
+
+    def _choose_silence_line(self) -> str:
+        roll = random.random()
+
+        # Task 2.5 — Ưu tiên nhắc highlight nếu có và chat đang im
+        from live_context import load_live_context
+        highlights = load_live_context().get("stream_highlights", [])
+        if highlights and random.random() < 0.35:
+            ref = random.choice(highlights)
+            return f"Hồi nãy đoạn [{ref}] mọi người ồn ào thật đó, em vẫn chưa quên."
+
+        if roll < 0.60:
+            item = random.choice(STREAM_ENGAGEMENT_TEMPLATES)
+            text = item["text"] if isinstance(item, dict) else str(item)
+            poll = item.get("poll") if isinstance(item, dict) else None
+            if poll and self._chat_analyzer:
+                self._chat_analyzer.start_poll(poll[0], poll[1])
+            return text
+
+        if roll < 0.90:
+            return random.choice(STREAM_BANGQUA_TEMPLATES)
+
+        prompt = PROACTIVE_STREAM_PROMPT.format(
+            current_activity="đang giữ nhịp stream",
+            game=STREAM_GAME or "chuyện phiếm",
         )
-        # Không cần ai_lock — _call_light_model chỉ là HTTP request, không đụng trạng thái lyra_ai
-        question = self._lyra_ai._call_light_model(
+        return self._lyra_ai._call_light_model(
             messages=[
                 {
                     "role": "system",
@@ -113,24 +143,7 @@ class ProactiveService:
             ],
             temperature=0.4,
             max_tokens=60,
-        )
-
-        if not question:
-            return
-
-        self._sse.broadcast({
-            "type":        "proactive_question",
-            "reply":       question.strip(),
-            "emotion":     "thinking",
-            "action":      "THINK",
-            "sender_name": "Lyra",
-            "source_type": "system",
-        })
-
-        # Reset timer để tránh spam
-        self._lyra_ai._last_viewer_message_time = get_now_vn()
-        print(f"[ProactiveService] Question sent: {question.strip()[:60]}")
+        ) or ""
 
 
-# Singleton
 proactive_service = ProactiveService()

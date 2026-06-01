@@ -122,6 +122,15 @@ class RLFeedbackLoop:
                 
                 if obs["reward_score"] >= 8.0:
                     enqueue(PRIORITY_NORMAL, self.ai.synthesizer.synthesize_from_rl, obs.get("user_input", ""), obs["reply"], obs["reaction_preview"], self.ai)
+                    # Task 3.1 — inject mid-stream insight vào live_context (0 LLM call thêm)
+                    try:
+                        from live_context import load_live_context, update_insights
+                        existing = load_live_context().get("current_insights", [])
+                        insight = f"Chat react tốt khi Lyra: '{obs['reply'][:50]}'"
+                        update_insights((existing + [insight])[-3:])
+                        print(f"[RL] Mid-stream insight saved: {insight[:60]}")
+                    except Exception as _e:
+                        print(f"[RL] Mid-stream insight error: {_e}")
                 
                 with self.lock:
                     self.buffer.append(obs)

@@ -327,6 +327,30 @@ Yêu cầu: 1 câu cực ngắn, văn bản thuần, không emoji.
 VÍ DỤ GIỌNG ĐIỆU: "Chat tự nhiên im quá, chắc mọi người đang giả vờ tập trung rồi.", "Thôi được, để em tự độc thoại một lát vậy.", "Không khí im tới mức em nghe được não em đang chạy."
 """
 
+STREAM_ENGAGEMENT_TEMPLATES = [
+    {"text": "Chat chọn một chữ thôi: A hay B?", "poll": ("A", "B")},
+    {"text": "Ai còn thức thì nhắn một từ bất kỳ đi, em kiểm tra sĩ số chút."},
+    {"text": "Hôm nay vibe của chat là màu gì? Nói một màu thôi nha."},
+    {"text": "Trong chat có ai đang ăn không? Có thì nhắn dấu chấm cho em biết."},
+    {"text": "Chat chọn nhanh: có hay không?", "poll": ("có", "không")},
+]
+
+STREAM_BANGQUA_TEMPLATES = [
+    "Chat tự nhiên im quá, chắc mọi người đang giả vờ tập trung rồi.",
+    "Không khí im tới mức em nghe được mạng của em đang lag.",
+    "Thôi được, để em tự độc thoại một lúc vậy.",
+    "Im vậy là mọi người đang suy nghĩ sâu sắc hay là bỏ em lại đó?",
+]
+
+RUNNING_BITS = [
+    "Giữ một trò đùa nhỏ hôm nay: chat là hội đồng phán xét của Lyra.",
+    "Giữ một trò đùa nhỏ hôm nay: ai nhắn chậm sẽ bị Lyra nghi là đang ngủ gật.",
+    "Giữ một trò đùa nhỏ hôm nay: mọi lựa chọn A/B đều bị Lyra bình phẩm tỉnh bơ.",
+    "Giữ một trò đùa nhỏ hôm nay: gọi top chatter là người trực ca của stream.",
+    "Giữ một trò đùa nhỏ hôm nay: chat càng im thì Lyra càng giả vờ làm phát thanh viên.",
+    "Giữ một trò đùa nhỏ hôm nay: Lyra tự chấm điểm độ ngoan của chat.",
+]
+
 REGULAR_VIEWER_ARRIVAL_HINT = """
 THÔNG BÁO: NGƯỜI XEM QUEN VỪA GHÉ STREAM
 {viewer_name} vừa gửi tin nhắn đầu tiên.

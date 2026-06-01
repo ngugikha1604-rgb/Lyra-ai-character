@@ -104,6 +104,7 @@ def get_default_context() -> Dict[str, Any]:
         "stream_plan": [],
         "expires_after_minutes": DEFAULT_CONTEXT_TTL_MINUTES,
         "donations_this_stream": [],   # ← danh sách donation trong session
+        "stream_highlights": [],       # ← danh sách khoảnh khắc đáng nhớ
     }
 
 
@@ -232,6 +233,11 @@ def get_live_context_block(max_lines: int = 6) -> str:
     if constraints:
         lines.append(f"Constraints: {'; '.join(constraints)}")
 
+    # Stream highlights (exclamations/ consensus events)
+    highlights = data.get("stream_highlights", [])
+    if highlights:
+        lines.append(f"Khoảnh khắc đáng nhớ hôm nay: {', '.join(highlights)}")
+
     # Current insights (from Reflection Loop)
     insights = data.get("current_insights", [])
     if insights:
@@ -248,7 +254,7 @@ def get_live_context_block(max_lines: int = 6) -> str:
             lines.append(f"□ {p['goal']}")
 
     lines.append("[/LIVE_CONTEXT]")
-    block = "\n".join(lines[:max_lines + 4]) # Allow a bit more for new sections
+    block = "\n".join(lines[:max_lines + 6]) # Allow a bit more lines for highlights
     return block
 
 

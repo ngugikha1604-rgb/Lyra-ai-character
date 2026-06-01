@@ -73,6 +73,16 @@ class StreamService:
         self._last_new_viewer_pick: float = 0.0
         self._reply_lock = threading.Lock()
 
+        # Silence detection cho Mood Contagion
+        self._last_message_received_time: float = 0.0  # timestamp tin nhắn viewer cuối cùng
+        self._last_silence_decay_time: float = 0.0     # timestamp lần decay gần nhất
+        self._SILENCE_THRESHOLD_S: float = 30.0        # im lặng bao lâu mới coi là "vắng"
+        self._SILENCE_DECAY_INTERVAL_S: float = 15.0   # decay attention mỗi 15s trong silence
+
+        # Task 2.4 — Mood Stage tracking
+        self._last_broadcast_mood: float = 0.0
+        self._spy_observed: set[str] = set()  # Task 3.2 prep
+
         # Dependencies (inject sau khi app khởi động)
         self._lyra_ai: "MiniAI | None" = None
         self._viewer_tracker: "ViewerTracker | None" = None
@@ -160,6 +170,8 @@ class StreamService:
         """Gọi khi stream stop/start để tránh greeting stale session."""
         with self._greeted_lock:
             self._greeted_this_session.clear()
+        # Reset spy observation set để observer lại trong session mới
+        self._spy_observed = set()
 
     def get_queue_snapshot(self) -> dict:
         """Stats để hiển thị ở /stream/analytics."""
@@ -224,12 +236,21 @@ class StreamService:
         message   = chat_event.get("message", "")
         is_owner  = chat_event.get("is_owner", False)
         is_donor  = chat_event.get("is_donor", False)
+        sender_id = chat_event.get("sender_id", "")
+
+        if (
+            not is_owner
+            and not is_donor
+            and self._chat_analyzer
+            and self._chat_analyzer.poll_is_active()
+            and self._chat_analyzer.ingest_poll_vote(message, sender_id)
+        ):
+            return
 
         # Donor và owner luôn được xử lý, không filter spam
         if not is_owner and not is_donor and self._is_spam(message):
             return
 
-        sender_id = chat_event.get("sender_id", "")
         platform  = chat_event.get("platform", "youtube")
 
         regular = self._viewer_tracker.is_regular_viewer(sender_id, platform)
@@ -308,6 +329,32 @@ class StreamService:
                             f"({consensus_event.unique_count}/{consensus_event.total_unique} = "
                             f"{consensus_event.percent:.0%})"
                         )
+                        # Record highlight in live_context (cap to 3 max)
+                        from live_context import load_live_context, update_field
+                        ctx = load_live_context()
+                        highlights = ctx.get("stream_highlights", [])
+                        h_content = f"{consensus_event.content[:40]}"
+                        if h_content not in highlights:
+                            highlights.append(h_content)
+                            update_field("stream_highlights", highlights[-3:])
+                    except queue.Full:
+                        pass
+                    except Exception as e:
+                        print(f"[StreamService] Failed to update highlights: {e}")
+
+                # Poll result → synthetic donor event
+                poll_result = self._chat_analyzer.get_pending_poll_result()
+                if poll_result is not None:
+                    synthetic = {
+                        "message":     poll_result["hint"],
+                        "sender_id":   "__poll__",
+                        "sender_name": "Chat",
+                        "_tier":       "donor",
+                        "_is_poll_result":  True,
+                    }
+                    try:
+                        self._queues["donor"].put_nowait(synthetic)
+                        print(f"[StreamService] Poll result queued: {poll_result['winner']}")
                     except queue.Full:
                         pass
 
@@ -319,6 +366,21 @@ class StreamService:
                 event = self._pick_next_event()
 
                 if event is None:
+                    # Silence decay: giảm attention chỉ khi chat thực sự im lặng
+                    # (không có event nào, không phải "có tin nhưng velocity thấp")
+                    _now = time.time()
+                    if (
+                        self._lyra_ai is not None
+                        and self._last_message_received_time > 0
+                        and (_now - self._last_message_received_time) >= self._SILENCE_THRESHOLD_S
+                        and (_now - self._last_silence_decay_time) >= self._SILENCE_DECAY_INTERVAL_S
+                    ):
+                        with self._ai_lock:
+                            self._lyra_ai.emotion.attention = max(
+                                2.0, self._lyra_ai.emotion.attention - 0.3
+                            )
+                        self._last_silence_decay_time = _now
+                        self._maybe_broadcast_mood_stage()
                     time.sleep(0.3)
                     continue
 
@@ -411,10 +473,10 @@ class StreamService:
             sender_name = chat_event.get("sender_name", "Viewer")
             platform    = chat_event.get("platform", "youtube")
             channel_id  = chat_event.get("channel_id", "default")
-            is_consensus = chat_event.get("_is_consensus", False)
+            is_consensus = chat_event.get("_is_consensus", False) or chat_event.get("_is_poll_result", False)
             tier        = chat_event.get("_tier", "new_viewer")
 
-            # ── Consensus: không record viewer stats ──────────────────────────
+            # ── Consensus / Poll Result: không record viewer stats ────────────
             if is_consensus:
                 source_type_val = "new_viewer"
                 viewer_data     = {"viewer_name": "Chat"}
@@ -436,9 +498,9 @@ class StreamService:
                     )
                 payload = build_state_payload(self._lyra_ai, result)
                 payload.update({
-                    "sender_id":   "__consensus__",
-                    "sender_name": "Chat",
-                    "source_type": "consensus",
+                    "sender_id":   sender_id,
+                    "sender_name": sender_name,
+                    "source_type": "consensus" if chat_event.get("_is_consensus", False) else "poll_result",
                     "is_consensus": True,
                 })
                 self._sse.broadcast(payload)
@@ -466,11 +528,45 @@ class StreamService:
             if vel_hint:
                 stream_ctx = f"{stream_ctx}\n{vel_hint}" if stream_ctx else vel_hint
 
+            # 1a. Mood Contagion — boost khi chat sôi, ghi nhận thời điểm nhận tin
+            # (silence decay chạy riêng trong _consumer_loop khi không có event nào)
+            if vel_hint and ("cực kỳ sôi nổi" in vel_hint or "rất sôi" in vel_hint):
+                with self._ai_lock:
+                    self._lyra_ai.emotion.mood = min(8.0, self._lyra_ai.emotion.mood + 0.4)
+                    self._lyra_ai.emotion.attention = min(10.0, self._lyra_ai.emotion.attention + 0.5)
+                self._maybe_broadcast_mood_stage()
+            self._last_message_received_time = time.time()
+
+            # 1b. Viewer Mood Detection (Nhận diện cảm xúc người xem)
+            viewer_mood = self._lyra_ai.detect_user_mood(message)
+            if viewer_mood in ("sad", "excited", "stressed", "frustrated"):
+                stream_ctx = f"[Cảm xúc viewer]: {sender_name} có vẻ đang {viewer_mood}\n{stream_ctx}" if stream_ctx else f"[Cảm xúc viewer]: {sender_name} có vẻ đang {viewer_mood}"
+
             # Regular viewer arrival greeting
             if tier == "regular_viewer" and viewer_info.get("message_count", 0) == 1:
                 stream_ctx = self._inject_arrival_hint(
                     chat_event, sender_id, sender_name, stream_ctx
                 )
+
+            # Task 3.2 — Spy Observation: nhận ra pattern của viewer quen ở mốc 15 tin
+            if tier == "regular_viewer":
+                msg_count = viewer_info.get("message_count", 0)
+                if msg_count == 15 and sender_id not in self._spy_observed:
+                    self._spy_observed.add(sender_id)
+                    try:
+                        recent = self._viewer_tracker.get_viewer_recent_messages(
+                            sender_id, platform, channel_id, limit=5
+                        )
+                        if recent:
+                            msgs_sample = " / ".join(m["message"] for m in recent[-3:])
+                            spy_hint = (
+                                f"[OBS]: Em nhận ra {sender_name} hay xuất hiện đúng lúc chat sôi. "
+                                f"Gần đây nhắn: '{msgs_sample[:80]}'. "
+                                f"Có thể nhắc tên và đề cập nhẹ một điều cụ thể về pattern này.\n"
+                            )
+                            stream_ctx = spy_hint + stream_ctx if stream_ctx else spy_hint
+                    except Exception as _e:
+                        print(f"[StreamService] Spy observation error: {_e}")
 
             if not self._chat_analyzer.should_extract_memory(viewer_info):
                 self._lyra_ai._skip_next_memory_extraction = True
@@ -494,6 +590,9 @@ class StreamService:
                     viewer_data=viewer_data,
                     stream_context=stream_ctx,
                 )
+                # VAD Sync to live_context.json
+                from live_context import maybe_refresh_from_emotion
+                maybe_refresh_from_emotion(self._lyra_ai.emotion.get_state())
 
             if self._chat_analyzer.should_summarize():
                 enqueue(PRIORITY_HIGH, self._trigger_summary, channel_id, platform)
@@ -637,6 +736,54 @@ class StreamService:
                 print(f"[StreamService] Summary: {summary}")
         except Exception as e:
             print(f"[StreamService] summary error: {e}")
+
+    # ------------------------------------------------------------------ #
+    # Task 2.4 — Stream Mood Stage SSE broadcast                          #
+    # ------------------------------------------------------------------ #
+
+    _MOOD_STAGE_TEMPLATES: dict = {
+        "hype": [
+            "Chat đang làm em phấn khích thật, em thích kiểu này.",
+            "Ủa hôm nay chat vui vậy, em cũng muốn phá theo.",
+        ],
+        "grumpy": [
+            "Chat im hay thế, em đang tự hỏi có ai còn sống không.",
+            "Okay mọi người chắc đang banh não gì đó, Lyra đợi.",
+        ],
+    }
+
+    def _maybe_broadcast_mood_stage(self) -> None:
+        """Broadcast mood stage khi emotion thay đổi đủ lớn (delta >= 2.0)."""
+        if self._lyra_ai is None or self._sse is None:
+            return
+        with self._ai_lock:
+            mood = self._lyra_ai.emotion.mood
+
+        prev = self._last_broadcast_mood
+        if abs(mood - prev) < 2.0:
+            return
+
+        if mood > 6:
+            stage, pool = "hype", self._MOOD_STAGE_TEMPLATES["hype"]
+        elif mood < -3:
+            stage, pool = "grumpy", self._MOOD_STAGE_TEMPLATES["grumpy"]
+        else:
+            self._last_broadcast_mood = mood
+            return  # neutral → im lặng
+
+        text = random.choice(pool)
+        self._sse.broadcast({
+            "type":        "mood_stage",
+            "reply":       text,
+            "emotion":     stage,
+            "action":      "NONE",
+            "sender_name": "Lyra",
+            "source_type": "system",
+        })
+        from live_context import update_field as _update_field
+        _update_field("mood_label", stage)
+        self._last_broadcast_mood = mood
+        print(f"[StreamService] Mood stage broadcast: {stage} (mood={mood:.1f})")
 
 
 # Singleton

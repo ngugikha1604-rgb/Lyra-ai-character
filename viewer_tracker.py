@@ -422,6 +422,101 @@ class ConsensusDetector:
         return ""
 
 
+class PollManager:
+    """Lightweight A/B poll counter for stream chat. No LLM calls."""
+
+    POLL_DURATION_S = 25.0
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._active: dict | None = None
+
+    def start_poll(self, option_a: str = "A", option_b: str = "B", duration_s: float | None = None) -> None:
+        now = time.time()
+        with self._lock:
+            self._active = {
+                "option_a": str(option_a),
+                "option_b": str(option_b),
+                "started_at": now,
+                "duration_s": float(duration_s or self.POLL_DURATION_S),
+                "votes": {},
+            }
+        print(f"[Poll] Started: {option_a} vs {option_b}")
+
+    def is_active(self) -> bool:
+        with self._lock:
+            if not self._active:
+                return False
+            return (time.time() - self._active["started_at"]) <= self._active["duration_s"]
+
+    def ingest_vote(self, message: str, sender_id: str) -> bool:
+        vote = self._parse_vote(message)
+        if not vote or not sender_id:
+            return False
+        with self._lock:
+            if not self._active:
+                return False
+            if (time.time() - self._active["started_at"]) > self._active["duration_s"]:
+                return False
+            self._active["votes"][sender_id] = vote
+        return True
+
+    def get_result_if_ready(self) -> dict | None:
+        with self._lock:
+            if not self._active:
+                return None
+            now = time.time()
+            if now - self._active["started_at"] <= self._active["duration_s"]:
+                return None
+            active = self._active
+            self._active = None
+
+        votes = list(active["votes"].values())
+        counts = collections.Counter(votes)
+        a_label = active["option_a"]
+        b_label = active["option_b"]
+        a_count = counts.get("A", 0)
+        b_count = counts.get("B", 0)
+        total = a_count + b_count
+
+        if total == 0:
+            summary = f"[POLL RESULT]: Không ai vote {a_label}/{b_label}. Lyra có thể trêu chat vì im lặng."
+            winner = "none"
+        elif a_count == b_count:
+            summary = f"[POLL RESULT]: Vote hòa {a_count}-{b_count} giữa {a_label} và {b_label}. Lyra nên react như chat đang chia phe."
+            winner = "tie"
+        else:
+            winner = "A" if a_count > b_count else "B"
+            winner_label = a_label if winner == "A" else b_label
+            summary = (
+                f"[POLL RESULT]: Chat vote xong: {a_label}={a_count}, {b_label}={b_count}. "
+                f"{winner_label} thắng. Lyra nên đọc kết quả và bình phẩm ngắn."
+            )
+
+        return {
+            "winner": winner,
+            "option_a": a_label,
+            "option_b": b_label,
+            "a_count": a_count,
+            "b_count": b_count,
+            "total": total,
+            "hint": summary,
+        }
+
+    def reset(self) -> None:
+        with self._lock:
+            self._active = None
+
+    def _parse_vote(self, message: str) -> str | None:
+        text = (message or "").strip().lower()
+        if not text:
+            return None
+        text = re.sub(r"[^\wÀ-ỹ]+", " ", text, flags=re.UNICODE).strip()
+        if text in {"a", "1", "có", "co", "yes", "y"}:
+            return "A"
+        if text in {"b", "2", "không", "khong", "no", "n"}:
+            return "B"
+        return None
 
 
 class ViewerTracker:
@@ -439,6 +534,11 @@ class ViewerTracker:
         self._regular_cache: dict = {}   # viewer_id+platform → dict
         self._regular_cache_ts: float = 0.0
         self._regular_cache_ttl: float = 60.0  # refresh mỗi 60 giây
+
+        # Task 2.3 — Personality Type cache (không expire trong session)
+        # key: f"{platform}:{channel_id}:{sender_id}"
+        # value: "questioner" | "complimenter" | "teaser" | None
+        self._personality_cache: dict[str, str | None] = {}
 
     def _get_conn(self):
         conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=5.0)
@@ -946,6 +1046,51 @@ class ViewerTracker:
                     f"NGƯỜI XEM QUEN — {sender_name}: "
                     f"Đã xem {streams} buổi stream. Mức độ tình cảm: {aff}/100."
                 )
+                
+                # --- Loyalty Badge (Danh hiệu trực ca) ---
+                if streams >= 25:
+                    badge = "trực ca viên lâu năm"
+                elif streams >= 10:
+                    badge = "hội viên cứng"
+                elif streams >= 4:
+                    badge = "khách quen mặt"
+                else:
+                    badge = None
+                if badge:
+                    parts.append(f"Danh hiệu: {badge} — Lyra có thể gọi tên này khi nhắc đến {sender_name}.")
+
+                # --- Phân loại tính cách (Personality Type - pure Python, cached) ---
+                _pkey = f"{platform}:{channel_id}:{sender_id}"
+                if _pkey in self._personality_cache:
+                    _ptype = self._personality_cache[_pkey]
+                else:
+                    recent_msgs = self.get_viewer_recent_messages(sender_id, platform, channel_id, limit=10)
+                    _ptype = None
+                    if recent_msgs and len(recent_msgs) >= 5:
+                        q_count, comp_count, tease_count = 0, 0, 0
+                        for m in recent_msgs:
+                            msg_text = m.get("message", "").lower()
+                            if "?" in msg_text or any(w in msg_text for w in ["sao", "gì", "nào", "đâu", "tại sao", "bao giờ"]):
+                                q_count += 1
+                            if any(w in msg_text for w in ["tuyệt", "hay", "thích", "đẹp", "giỏi", "ngoan", "tốt", "xịn", "khen"]):
+                                comp_count += 1
+                            if any(w in msg_text for w in ["ghét", "tệ", "dở", "ngu", "chán", "bực", "phế", "nhảm", "cọc", "khịa"]):
+                                tease_count += 1
+                        if q_count > comp_count and q_count > tease_count:
+                            _ptype = "questioner"
+                        elif comp_count > q_count and comp_count > tease_count:
+                            _ptype = "complimenter"
+                        elif tease_count > q_count and tease_count > comp_count:
+                            _ptype = "teaser"
+                    self._personality_cache[_pkey] = _ptype
+
+                if _ptype == "questioner":
+                    parts.append("Đặc điểm: Người này hay hỏi nhiều, Lyra có thể trả lời sâu hơn.")
+                elif _ptype == "complimenter":
+                    parts.append("Đặc điểm: Người này hay khen, Lyra có thể trêu nhẹ kiểu 'anh lại khen rồi'.")
+                elif _ptype == "teaser":
+                    parts.append("Đặc điểm: Người này hay khịa/gây sự, Lyra sẵn sàng trêu/cà khịa ngược lại.")
+
                 if aff >= 70:
                     parts.append("Đây là người xem rất thân, hãy nhắc tên và tương tác ấm áp hơn.")
                 elif aff >= 50:
@@ -1058,6 +1203,7 @@ class ChatPatternAnalyzer:
         self._style_cache: str = ""
         self._style_cache_dirty = True
         self._consensus = ConsensusDetector()  # ← tích hợp consensus detection
+        self._poll = PollManager()
         self._init_table()
 
     def _get_conn(self):
@@ -1168,6 +1314,7 @@ class ChatPatternAnalyzer:
             self._message_counter = 0
             self._style_cache_dirty = True
             self._consensus.reset()  # reset consensus state cho stream mới
+            self._poll.reset()
 
             conn = self._get_conn()
             with self.db_lock:
@@ -1194,6 +1341,18 @@ class ChatPatternAnalyzer:
     def get_velocity_hint(self) -> str:
         """Lấy velocity hint hiện tại."""
         return self._consensus.get_velocity_hint()
+
+    def start_poll(self, option_a: str = "A", option_b: str = "B") -> None:
+        self._poll.start_poll(option_a, option_b)
+
+    def poll_is_active(self) -> bool:
+        return self._poll.is_active()
+
+    def ingest_poll_vote(self, message: str, sender_id: str) -> bool:
+        return self._poll.ingest_vote(message, sender_id)
+
+    def get_pending_poll_result(self) -> dict | None:
+        return self._poll.get_result_if_ready()
 
     # ------------------------------------------------------------------
     # 2. Style hints cho prompt

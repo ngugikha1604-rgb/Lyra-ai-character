@@ -113,7 +113,7 @@ def _init_dependencies(app: Flask) -> None:
         lyra_ai, viewer_tracker, chat_analyzer, yt_poller,
         vts_bridge, sse_service, audio_service, ai_chat_lock,
     )
-    proactive_service.init(lyra_ai, sse_service, audio_service, ai_chat_lock)
+    proactive_service.init(lyra_ai, sse_service, audio_service, ai_chat_lock, chat_analyzer)
 
     app.lyra_ai        = lyra_ai
     app.viewer_tracker = viewer_tracker

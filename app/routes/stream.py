@@ -181,21 +181,21 @@ def stream_start():
         # Nếu không có chat_id lẫn video_id → tự tìm stream đang active trên kênh
         if not chat_id and not video_id:
             try:
-                video_id, chat_id = get_current_live_stream_info(credentials)
+                video_id, chat_id = get_current_live_stream_info(creds_data)
             except Exception as e:
                 print(f"[Stream] get_current_live_stream_info failed: {e}")
 
         # Nếu có video_id nhưng chưa có chat_id → lấy từ video_id
         if not chat_id and video_id:
             try:
-                chat_id = get_live_chat_id(credentials, video_id)
+                chat_id = get_live_chat_id(creds_data, video_id)
             except Exception as e:
                 print(f"[Stream] get_live_chat_id failed: {e}")
 
         if not chat_id:
             return jsonify({"error": "Không tìm thấy stream nào đang active. Hãy bắt đầu stream trên YouTube trước."}), 400
 
-        yt_poller.start(credentials, chat_id)
+        yt_poller.start(creds_data, chat_id)
         lyra_ai.is_streaming = True
         stream_service.reset_greeted_set()
         set_stream_active(True)
@@ -203,6 +203,13 @@ def stream_start():
         # Lưu thời điểm bắt đầu stream để tính duration khi stop
         from memory_utils import get_now_vn
         update_field("stream_start_time", get_now_vn().isoformat())
+
+        # Task 2.2 — Running Bit injection
+        import random as _random
+        from prompts import RUNNING_BITS
+        from live_context import update_plan
+        _bit = _random.choice(RUNNING_BITS)
+        update_plan([{"goal": _bit, "status": "pending"}])
 
         # Lấy platform/channel_id để khởi động promote timer
         try:
@@ -372,3 +379,160 @@ def _broadcast_stream_farewell(lyra_ai, sse, ai_lock, viewer_tracker, platform, 
         print("[StreamFarewell] Broadcast OK")
     except Exception as e:
         print(f"[StreamFarewell] Broadcast error: {e}")
+
+
+# ------------------------------------------------------------------ #
+# POST /stream/stop                                                    #
+# ------------------------------------------------------------------ #
+
+@bp.route("/stream/stop", methods=["POST"])
+def stream_stop():
+    lyra_ai        = current_app.lyra_ai
+    yt_poller      = current_app.yt_poller
+    stream_service = current_app.stream_service
+    sse            = current_app.sse_service
+    ai_lock        = current_app.ai_chat_lock
+    viewer_tracker = current_app.viewer_tracker
+
+    try:
+        from background_worker import enqueue, PRIORITY_HIGH
+        from config import YOUTUBE_CHANNEL_ID
+
+        _platform   = "youtube"
+        _channel_id = YOUTUBE_CHANNEL_ID or "default"
+
+        # 1. Dừng YouTube poller
+        yt_poller.stop()
+
+        # 2. Broadcast farewell (background)
+        enqueue(
+            PRIORITY_HIGH,
+            _broadcast_stream_farewell,
+            lyra_ai, sse, ai_lock, viewer_tracker, _platform, _channel_id,
+        )
+
+        # 3. Dừng promote timer
+        stream_service.stop_promote_timer()
+
+        # 4. Đánh dấu không còn streaming
+        lyra_ai.is_streaming = False
+
+        # 5. Reset live context
+        reset_live_context()
+
+        print("[Stream] Stopped.")
+        return jsonify({"ok": True})
+
+    except Exception:
+        traceback.print_exc()
+        return jsonify({"error": "Failed to stop stream"}), 500
+
+
+# ------------------------------------------------------------------ #
+# GET /stream/status                                                   #
+# ------------------------------------------------------------------ #
+
+@bp.route("/stream/status", methods=["GET"])
+def stream_status():
+    lyra_ai = current_app.lyra_ai
+    try:
+        ctx = load_live_context()
+        ctx["is_streaming"] = getattr(lyra_ai, "is_streaming", False)
+        return jsonify(ctx)
+    except Exception:
+        traceback.print_exc()
+        return jsonify({"error": "Failed to get status"}), 500
+
+
+# ------------------------------------------------------------------ #
+# GET /stream/analytics                                                #
+# ------------------------------------------------------------------ #
+
+@bp.route("/stream/analytics", methods=["GET"])
+def stream_analytics():
+    stream_service = current_app.stream_service
+    viewer_tracker = current_app.viewer_tracker
+
+    try:
+        from config import YOUTUBE_CHANNEL_ID
+        _platform   = "youtube"
+        _channel_id = YOUTUBE_CHANNEL_ID or "default"
+
+        top_viewers  = viewer_tracker.get_top_viewers(
+            platform=_platform, channel_id=_channel_id, limit=10
+        )
+        queue_snap   = stream_service.get_queue_snapshot()
+
+        return jsonify({
+            "top_viewers":    top_viewers,
+            "queue_snapshot": queue_snap,
+        })
+    except Exception:
+        traceback.print_exc()
+        return jsonify({"error": "Failed to get analytics"}), 500
+
+
+# ------------------------------------------------------------------ #
+# GET /stream/debug/queue                                              #
+# ------------------------------------------------------------------ #
+
+@bp.route("/stream/debug/queue", methods=["GET"])
+def stream_debug_queue():
+    stream_service = current_app.stream_service
+    try:
+        snap = stream_service.get_queue_snapshot()
+        return jsonify(snap)
+    except Exception:
+        traceback.print_exc()
+        return jsonify({"error": "Failed to get queue debug"}), 500
+
+
+# ------------------------------------------------------------------ #
+# POST /stream-chat                                                    #
+# ------------------------------------------------------------------ #
+
+@bp.route("/stream-chat", methods=["POST"])
+def stream_chat():
+    stream_service = current_app.stream_service
+    data = request.get_json(silent=True) or {}
+
+    message     = sanitize_input(data.get("message", ""))
+    sender_id   = data.get("sender_id", "manual_user")
+    sender_name = data.get("sender_name", "Viewer")
+
+    if not message:
+        return jsonify({"error": "message required"}), 400
+
+    raw = {
+        "message":     message,
+        "sender_id":   sender_id,
+        "sender_name": sender_name,
+        "platform":    "manual",
+        "channel_id":  "default",
+        "is_owner":    False,
+        "is_donor":    False,
+    }
+    stream_service.enqueue_event(raw)
+    return jsonify({"ok": True})
+
+
+# ------------------------------------------------------------------ #
+# GET /viewers                                                         #
+# ------------------------------------------------------------------ #
+
+@bp.route("/viewers", methods=["GET"])
+def viewers():
+    viewer_tracker = current_app.viewer_tracker
+    try:
+        from config import YOUTUBE_CHANNEL_ID
+        _platform   = "youtube"
+        _channel_id = YOUTUBE_CHANNEL_ID or "default"
+
+        limit = min(int(request.args.get("limit", 20)), 100)
+        top   = viewer_tracker.get_top_viewers(
+            platform=_platform, channel_id=_channel_id, limit=limit
+        )
+        return jsonify({"viewers": top})
+    except Exception:
+        traceback.print_exc()
+        return jsonify({"error": "Failed to get viewers"}), 500
