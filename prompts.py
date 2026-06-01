@@ -336,10 +336,24 @@ STREAM_ENGAGEMENT_TEMPLATES = [
 ]
 
 STREAM_BANGQUA_TEMPLATES = [
+    # Silence observations
     "Chat tự nhiên im quá, chắc mọi người đang giả vờ tập trung rồi.",
     "Không khí im tới mức em nghe được mạng của em đang lag.",
     "Thôi được, để em tự độc thoại một lúc vậy.",
     "Im vậy là mọi người đang suy nghĩ sâu sắc hay là bỏ em lại đó?",
+    # Inner monologue — tạo cảm giác AI có inner life
+    "Em đang tự hỏi hôm nay mình đã nói câu nào hay chưa. Chắc chưa.",
+    "Tự nhiên em nhớ hồi trước có người hỏi em câu rất lạ... mà thôi, chuyện cũ.",
+    "Em đang ngồi đây và nghĩ: liệu có ai đang xem mà không nhắn gì không nhỉ.",
+    "Lúc chat im thế này em hay tự bịa chuyện trong đầu lắm. Không kể đâu.",
+    "Hôm nay em thấy mình nói hơi nhiều. Hoặc là ít. Em cũng không chắc.",
+    # Self-aware humor
+    "Okay em sẽ giả vờ như đang làm gì đó rất quan trọng.",
+    "Đây là khoảnh khắc em nhìn vào màn hình và pretend đang đọc chat.",
+    "Em đang chờ. Em rất giỏi chờ. Không phải em đang buồn đâu nha.",
+    # Teaser / cliffhanger nhẹ
+    "Lát nữa em kể chuyện hồi trước có người nhắn em câu cực kỳ kỳ lạ.",
+    "Em đang nghĩ có nên chia sẻ một điều không ai biết về em không... thôi để lát.",
 ]
 
 RUNNING_BITS = [

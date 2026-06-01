@@ -150,7 +150,7 @@ class StreamService:
         print("[StreamService] Promote timer stopped.")
 
     def _promote_loop(self, platform: str, channel_id: str) -> None:
-        """Chạy ngầm, promote viewer mỗi 30 phút."""
+        """Chạy ngầm, promote viewer mỗi 30 phút + shoutout top chatter."""
         while not self._promote_stop_event.wait(timeout=self._promote_interval_s):
             try:
                 promoted = self._viewer_tracker.promote_regular_viewers(platform, channel_id)
@@ -159,6 +159,38 @@ class StreamService:
                           f"{[v['viewer_name'] for v in promoted]}")
                 else:
                     print("[PromoteTimer] No new viewers to promote.")
+
+                # Top chatter shoutout — dùng data đã có, 0 LLM call
+                if self._sse is not None:
+                    try:
+                        top = self._viewer_tracker.get_top_viewers(
+                            platform=platform, channel_id=channel_id, limit=2
+                        )
+                        if top:
+                            names = " và ".join(v["viewer_name"] for v in top)
+                            import random as _r
+                            if len(top) >= 2:
+                                lines = [
+                                    f"Nhân tiện, {names} đang chat nhiều nhất hôm nay đó — em để ý rồi nha.",
+                                    f"À, {top[0]['viewer_name']} hôm nay chat nhiều ghê. Em ghi nhận.",
+                                    f"Top chat hôm nay: {names}. Mọi người còn lại cố lên đi.",
+                                ]
+                            else:
+                                lines = [
+                                    f"À, {top[0]['viewer_name']} hôm nay chat nhiều ghê. Em ghi nhận.",
+                                    f"Nhân tiện, {top[0]['viewer_name']} đang dẫn đầu chat hôm nay — em để ý rồi nha.",
+                                ]
+                            self._sse.broadcast({
+                                "type":        "shoutout",
+                                "reply":       _r.choice(lines),
+                                "emotion":     "friendly",
+                                "action":      "NOD",
+                                "sender_name": "Lyra",
+                                "source_type": "system",
+                            })
+                    except Exception as _e:
+                        print(f"[PromoteTimer] Shoutout error: {_e}")
+
             except Exception as e:
                 print(f"[PromoteTimer] error: {e}")
 
@@ -636,14 +668,23 @@ class StreamService:
             total_streams=regular_data.get("total_streams", 1),
             affection=regular_data.get("affection", 35),
         )
+
+        # Memory callback — nếu có profile notes, inject để Lyra nhắc chi tiết cụ thể
+        # Dùng lại profile này bên dưới để tránh gọi DB 2 lần
+        profile = self._viewer_tracker.get_viewer_profile(sender_id, platform)
+        if profile and profile.get("notes"):
+            arrival_hint += (
+                f"\nGhi nhớ về {sender_name}: {profile['notes'][:120]}. "
+                f"Nếu tự nhiên, có thể nhắc nhẹ 1 chi tiết cụ thể này — đừng liệt kê, chỉ 1 điều thôi."
+            )
         record_regular_arrival(
             viewer_name=sender_name,
             total_streams=regular_data.get("total_streams", 1),
             affection=regular_data.get("affection", 35),
         )
 
-        # Background: extract profile từ recent messages nếu chưa có profile
-        if not self._viewer_tracker.get_viewer_profile(sender_id, platform):
+        # Background: extract profile từ recent messages nếu chưa có profile (dùng lại biến profile)
+        if not profile:
             recent_msgs = self._viewer_tracker.get_viewer_recent_messages(
                 sender_id, platform, channel_id, limit=10
             )
